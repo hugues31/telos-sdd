@@ -142,10 +142,28 @@ func runInit(cwd string, args []string, stdout, stderr io.Writer) error {
 	if *ci != "" && *ci != "github" {
 		return fmt.Errorf("unsupported CI %q", *ci)
 	}
+	if *agent != "codex" && *agent != "claude" && *agent != "all" {
+		return fmt.Errorf("invalid agent %q", *agent)
+	}
+	if err := requireGitWorktree(cwd); err != nil {
+		return err
+	}
 	if err := initProject(cwd, *agent, *ci == "github"); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Initialized Telos SDD in %s for %s.\nTell your coding agent what you want to build; it will invoke Telos automatically.\n", cwd, *agent)
+	return nil
+}
+
+func requireGitWorktree(root string) error {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return coded("TELOS_GIT_UNAVAILABLE", "Git is required; install Git before running `telos init`")
+	}
+	out, err := exec.Command(git, "-C", root, "rev-parse", "--is-inside-work-tree").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		return coded("TELOS_GIT_REPOSITORY_REQUIRED", "not a Git repository; run `git init` before `telos init`")
+	}
 	return nil
 }
 

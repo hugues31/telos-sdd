@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -46,6 +47,41 @@ func TestAtomicWriteReplacesReadOnlyFile(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o222 != 0 {
 		t.Fatalf("atomic write mode = %o, want read-only", info.Mode().Perm())
+	}
+}
+
+func TestRunInitRequiresGitWorktree(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	err := runInit(root, []string{"--agent", "codex"}, &stdout, &stderr)
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) {
+		t.Fatalf("init error = %v, want structured Git repository error", err)
+	}
+	if commandErr.Code != "TELOS_GIT_REPOSITORY_REQUIRED" {
+		t.Fatalf("init error code = %q, want TELOS_GIT_REPOSITORY_REQUIRED", commandErr.Code)
+	}
+	want := "not a Git repository; run `git init` before `telos init`"
+	if commandErr.Message != want {
+		t.Fatalf("init error message = %q, want %q", commandErr.Message, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".telos")); !os.IsNotExist(err) {
+		t.Fatalf("init created Telos state outside a Git worktree: %v", err)
+	}
+}
+
+func TestRunInitAcceptsGitWorktree(t *testing.T) {
+	root := t.TempDir()
+	cmd := exec.Command("git", "-C", root, "init", "--quiet")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runInit(root, []string{"--agent", "codex"}, &stdout, &stderr); err != nil {
+		t.Fatalf("telos init in Git worktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".telos", "config.toml")); err != nil {
+		t.Fatalf("Telos config not created: %v", err)
 	}
 }
 

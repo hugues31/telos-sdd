@@ -1,0 +1,23 @@
+name: Telos integrity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install Telos
+        run: go install github.com/hugues31/telos-sdd/cmd/telos@latest
+      - name: Verify intent integrity
+        run: telos verify --ci
+

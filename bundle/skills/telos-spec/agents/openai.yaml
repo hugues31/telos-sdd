@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telos Spec"
+  short_description: "Derive robust specifications from a sealed intent"
+  default_prompt: "Use $telos-spec to derive complete behavioral specifications from this sealed intent."

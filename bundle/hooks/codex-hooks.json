@@ -1,0 +1,20 @@
+{
+  "description": "Protect Telos sealed artifacts before local write tools run.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "telos guard",
+            "commandWindows": "telos.exe guard",
+            "timeout": 5,
+            "statusMessage": "Checking Telos sealed artifacts"
+          }
+        ]
+      }
+    ]
+  }
+}
+

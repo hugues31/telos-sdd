@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: go test ./...
+      - run: go vet ./...
+      - run: python scripts/validate-skills.py
+      - name: Build CLI
+        run: go build ./cmd/telos
+      - name: Confirm generated files are clean
+        if: runner.os == 'Linux'
+        run: git diff --exit-code
+

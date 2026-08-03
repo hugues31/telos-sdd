@@ -1,0 +1,22 @@
+name: Verify Telos integrity
+description: Install Telos and verify the sealed intent chain in a repository
+
+inputs:
+  version:
+    description: Go module version to install
+    required: false
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: stable
+    - name: Install Telos
+      shell: bash
+      run: go install github.com/hugues31/telos-sdd/cmd/telos@${{ inputs.version }}
+    - name: Verify Telos
+      shell: bash
+      run: telos verify --ci
+

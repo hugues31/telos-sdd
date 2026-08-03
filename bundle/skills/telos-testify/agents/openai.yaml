@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telos Testify"
+  short_description: "Design adversarial executable Gherkin scenarios"
+  default_prompt: "Use $telos-testify to turn this sealed specification into adversarial executable scenarios."

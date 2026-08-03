@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telos Implement"
+  short_description: "Implement only what sealed artifacts require"
+  default_prompt: "Use $telos-implement to implement the active Telos change without exceeding its sealed scope."

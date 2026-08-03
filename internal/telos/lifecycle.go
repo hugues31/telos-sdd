@@ -1,9 +1,9 @@
 package telos
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -84,7 +84,7 @@ func newIntent(root, title, from string) (string, string, error) {
 		parents = append(parents, from)
 	}
 	meta := ArtifactMeta{ID: id, Kind: "intent", Status: "draft", Revision: 1, Parents: parents}
-	body := fmt.Sprintf("# %s\n\n## Outcome\n\nTODO: Describe the observable outcome, not the implementation.\n\n## Actors\n\nTODO: Name actors and permissions.\n\n## Scope\n\nTODO: State included behavior.\n\n## Non-goals\n\nTODO: State exclusions explicitly.\n\n## Success criteria\n\nTODO: Provide measurable criteria.\n\n## Constraints\n\nTODO: State technical, legal, performance, and compatibility constraints.\n\n## Open questions\n\nTODO: Resolve every material ambiguity; write `None.` only when resolved.\n", title)
+	body := fmt.Sprintf("# %s\n\n## Outcome\n\nTODO: Describe the observable outcome, not the implementation.\n\n## Actors\n\nTODO: Name actors and permissions.\n\n## Scope\n\nTODO: State included behavior.\n\n## Non-goals\n\nTODO: State exclusions explicitly.\n\n## Success criteria\n\n### CRIT-001 — Observable criterion\n\nTODO: Provide one measurable criterion.\n\n## Constraints\n\nTODO: State technical, legal, performance, and compatibility constraints.\n\n## Open questions\n\nTODO: Resolve every material ambiguity; write `None.` only when resolved.\n", title)
 	rel := filepath.ToSlash(filepath.Join(".telos", "intents", strings.ToLower(id)+".md"))
 	if err := atomicWrite(filepath.Join(root, filepath.FromSlash(rel)), renderArtifact(meta, body), 0o644); err != nil {
 		return "", "", err
@@ -111,7 +111,7 @@ func newSpec(root, intent, title string) (string, string, error) {
 		return "", "", err
 	}
 	meta := ArtifactMeta{ID: id, Kind: "spec", Status: "draft", Revision: 1, Intent: intent, Parents: []string{intent}}
-	body := fmt.Sprintf("# %s\n\n## Context\n\nTODO: Define the state and actors this behavior applies to.\n\n## Rules\n\n### RULE-001 — Name\n\nTODO: Write one normative, observable rule.\n\n## Examples\n\nTODO: Include positive, negative, boundary, permission, and failure examples.\n\n## Boundaries\n\nTODO: Define limits, empty values, concurrency, retries, and idempotency where relevant.\n\n## Failure modes\n\nTODO: Define errors, recovery, and prohibited partial effects.\n\n## Observability\n\nTODO: Define externally observable signals and audit evidence.\n", title)
+	body := fmt.Sprintf("# %s\n\n## Context\n\nTODO: Define the state and actors this behavior applies to.\n\n## Rules\n\n### RULE-001 — Name\n\nTraces: CRIT-001\n\nTODO: Write one normative, observable rule.\n\n## Examples\n\nTODO: Include positive, negative, boundary, permission, and failure examples.\n\n## Boundaries\n\nTODO: Define limits, empty values, concurrency, retries, and idempotency where relevant.\n\n## Non-effects\n\nTODO: Define what must not change or happen.\n\n## Failure modes\n\nTODO: Define errors, recovery, and prohibited partial effects.\n\n## Observability\n\nTODO: Define externally observable signals and audit evidence.\n", title)
 	rel := filepath.ToSlash(filepath.Join(".telos", "specs", strings.ToLower(id)+".md"))
 	if err := atomicWrite(filepath.Join(root, filepath.FromSlash(rel)), renderArtifact(meta, body), 0o644); err != nil {
 		return "", "", err
@@ -120,17 +120,6 @@ func newSpec(root, intent, title string) (string, string, error) {
 		return "", "", err
 	}
 	return id, rel, nil
-}
-
-func validateArtifact(root, kind, id string) error {
-	_, meta, body, err := findArtifact(root, kind, id)
-	if err != nil {
-		return err
-	}
-	if meta.Kind != kind {
-		return fmt.Errorf("artifact type is %q, expected %q", meta.Kind, kind)
-	}
-	return validateBody(kind, body)
 }
 
 func sealArtifact(root, kind, id string) error {
@@ -161,98 +150,15 @@ func sealArtifact(root, kind, id string) error {
 	if err != nil {
 		return err
 	}
+	if err := storeBlob(root, path, h); err != nil {
+		return err
+	}
 	rel := relative(root, path)
 	lock, err := lockFile(root, LockedFile{ID: meta.ID, Kind: meta.Kind, Path: rel, Hash: h, Parents: meta.Parents})
 	if err != nil {
 		return err
 	}
 	return appendEvent(root, kind+".sealed", id, map[string]any{"path": rel, "hash": h}, lock.RootHash)
-}
-
-func testify(root, specID, planPath string) (string, error) {
-	_, spec, _, err := findArtifact(root, "spec", specID)
-	if err != nil {
-		return "", err
-	}
-	if spec.Status != "sealed" {
-		return "", errors.New("spec must be sealed before generating executable scenarios")
-	}
-	if planPath == "" {
-		planPath = filepath.Join(root, ".telos", "test-plans", strings.ToLower(specID)+".json")
-	}
-	if !filepath.IsAbs(planPath) {
-		planPath = filepath.Join(root, planPath)
-	}
-	planRel, err := filepath.Rel(root, planPath)
-	if err != nil || planRel == ".." || strings.HasPrefix(planRel, ".."+string(filepath.Separator)) {
-		return "", errors.New("test plan must be inside the Telos project")
-	}
-	var plan TestPlan
-	if err := readJSON(planPath, &plan); err != nil {
-		if os.IsNotExist(err) {
-			template := TestPlan{
-				Version: configVersion, Spec: specID, Feature: slug(specID),
-				Scenarios: []Scenario{{ID: "SCN-001", Rule: "RULE-001", Name: "Replace with observable behavior", Tags: []string{"positive"}, Given: []string{"TODO"}, When: []string{"TODO"}, Then: []string{"TODO"}}},
-			}
-			if werr := writeJSON(planPath, template); werr != nil {
-				return "", werr
-			}
-			return "", fmt.Errorf("test plan template created at %s; replace every TODO and rerun", relative(root, planPath))
-		}
-		return "", err
-	}
-	if plan.Spec != specID {
-		return "", fmt.Errorf("test plan targets %s, expected %s", plan.Spec, specID)
-	}
-	if len(plan.Scenarios) == 0 {
-		return "", errors.New("test plan has no scenarios")
-	}
-	for _, s := range plan.Scenarios {
-		if s.ID == "" || s.Rule == "" || s.Name == "" || len(s.Given) == 0 || len(s.When) == 0 || len(s.Then) == 0 {
-			return "", fmt.Errorf("incomplete scenario %q", s.ID)
-		}
-		b, _ := json.Marshal(s)
-		if strings.Contains(strings.ToLower(string(b)), "todo") {
-			return "", fmt.Errorf("scenario %s contains TODO", s.ID)
-		}
-	}
-	featurePath := filepath.Join(root, "features", slug(plan.Feature)+".feature")
-	existingLock, err := loadLock(root)
-	if err != nil {
-		return "", err
-	}
-	featureRel := relative(root, featurePath)
-	for _, artifact := range existingLock.Artifacts {
-		if artifact.Path == featureRel && artifact.ID != specID+":feature" {
-			return "", fmt.Errorf("feature path %s is already sealed by %s", featureRel, artifact.ID)
-		}
-	}
-	if err := atomicWrite(featurePath, []byte(renderFeature(plan)), 0o444); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(planPath, 0o444); err != nil {
-		return "", err
-	}
-	planHash, err := fileHash(planPath)
-	if err != nil {
-		return "", err
-	}
-	featureHash, err := fileHash(featurePath)
-	if err != nil {
-		return "", err
-	}
-	lock, err := lockFile(root, LockedFile{ID: specID + ":plan", Kind: "test-plan", Path: relative(root, planPath), Hash: planHash, Parents: []string{specID}})
-	if err != nil {
-		return "", err
-	}
-	lock, err = lockFile(root, LockedFile{ID: specID + ":feature", Kind: "feature", Path: relative(root, featurePath), Hash: featureHash, Parents: []string{specID, specID + ":plan"}})
-	if err != nil {
-		return "", err
-	}
-	if err := appendEvent(root, "tests.generated", specID, map[string]any{"plan": relative(root, planPath), "feature": relative(root, featurePath)}, lock.RootHash); err != nil {
-		return "", err
-	}
-	return relative(root, featurePath), nil
 }
 
 func renderFeature(plan TestPlan) string {
@@ -312,7 +218,7 @@ func beginChange(root, intent string, specs []string) (string, error) {
 			return "", fmt.Errorf("spec %s is not sealed under intent %s", id, intent)
 		}
 		if !artifactIDInLock(lock, id+":plan") || !artifactIDInLock(lock, id+":feature") {
-			return "", fmt.Errorf("spec %s has no sealed test plan and generated feature; run `telos testify --spec %s`", id, id)
+			return "", fmt.Errorf("spec %s is not part of an atomically sealed executable contract", id)
 		}
 	}
 	id, err := newID("chg", time.Now())
@@ -323,7 +229,14 @@ func beginChange(root, intent string, specs []string) (string, error) {
 	if out, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output(); err == nil {
 		base = strings.TrimSpace(string(out))
 	}
-	change := Change{Version: configVersion, ID: id, Intent: intent, Specs: specs, Base: base, Status: "active", Started: time.Now().UTC().Format(time.RFC3339)}
+	repository, err := loadRepositoryLock(root)
+	if os.IsNotExist(err) {
+		repository, err = baselineRepository(root, "repository.baselined", "project")
+	}
+	if err != nil {
+		return "", err
+	}
+	change := Change{ID: id, Intent: intent, Specs: specs, Base: base, Status: "active", Started: time.Now().UTC().Format(time.RFC3339), SourceBaseRoot: repository.RootHash, SourceCurrentRoot: repository.RootHash}
 	path := filepath.Join(root, ".telos", "changes", strings.ToLower(id)+".json")
 	if err := writeJSON(path, change); err != nil {
 		return "", err
@@ -332,6 +245,35 @@ func beginChange(root, intent string, specs []string) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+func beginFlowChange(root, flowID string) (Flow, Change, error) {
+	flow, err := loadFlow(root, flowID)
+	if err != nil {
+		return flow, Change{}, err
+	}
+	if flow.Phase != "ready_to_implement" || flow.Intent == "" || len(flow.Specs) == 0 {
+		return flow, Change{}, coded("TELOS_PHASE_INVALID", "flow contract is not sealed and ready to implement")
+	}
+	id, err := beginChange(root, flow.Intent, flow.Specs)
+	if err != nil {
+		return flow, Change{}, err
+	}
+	path := filepath.Join(root, ".telos", "changes", strings.ToLower(id)+".json")
+	var change Change
+	if err := readJSON(path, &change); err != nil {
+		return flow, change, err
+	}
+	change.Flow = flow.ID
+	if err := writeJSON(path, change); err != nil {
+		return flow, change, err
+	}
+	flow.Change = id
+	flow.Phase = "implementing"
+	if err := saveFlow(root, flow); err != nil {
+		return flow, change, err
+	}
+	return flow, change, nil
 }
 
 func buildContext(root, changeID string) (string, error) {
@@ -381,10 +323,21 @@ func buildContext(root, changeID string) (string, error) {
 	if err := atomicWrite(out, []byte(b.String()), 0o644); err != nil {
 		return "", err
 	}
+	h, err := fileHash(out)
+	if err != nil {
+		return "", err
+	}
+	if err := storeBlob(root, out, h); err != nil {
+		return "", err
+	}
+	change.ContextHash = h
+	if err := writeJSON(path, change); err != nil {
+		return "", err
+	}
 	return relative(root, out), nil
 }
 
-func runVerificationCommands(root string, commands []string) error {
+func runVerificationCommands(root string, commands []string, stdout, stderr io.Writer) error {
 	for _, command := range commands {
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
@@ -393,7 +346,7 @@ func runVerificationCommands(root string, commands []string) error {
 			cmd = exec.Command("sh", "-c", command)
 		}
 		cmd.Dir = root
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		cmd.Stdout, cmd.Stderr = stdout, stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("verification command failed (%s): %w", command, err)
 		}

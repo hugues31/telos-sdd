@@ -19,4 +19,4 @@ runs:
       run: go install github.com/hugues31/telos-sdd/cmd/telos@${{ inputs.version }}
     - name: Verify Telos
       shell: bash
-      run: telos verify --ci
+      run: telos verify --check-only --json

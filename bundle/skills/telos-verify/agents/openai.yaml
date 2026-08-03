@@ -1,4 +1,0 @@
-interface:
-  display_name: "Telos Verify"
-  short_description: "Audit traceability, hashes, tests, and scope"
-  default_prompt: "Use $telos-verify to audit the active change and report evidence of integrity."

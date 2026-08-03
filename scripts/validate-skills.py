@@ -7,14 +7,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1] / "bundle" / "skills"
-EXPECTED = {
-    "telos-brainstorm",
-    "telos-intent",
-    "telos-spec",
-    "telos-testify",
-    "telos-implement",
-    "telos-verify",
-}
+EXPECTED = {"telos"}
 
 
 def validate(skill_dir: Path) -> list[str]:
@@ -48,13 +41,13 @@ def validate(skill_dir: Path) -> list[str]:
 
 
 def main() -> int:
-    found = {path.name for path in ROOT.iterdir() if path.is_dir()}
+    skill_dirs = [path for path in ROOT.iterdir() if (path / "SKILL.md").is_file()]
+    found = {path.name for path in skill_dirs}
     errors = []
     if found != EXPECTED:
         errors.append(f"skill set mismatch: expected {sorted(EXPECTED)}, found {sorted(found)}")
-    for path in sorted(ROOT.iterdir()):
-        if path.is_dir():
-            errors.extend(validate(path))
+    for path in sorted(skill_dirs):
+        errors.extend(validate(path))
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1

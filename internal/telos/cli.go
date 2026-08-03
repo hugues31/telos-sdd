@@ -1,6 +1,7 @@
 package telos
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,41 +10,73 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
-const usage = `Telos SDD — intent integrity without a hosted runtime
+const usage = `Telos SDD — agent-first executable intent integrity
 
 Usage:
-  telos init [--agent codex|claude|all] [--ci github]
-  telos doctor
-  telos status
-  telos brainstorm start [--mode choose|recommend|random|progressive] [--seed n]
-  telos intent new [--title text] [--from brainstorm-id]
-  telos intent validate <id>
-  telos intent seal <id>
-  telos spec new --intent <id> [--title text]
-  telos spec validate <id>
-  telos spec seal <id>
-  telos testify --spec <id> [--plan path]
-  telos change begin --intent <id> --spec <id> [--spec <id>...]
-  telos context --change <id>
-  telos verify [--ci]
+  telos init [--agent codex|claude|all] [--ci github] [--json]
+  telos doctor [--json]
+  telos inspect [--json]
+  telos flow start [--request text] [--brainstorm none|choose|recommend|random|progressive] [--json]
+  telos artifact put --id <id> [--json] < body.md
+  telos artifact revise --id <id> [--reason text] [--json]
+  telos intent new --flow <id> [--title text] [--json]
+  telos intent review --flow <id> [--json]
+  telos intent seal --flow <id> --review <digest> [--json]
+  telos spec new --flow <id> [--title text] [--json]
+  telos test-plan put --spec <id> [--json] < plan.json
+  telos contract validate|review --flow <id> [--json]
+  telos contract seal --flow <id> --review <digest> [--json]
+  telos change begin --flow <id> [--json]
+  telos change apply --flow <id> --rule <id> --scenario <id> [--json] < patch.diff
+  telos change abort --flow <id> --reason <text> [--json]
+  telos verify [--flow <id>] --check-only [--json]
+  telos change complete --flow <id> [--json] < evidence.txt
+  telos repair [--restore] [--json]
   telos guard
-  telos version`
+  telos version [--json]`
 
 func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		fmt.Fprintln(stdout, usage)
+	jsonMode, args := extractJSON(args)
+	label := commandLabel(args)
+	var captured bytes.Buffer
+	commandStdout := stdout
+	if jsonMode {
+		commandStdout = &captured
+	}
+	finish := func(execution commandExecution, err error) error {
+		if err != nil {
+			if jsonMode {
+				return emitJSONError(stdout, label, err)
+			}
+			return err
+		}
+		if execution.Command == "" {
+			execution.Command = label
+		}
+		if execution.Result == nil {
+			execution.Result = map[string]any{"output": strings.TrimSpace(captured.String())}
+		}
+		if jsonMode {
+			return emitJSON(stdout, execution)
+		}
+		if execution.Human != "" {
+			fmt.Fprintln(stdout, execution.Human)
+		}
 		return nil
+	}
+
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintln(commandStdout, usage)
+		return finish(commandExecution{}, nil)
 	}
 	if args[0] == "version" {
+		if jsonMode {
+			return finish(commandExecution{Command: "version", Result: map[string]any{"version": version}}, nil)
+		}
 		fmt.Fprintln(stdout, version)
-		return nil
-	}
-	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, usage)
 		return nil
 	}
 	if args[0] == "guard" {
@@ -51,37 +84,43 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return err
+		return finish(commandExecution{}, err)
 	}
 	if args[0] == "init" {
-		return runInit(cwd, args[1:], stdout, stderr)
+		err := runInit(cwd, args[1:], commandStdout, stderr)
+		return finish(commandExecution{}, err)
 	}
 	root, err := findRoot(cwd)
 	if err != nil {
-		return err
+		return finish(commandExecution{}, err)
 	}
-	switch args[0] {
-	case "doctor":
-		return runDoctor(root, stdout)
-	case "status":
-		return runStatus(root, stdout)
-	case "brainstorm":
-		return runBrainstorm(root, args[1:], stdout, stderr)
-	case "intent":
-		return runArtifactCommand(root, "intent", args[1:], stdout, stderr)
-	case "spec":
-		return runArtifactCommand(root, "spec", args[1:], stdout, stderr)
-	case "testify":
-		return runTestify(root, args[1:], stdout, stderr)
-	case "change":
-		return runChange(root, args[1:], stdout, stderr)
-	case "context":
-		return runContext(root, args[1:], stdout, stderr)
-	case "verify":
-		return runVerify(root, args[1:], stdout, stderr)
-	default:
-		return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
+	if args[0] != "repair" {
+		if err := requireRepositoryClean(root); err != nil {
+			return finish(commandExecution{}, err)
+		}
+		if flow, flowErr := activeFlow(root); flowErr == nil {
+			if err := auditFlowDrafts(root, flow); err != nil {
+				return finish(commandExecution{}, err)
+			}
+			if flow.Change != "" {
+				change, err := resolveChange(root, flow.ID, "")
+				if err != nil {
+					return finish(commandExecution{}, err)
+				}
+				if err := auditChangeTransactions(root, change); err != nil {
+					return finish(commandExecution{}, err)
+				}
+			}
+		} else if !errors.Is(flowErr, os.ErrNotExist) {
+			return finish(commandExecution{}, flowErr)
+		}
 	}
+	if args[0] == "doctor" {
+		err := runDoctor(root, commandStdout)
+		return finish(commandExecution{}, err)
+	}
+	execution, err := runCommand(root, args, stdin, commandStdout, stderr)
+	return finish(execution, err)
 }
 
 func flags(name string, stderr io.Writer) *flag.FlagSet {
@@ -106,7 +145,7 @@ func runInit(cwd string, args []string, stdout, stderr io.Writer) error {
 	if err := initProject(cwd, *agent, *ci == "github"); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "Initialized Telos SDD in %s for %s.\nNext: telos brainstorm start --mode recommend\n", cwd, *agent)
+	fmt.Fprintf(stdout, "Initialized Telos SDD in %s for %s.\nTell your coding agent what you want to build; it will invoke Telos automatically.\n", cwd, *agent)
 	return nil
 }
 
@@ -116,12 +155,10 @@ func runDoctor(root string, stdout io.Writer) error {
 		Err  error
 	}{
 		{"Telos config", fileExists(filepath.Join(root, ".telos", "config.toml"))},
+		{"Repository lock", fileExists(filepath.Join(root, filepath.FromSlash(repositoryLockPath)))},
 		{"Git", commandExists("git")},
 	}
 	cfg, cfgErr := readConfig(root)
-	if cfgErr == nil && cfg.Version != configVersion {
-		cfgErr = fmt.Errorf("unsupported version %d (CLI supports %d)", cfg.Version, configVersion)
-	}
 	checks = append(checks, struct {
 		Name string
 		Err  error
@@ -132,21 +169,21 @@ func runDoctor(root string, stdout io.Writer) error {
 			checks = append(checks, struct {
 				Name string
 				Err  error
-			}{"Codex Skills", fileExists(filepath.Join(root, ".agents", "skills", "telos-intent", "SKILL.md"))})
+			}{"Codex Skill", fileExists(filepath.Join(root, ".agents", "skills", "telos", "SKILL.md"))})
 		case "claude":
 			checks = append(checks, struct {
 				Name string
 				Err  error
-			}{"Claude Skills", fileExists(filepath.Join(root, ".claude", "skills", "telos-intent", "SKILL.md"))})
+			}{"Claude Skill", fileExists(filepath.Join(root, ".claude", "skills", "telos", "SKILL.md"))})
 		}
 	}
 	failed := false
-	for _, c := range checks {
+	for _, check := range checks {
 		status := "ok"
-		if c.Err != nil {
-			status, failed = c.Err.Error(), true
+		if check.Err != nil {
+			status, failed = check.Err.Error(), true
 		}
-		fmt.Fprintf(stdout, "%-18s %s\n", c.Name+":", status)
+		fmt.Fprintf(stdout, "%-18s %s\n", check.Name+":", status)
 	}
 	if failed {
 		return errors.New("doctor found configuration errors")
@@ -154,217 +191,18 @@ func runDoctor(root string, stdout io.Writer) error {
 	return nil
 }
 
-func runStatus(root string, stdout io.Writer) error {
-	results, err := audit(root)
-	if err != nil {
-		return err
-	}
-	lock, err := loadLock(root)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "Root hash: %s\n", empty(lock.RootHash, "unsealed"))
-	if len(results) == 0 {
-		fmt.Fprintln(stdout, "No sealed artifacts yet.")
-		return nil
-	}
-	bad := false
-	for _, r := range results {
-		fmt.Fprintf(stdout, "%-10s %s", r.Status, r.Path)
-		if r.Detail != "" {
-			fmt.Fprintf(stdout, " — %s", r.Detail)
-		}
-		fmt.Fprintln(stdout)
-		if r.Status != "ok" {
-			bad = true
-		}
-	}
-	if bad {
-		return errors.New("project has stale or tampered artifacts")
-	}
-	return nil
-}
-
-func runBrainstorm(root string, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "start" {
-		return errors.New("usage: telos brainstorm start [--mode ...]")
-	}
-	f := flags("brainstorm start", stderr)
-	mode := f.String("mode", "recommend", "engine selection mode")
-	seed := f.Int64("seed", 0, "deterministic random seed")
-	if err := f.Parse(args[1:]); err != nil {
-		return err
-	}
-	id, path, err := startBrainstorm(root, *mode, *seed)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "%s\t%s\n", id, path)
-	return nil
-}
-
-func runArtifactCommand(root, kind string, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: telos %s new|validate|seal", kind)
-	}
-	switch args[0] {
-	case "new":
-		f := flags(kind+" new", stderr)
-		title := f.String("title", "", "artifact title")
-		if kind == "intent" {
-			from := f.String("from", "", "brainstorm id")
-			if err := f.Parse(args[1:]); err != nil {
-				return err
-			}
-			id, path, err := newIntent(root, *title, *from)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(stdout, "%s\t%s\n", id, path)
-			return nil
-		}
-		intent := f.String("intent", "", "sealed intent id")
-		if err := f.Parse(args[1:]); err != nil {
-			return err
-		}
-		if *intent == "" {
-			return errors.New("--intent is required")
-		}
-		id, path, err := newSpec(root, *intent, *title)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "%s\t%s\n", id, path)
-		return nil
-	case "validate", "seal":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: telos %s %s <id>", kind, args[0])
-		}
-		var err error
-		if args[0] == "validate" {
-			err = validateArtifact(root, kind, args[1])
-		} else {
-			err = sealArtifact(root, kind, args[1])
-		}
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "%s %s: ok\n", kind, args[0])
-		return nil
-	default:
-		return fmt.Errorf("unknown %s command %q", kind, args[0])
-	}
-}
-
-func runTestify(root string, args []string, stdout, stderr io.Writer) error {
-	f := flags("testify", stderr)
-	spec := f.String("spec", "", "sealed spec id")
-	plan := f.String("plan", "", "test plan path")
-	if err := f.Parse(args); err != nil {
-		return err
-	}
-	if *spec == "" {
-		return errors.New("--spec is required")
-	}
-	path, err := testify(root, *spec, *plan)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(stdout, path)
-	return nil
-}
-
-type repeated []string
-
-func (r *repeated) String() string     { return strings.Join(*r, ",") }
-func (r *repeated) Set(v string) error { *r = append(*r, v); return nil }
-
-func runChange(root string, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "begin" {
-		return errors.New("usage: telos change begin --intent <id> --spec <id>")
-	}
-	f := flags("change begin", stderr)
-	intent := f.String("intent", "", "sealed intent id")
-	var specs repeated
-	f.Var(&specs, "spec", "sealed spec id (repeatable)")
-	if err := f.Parse(args[1:]); err != nil {
-		return err
-	}
-	if *intent == "" {
-		return errors.New("--intent is required")
-	}
-	id, err := beginChange(root, *intent, specs)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(stdout, id)
-	return nil
-}
-
-func runContext(root string, args []string, stdout, stderr io.Writer) error {
-	f := flags("context", stderr)
-	change := f.String("change", "", "change id")
-	if err := f.Parse(args); err != nil {
-		return err
-	}
-	if *change == "" {
-		return errors.New("--change is required")
-	}
-	path, err := buildContext(root, *change)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(stdout, path)
-	return nil
-}
-
-func runVerify(root string, args []string, stdout, stderr io.Writer) error {
-	f := flags("verify", stderr)
-	ci := f.Bool("ci", false, "CI output mode")
-	if err := f.Parse(args); err != nil {
-		return err
-	}
-	_ = ci
-	results, err := audit(root)
-	if err != nil {
-		return err
-	}
-	for _, r := range results {
-		if r.Status != "ok" {
-			return fmt.Errorf("%s: %s (%s)", r.Status, r.Path, r.Detail)
-		}
-	}
-	cfg, err := readConfig(root)
-	if err != nil {
-		return err
-	}
-	if err := runVerificationCommands(root, cfg.VerificationCommands); err != nil {
-		return err
-	}
-	lock, err := loadLock(root)
-	if err != nil {
-		return err
-	}
-	if err := appendEvent(root, "project.verified", "project", map[string]any{"commands": cfg.VerificationCommands}, lock.RootHash); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "verified %d sealed artifacts; root %s\n", len(lock.Artifacts), empty(lock.RootHash, "unsealed"))
-	return nil
-}
-
 func fileExists(path string) error    { _, err := os.Stat(path); return err }
 func commandExists(name string) error { _, err := exec.LookPath(name); return err }
-func empty(s, fallback string) string {
-	if s == "" {
+func empty(value, fallback string) string {
+	if value == "" {
 		return fallback
 	}
-	return s
+	return value
 }
 
 func runGuard(stdin io.Reader, stdout io.Writer) error {
 	var input map[string]any
 	if err := json.NewDecoder(stdin).Decode(&input); err != nil {
-		// Running guard manually should be harmless.
 		return nil
 	}
 	cwd, _ := input["cwd"].(string)
@@ -375,21 +213,71 @@ func runGuard(stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return nil
 	}
+	toolName, _ := input["tool_name"].(string)
+	raw, _ := json.Marshal(input["tool_input"])
+	probe := filepath.ToSlash(string(raw))
+	if strings.EqualFold(toolName, "Bash") || strings.EqualFold(toolName, "Shell") {
+		var toolInput map[string]any
+		_ = json.Unmarshal(raw, &toolInput)
+		command, _ := toolInput["command"].(string)
+		if isTelosBrokerCommand(command) {
+			return nil
+		}
+		return denyGuard(stdout, "Telos strict mode permits shell execution only through the Telos CLI broker.")
+	}
+	if strings.EqualFold(toolName, "Edit") || strings.EqualFold(toolName, "Write") || strings.EqualFold(toolName, "apply_patch") {
+		return denyGuard(stdout, "Telos strict mode denies direct repository writes; use the Telos CLI broker.")
+	}
 	lock, err := loadLock(root)
 	if err != nil {
 		return err
 	}
-	raw, _ := json.Marshal(input["tool_input"])
-	probe := filepath.ToSlash(string(raw))
-	for _, f := range lock.Artifacts {
-		path := filepath.ToSlash(f.Path)
-		abs := filepath.ToSlash(filepath.Join(root, filepath.FromSlash(f.Path)))
+	for _, file := range lock.Artifacts {
+		path := filepath.ToSlash(file.Path)
+		abs := filepath.ToSlash(filepath.Join(root, filepath.FromSlash(file.Path)))
 		if strings.Contains(probe, path) || strings.Contains(probe, abs) {
-			response := map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "Telos sealed artifact is immutable: " + f.Path + ". Create a new revision through Telos."}}
-			return json.NewEncoder(stdout).Encode(response)
+			return denyGuard(stdout, "Telos sealed artifact is immutable: "+file.Path)
 		}
 	}
 	return nil
 }
 
-func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
+func isTelosBrokerCommand(command string) bool {
+	lines := strings.Split(strings.ReplaceAll(command, "\r\n", "\n"), "\n")
+	firstLine := strings.TrimSpace(lines[0])
+	fields := strings.Fields(firstLine)
+	if len(fields) == 0 {
+		return false
+	}
+	binary := filepath.Base(strings.ReplaceAll(strings.Trim(fields[0], `"'`), `\`, "/"))
+	if binary != "telos" && binary != "telos.exe" {
+		return false
+	}
+	heredoc := strings.Index(firstLine, "<<")
+	probe := firstLine
+	if heredoc >= 0 {
+		delimiterText := strings.TrimSpace(firstLine[heredoc+2:])
+		delimiterFields := strings.Fields(delimiterText)
+		if len(delimiterFields) != 1 || len(lines) < 3 {
+			return false
+		}
+		delimiter := strings.Trim(delimiterFields[0], `"'`)
+		if delimiter == "" || strings.TrimSpace(lines[len(lines)-1]) != delimiter {
+			return false
+		}
+		probe = firstLine[:heredoc]
+	} else if len(lines) != 1 {
+		return false
+	}
+	for _, operator := range []string{";", "&&", "||", "|", ">", "<", "`", "$"} {
+		if strings.Contains(probe, operator) {
+			return false
+		}
+	}
+	return true
+}
+
+func denyGuard(stdout io.Writer, reason string) error {
+	response := map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}
+	return json.NewEncoder(stdout).Encode(response)
+}

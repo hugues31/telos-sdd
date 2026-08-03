@@ -3,8 +3,10 @@ package telos
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -21,7 +23,7 @@ func TestNormalizeAndRootHashAreDeterministic(t *testing.T) {
 }
 
 func TestFeatureRenderingIsDeterministic(t *testing.T) {
-	plan := TestPlan{Version: 1, Spec: "SPC-1", Feature: "Account lockout", Scenarios: []Scenario{{
+	plan := TestPlan{Spec: "SPC-1", Feature: "Account lockout", Scenarios: []Scenario{{
 		ID: "SCN-002", Rule: "RULE-003", Name: "Reject a locked account", Tags: []string{"negative", "authorization"},
 		Given: []string{"an account is locked"}, When: []string{"the owner authenticates"}, Then: []string{"access is denied", "an audit event is emitted"},
 	}}}
@@ -76,9 +78,14 @@ func TestInitPreservesUserFilesAndRefreshesIdempotently(t *testing.T) {
 		t.Fatalf("Claude settings were not merged idempotently:\n%s", claude)
 	}
 	for _, path := range []string{
-		".agents/skills/telos-intent/SKILL.md",
-		".claude/skills/telos-intent/SKILL.md",
+		".agents/skills/telos/SKILL.md",
+		".claude/skills/telos/SKILL.md",
+		".codex/agents/telos-product.toml",
+		".codex/agents/telos-spec-architect.toml",
+		".codex/agents/telos-test-architect.toml",
+		".codex/agents/telos-implementer.toml",
 		".codex/agents/telos-verifier.toml",
+		".claude/agents/telos-product.md",
 		".claude/agents/telos-verifier.md",
 		".github/workflows/telos-verify.yml",
 	} {
@@ -88,16 +95,16 @@ func TestInitPreservesUserFilesAndRefreshesIdempotently(t *testing.T) {
 	}
 }
 
-func TestLifecycleAndTamperInvalidation(t *testing.T) {
+func TestFlowContractAndTamperInvalidation(t *testing.T) {
 	root := t.TempDir()
 	if err := initProject(root, "all", false); err != nil {
 		t.Fatal(err)
 	}
-	intentID, _, err := newIntent(root, "Lock compromised accounts", "")
+	flow, err := startFlow(root, "Lock compromised accounts", "none")
 	if err != nil {
 		t.Fatal(err)
 	}
-	intentPath, intentMeta, _, err := findArtifact(root, "intent", intentID)
+	intentPath, _, _, err := findArtifact(root, "intent", flow.Intent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +128,8 @@ Credential recovery is excluded.
 
 ## Success criteria
 
+### CRIT-001 — Locked authentication
+
 Every authentication attempt after lock is denied and audited.
 
 ## Constraints
@@ -131,17 +140,23 @@ Existing sessions are outside this change.
 
 None.
 `
-	if err := atomicWrite(intentPath, renderArtifact(intentMeta, intentBody), 0o644); err != nil {
+	if _, err := putArtifact(root, flow.Intent, intentBody); err != nil {
 		t.Fatal(err)
 	}
-	if err := sealArtifact(root, "intent", intentID); err != nil {
-		t.Fatal(err)
-	}
-	specID, _, err := newSpec(root, intentID, "Locked authentication")
+	flow, digest, _, err := reviewIntent(root, flow.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	specPath, specMeta, _, err := findArtifact(root, "spec", specID)
+	flow, err = sealReviewedIntent(root, flow.ID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, _, err = attachSpec(root, flow.ID, "Locked authentication")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specID := flow.Specs[0]
+	specPath, _, _, err := findArtifact(root, "spec", specID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +170,8 @@ An account has an authoritative locked state.
 
 ### RULE-001 — Deny authentication
 
+Traces: CRIT-001
+
 Every authentication attempt for a locked account is denied without creating a session.
 
 ## Examples
@@ -165,6 +182,10 @@ A correct password remains denied after lock.
 
 Repeated attempts remain denied and idempotent.
 
+## Non-effects
+
+Existing sessions remain unchanged.
+
 ## Failure modes
 
 An audit failure must not allow authentication.
@@ -173,32 +194,37 @@ An audit failure must not allow authentication.
 
 Each denial emits one account-lock audit event.
 `
-	if err := atomicWrite(specPath, renderArtifact(specMeta, specBody), 0o644); err != nil {
+	if _, err := putArtifact(root, specID, specBody); err != nil {
 		t.Fatal(err)
 	}
-	if err := sealArtifact(root, "spec", specID); err != nil {
-		t.Fatal(err)
-	}
-	planPath := filepath.Join(root, ".telos", "test-plans", strings.ToLower(specID)+".json")
-	plan := TestPlan{Version: 1, Spec: specID, Feature: slug(specID), Scenarios: []Scenario{{
-		ID: "SCN-001", Rule: "RULE-001", Name: "Deny a correct password after lock", Tags: []string{"negative"},
+	plan := TestPlan{Spec: specID, Feature: slug(specID), Scenarios: []Scenario{{
+		ID: "SCN-001", Rule: "RULE-001", Name: "Deny a correct password after lock", Tags: append([]string(nil), coverageCategories...),
 		Given: []string{"an account is locked"}, When: []string{"the correct password is submitted"}, Then: []string{"authentication is denied", "no session is created"},
 	}}}
-	if err := writeJSON(planPath, plan); err != nil {
+	for _, category := range coverageCategories {
+		plan.Coverage = append(plan.Coverage, Coverage{Rule: "RULE-001", Category: category, Status: "covered"})
+	}
+	planData, _ := json.Marshal(plan)
+	if _, err := putTestPlan(root, specID, planData); err != nil {
 		t.Fatal(err)
 	}
-	featurePath, err := testify(root, specID, planPath)
+	flow, contractDigest, _, err := reviewContract(root, flow.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	flow, err = sealReviewedContract(root, flow.ID, contractDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featurePath := "features/" + slug(specID) + ".feature"
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(featurePath))); err != nil {
 		t.Fatal(err)
 	}
-	changeID, err := beginChange(root, intentID, []string{specID})
+	flow, change, err := beginFlowChange(root, flow.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildContext(root, changeID); err != nil {
+	if _, err := buildContext(root, change.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := requireCleanAudit(root); err != nil {
@@ -218,7 +244,7 @@ Each denial emits one account-lock audit event.
 	for _, result := range results {
 		status[result.Path] = result.Status
 	}
-	if status[relative(root, intentPath)] != "tampered" || status[relative(root, specPath)] != "stale" || status[featurePath] != "stale" {
+	if status[relative(root, intentPath)] != "tampered" || status[relative(root, specPath)] != "stale" || status[featurePath] != "stale" || flow.Phase != "implementing" {
 		t.Fatalf("unexpected invalidation statuses: %#v", status)
 	}
 }
@@ -244,6 +270,55 @@ func TestGuardDeniesLockedArtifactWrite(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"permissionDecision":"deny"`) {
 		t.Fatalf("guard did not deny write: %s", out.String())
+	}
+}
+
+func TestGuardRequiresCLIBrokerForDirectWrites(t *testing.T) {
+	root := t.TempDir()
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	input := map[string]any{"cwd": root, "tool_name": "Write", "tool_input": map[string]any{"file_path": filepath.Join(root, "source.go"), "content": "package source"}}
+	b, _ := json.Marshal(input)
+	var out bytes.Buffer
+	if err := runGuard(bytes.NewReader(b), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"permissionDecision":"deny"`) {
+		t.Fatalf("guard accepted a direct source write: %s", out.String())
+	}
+	allowed := map[string]any{"cwd": root, "tool_name": "Bash", "tool_input": map[string]any{"command": "telos change apply --flow FLW-X"}}
+	b, _ = json.Marshal(allowed)
+	out.Reset()
+	if err := runGuard(bytes.NewReader(b), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("guard denied the CLI broker: %s", out.String())
+	}
+	for _, command := range []string{
+		"printf tampered > source.go",
+		"telos inspect --json; rm source.go",
+		"/usr/local/bin/telos inspect --json && cp other source.go",
+	} {
+		denied := map[string]any{"cwd": root, "tool_name": "Bash", "tool_input": map[string]any{"command": command}}
+		b, _ = json.Marshal(denied)
+		out.Reset()
+		if err := runGuard(bytes.NewReader(b), &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), `"permissionDecision":"deny"`) {
+			t.Fatalf("guard accepted non-broker shell command %q: %s", command, out.String())
+		}
+	}
+	heredoc := map[string]any{"cwd": root, "tool_name": "Bash", "tool_input": map[string]any{"command": "telos artifact put --id INT-X --json <<'TELOS_BODY'\n# Intent\nTELOS_BODY"}}
+	b, _ = json.Marshal(heredoc)
+	out.Reset()
+	if err := runGuard(bytes.NewReader(b), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("guard denied CLI stdin streaming: %s", out.String())
 	}
 }
 
@@ -286,3 +361,347 @@ func TestLedgerDetectsRewrittenArtifactAndLock(t *testing.T) {
 		t.Fatalf("rewritten lock was not detected: %#v", results)
 	}
 }
+
+func TestIntentReviewDigestBecomesStaleAfterCLIMutation(t *testing.T) {
+	root := t.TempDir()
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	flow, err := startFlow(root, "Define locked authentication", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, flow.Intent, validReviewIntent); err != nil {
+		t.Fatal(err)
+	}
+	flow, digest, _, err := reviewIntent(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, flow.Intent, strings.Replace(validReviewIntent, "cannot authenticate", "never authenticates", 1)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = sealReviewedIntent(root, flow.ID, digest)
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) || commandErr.Code != "TELOS_APPROVAL_STALE" {
+		t.Fatalf("expected stale approval, got %v", err)
+	}
+}
+
+func TestDirectDraftEditIsDetectedAndRestored(t *testing.T) {
+	root := t.TempDir()
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	flow, err := startFlow(root, "Define locked authentication", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, flow.Intent, validReviewIntent); err != nil {
+		t.Fatal(err)
+	}
+	path, _, _, _ := findArtifact(root, "intent", flow.Intent)
+	if err := os.WriteFile(path, []byte("tampered\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = auditFlowDrafts(root, flow)
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) || commandErr.Code != "TELOS_INTEGRITY_UNDECLARED_CHANGE" {
+		t.Fatalf("expected draft integrity error, got %v", err)
+	}
+	if _, err := repairManagedArtifacts(root); err != nil {
+		t.Fatal(err)
+	}
+	flow, err = loadFlow(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := auditFlowDrafts(root, flow); err != nil {
+		t.Fatalf("restored draft is still invalid: %v", err)
+	}
+}
+
+func TestSealedIntentRevisionCreatesImmutableSuccessor(t *testing.T) {
+	root := t.TempDir()
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	flow, err := startFlow(root, "Define locked authentication", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, flow.Intent, validReviewIntent); err != nil {
+		t.Fatal(err)
+	}
+	flow, digest, _, err := reviewIntent(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, err = sealReviewedIntent(root, flow.ID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalID := flow.Intent
+	flow, successorID, _, err := reviseArtifact(root, originalID, "Clarify the approved outcome")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, original, _, _ := findArtifact(root, "intent", originalID)
+	_, successor, _, _ := findArtifact(root, "intent", successorID)
+	if original.Status != "sealed" || successor.Status != "draft" || successor.Supersedes != originalID || flow.Intent != successorID {
+		t.Fatalf("unexpected revision state: original=%#v successor=%#v flow=%#v", original, successor, flow)
+	}
+}
+
+func TestMutationJournalTamperingIsDetected(t *testing.T) {
+	root := t.TempDir()
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := loadRepositoryLock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := []byte("immutable patch evidence\n")
+	patchPath := filepath.Join(root, ".telos", "patches", "mut-test.patch")
+	if err := atomicWrite(patchPath, patch, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	mutation := Mutation{
+		ID: "MUT-TEST", Change: "CHG-TEST", PatchHash: patchHash(patch),
+		PatchPath: relative(root, patchPath), BeforeRoot: repository.RootHash, AfterRoot: repository.RootHash,
+	}
+	mutationPath := filepath.Join(root, ".telos", "mutations", "mut-test.json")
+	if err := writeJSON(mutationPath, mutation); err != nil {
+		t.Fatal(err)
+	}
+	change := Change{ID: "CHG-TEST", Status: "complete", SourceBaseRoot: repository.RootHash, SourceCurrentRoot: repository.RootHash, Transactions: []string{mutation.ID}}
+	if err := appendEvent(root, "change.patch-applied", change.ID, map[string]any{"mutation": mutation.ID, "patch_hash": mutation.PatchHash, "repository_root": repository.RootHash}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := auditChangeTransactions(root, change); err != nil {
+		t.Fatal(err)
+	}
+	mutation.PatchHash = "rewritten"
+	if err := writeJSON(mutationPath, mutation); err != nil {
+		t.Fatal(err)
+	}
+	err = auditChangeTransactions(root, change)
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) || commandErr.Code != "TELOS_INTEGRITY_JOURNAL" {
+		t.Fatalf("expected journal tamper error, got %v", err)
+	}
+}
+
+func TestCoverageMatrixCannotOmitACategory(t *testing.T) {
+	plan := TestPlan{Spec: "SPC-TEST", Feature: "coverage", Scenarios: []Scenario{{
+		ID: "SCN-001", Rule: "RULE-001", Name: "Observable behavior", Tags: []string{"positive"},
+		Given: []string{"a valid state"}, When: []string{"the action occurs"}, Then: []string{"the outcome is visible"},
+	}}}
+	for _, category := range coverageCategories[:len(coverageCategories)-1] {
+		status := "not_applicable"
+		rationale := "The rule has no behavior in this category."
+		if category == "positive" {
+			status, rationale = "covered", ""
+		}
+		plan.Coverage = append(plan.Coverage, Coverage{Rule: "RULE-001", Category: category, Status: status, Rationale: rationale})
+	}
+	err := validatePlan(plan, map[string][]string{"RULE-001": {"CRIT-001"}}, map[string]bool{})
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) || commandErr.Code != "TELOS_CONTRACT_INVALID" {
+		t.Fatalf("expected missing coverage rejection, got %v", err)
+	}
+}
+
+func TestVerificationCommandChangingSourceCorruptsProject(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "source.txt")
+	if err := os.WriteFile(sourcePath, []byte("clean\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := readConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		cfg.VerificationCommands = []string{"echo tampered>source.txt"}
+	} else {
+		cfg.VerificationCommands = []string{"printf tampered > source.txt"}
+	}
+	if err := atomicWrite(filepath.Join(root, ".telos", "config.toml"), []byte(configText(cfg)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = verifyProject(root, &bytes.Buffer{}, &bytes.Buffer{}, true)
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) || commandErr.Code != "TELOS_INTEGRITY_UNDECLARED_CHANGE" {
+		t.Fatalf("expected verification-side source mutation to corrupt the project, got %v", err)
+	}
+}
+
+func TestContractSealRollsBackEveryWriteOnFailure(t *testing.T) {
+	root := t.TempDir()
+	flow, digest, specID := prepareReviewedContract(t, root)
+	specPath, _, _, err := findArtifact(root, "spec", specID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(root, ".telos", "test-plans", strings.ToLower(specID)+".json")
+	specBefore, err := os.ReadFile(specPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planBefore, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	featureTarget := filepath.Join(root, "features", slug(specID)+".feature")
+	if err := os.Mkdir(featureTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireRepositoryClean(root); err != nil {
+		t.Fatalf("empty directories must not alter the repository inventory: %v", err)
+	}
+
+	if _, err := sealReviewedContract(root, flow.ID, digest); err == nil {
+		t.Fatal("expected contract seal to fail on an unusable feature target")
+	}
+	specAfter, err := os.ReadFile(specPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planAfter, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(specBefore, specAfter) || !bytes.Equal(planBefore, planAfter) {
+		t.Fatal("failed contract seal left partially sealed artifacts")
+	}
+	_, meta, _, err := findArtifact(root, "spec", specID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Status != "draft" {
+		t.Fatalf("spec status after rollback = %q, want draft", meta.Status)
+	}
+}
+
+func prepareReviewedContract(t *testing.T, root string) (Flow, string, string) {
+	t.Helper()
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	flow, err := startFlow(root, "Define locked authentication", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, flow.Intent, validReviewIntent); err != nil {
+		t.Fatal(err)
+	}
+	flow, intentDigest, _, err := reviewIntent(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, err = sealReviewedIntent(root, flow.ID, intentDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, _, err = attachSpec(root, flow.ID, "Locked authentication")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specID := flow.Specs[0]
+	if _, err := putArtifact(root, specID, validReviewSpec); err != nil {
+		t.Fatal(err)
+	}
+	plan := TestPlan{Spec: specID, Feature: slug(specID), Scenarios: []Scenario{{
+		ID: "SCN-001", Rule: "RULE-001", Name: "Deny authentication after lock", Tags: append([]string(nil), coverageCategories...),
+		Given: []string{"an account is locked"}, When: []string{"authentication is attempted"}, Then: []string{"access is denied"},
+	}}}
+	for _, category := range coverageCategories {
+		plan.Coverage = append(plan.Coverage, Coverage{Rule: "RULE-001", Category: category, Status: "covered"})
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putTestPlan(root, specID, data); err != nil {
+		t.Fatal(err)
+	}
+	flow, digest, _, err := reviewContract(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return flow, digest, specID
+}
+
+const validReviewIntent = `# Locked authentication
+
+## Outcome
+
+A locked account cannot authenticate.
+
+## Actors
+
+Account owner and security operator.
+
+## Scope
+
+Authentication after lock.
+
+## Non-goals
+
+Recovery is excluded.
+
+## Success criteria
+
+### CRIT-001 — Access denied
+
+Every attempt is denied without a session.
+
+## Constraints
+
+Existing sessions are unchanged.
+
+## Open questions
+
+None.
+`
+
+const validReviewSpec = `# Locked authentication
+
+## Context
+
+An account has an authoritative locked state.
+
+## Rules
+
+### RULE-001 — Deny authentication
+
+Traces: CRIT-001
+
+Every authentication attempt for a locked account is denied.
+
+## Examples
+
+A correct password remains denied after lock.
+
+## Boundaries
+
+Repeated attempts remain denied.
+
+## Non-effects
+
+Existing sessions remain unchanged.
+
+## Failure modes
+
+An audit failure must not allow authentication.
+
+## Observability
+
+Each denial is observable.
+`

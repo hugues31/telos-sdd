@@ -38,7 +38,8 @@ func findRoot(start string) (string, error) {
 func ensureDirs(root string) error {
 	dirs := []string{
 		".telos/brainstorms", ".telos/intents", ".telos/specs", ".telos/test-plans",
-		".telos/changes", ".telos/ledger/events", "features",
+		".telos/changes", ".telos/flows", ".telos/mutations", ".telos/patches", ".telos/blobs",
+		".telos/ledger/events", "features",
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(dir)), 0o755); err != nil {
@@ -153,7 +154,7 @@ func quoteList(v []string) string {
 }
 
 func readConfig(root string) (Config, error) {
-	cfg := Config{Version: configVersion, Profile: "standard"}
+	cfg := Config{}
 	f, err := os.Open(filepath.Join(root, ".telos", "config.toml"))
 	if err != nil {
 		return cfg, err
@@ -168,10 +169,6 @@ func readConfig(root string) (Config, error) {
 		}
 		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
 		switch key {
-		case "version":
-			cfg.Version, _ = strconv.Atoi(val)
-		case "profile":
-			cfg.Profile, _ = strconv.Unquote(val)
 		case "agents":
 			cfg.Agents = parseList(val)
 		case "verification_commands":
@@ -182,7 +179,7 @@ func readConfig(root string) (Config, error) {
 }
 
 func configText(cfg Config) string {
-	return fmt.Sprintf("version = %d\nprofile = %q\nagents = %s\nverification_commands = %s\n", cfg.Version, cfg.Profile, quoteList(cfg.Agents), quoteList(cfg.VerificationCommands))
+	return fmt.Sprintf("agents = %s\nverification_commands = %s\n", quoteList(cfg.Agents), quoteList(cfg.VerificationCommands))
 }
 
 func parseArtifact(data []byte) (ArtifactMeta, string, error) {
@@ -214,6 +211,10 @@ func parseArtifact(data []byte) (ArtifactMeta, string, error) {
 			meta.Revision, _ = strconv.Atoi(val)
 		case "intent":
 			meta.Intent, _ = strconv.Unquote(val)
+		case "flow":
+			meta.Flow, _ = strconv.Unquote(val)
+		case "supersedes":
+			meta.Supersedes, _ = strconv.Unquote(val)
 		case "parents":
 			meta.Parents = parseList(val)
 		}
@@ -230,6 +231,12 @@ func renderArtifact(meta ArtifactMeta, body string) []byte {
 	fmt.Fprintf(&b, "id = %q\ntype = %q\nstatus = %q\nrevision = %d\n", meta.ID, meta.Kind, meta.Status, meta.Revision)
 	if meta.Intent != "" {
 		fmt.Fprintf(&b, "intent = %q\n", meta.Intent)
+	}
+	if meta.Flow != "" {
+		fmt.Fprintf(&b, "flow = %q\n", meta.Flow)
+	}
+	if meta.Supersedes != "" {
+		fmt.Fprintf(&b, "supersedes = %q\n", meta.Supersedes)
 	}
 	if len(meta.Parents) > 0 {
 		fmt.Fprintf(&b, "parents = %s\n", quoteList(meta.Parents))

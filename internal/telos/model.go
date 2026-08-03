@@ -3,20 +3,16 @@ package telos
 import "time"
 
 const (
-	configVersion = 1
-	managedStart  = "<!-- telos:managed:start -->"
-	managedEnd    = "<!-- telos:managed:end -->"
+	managedStart = "<!-- telos:managed:start -->"
+	managedEnd   = "<!-- telos:managed:end -->"
 )
 
 type Config struct {
-	Version              int
-	Profile              string
 	Agents               []string
 	VerificationCommands []string
 }
 
 type Lock struct {
-	Version   int          `json:"version"`
 	RootHash  string       `json:"root_hash"`
 	Artifacts []LockedFile `json:"artifacts"`
 }
@@ -30,7 +26,6 @@ type LockedFile struct {
 }
 
 type Event struct {
-	Version  int            `json:"version"`
 	ID       string         `json:"id"`
 	At       time.Time      `json:"at"`
 	Type     string         `json:"type"`
@@ -40,7 +35,6 @@ type Event struct {
 }
 
 type State struct {
-	Version     int               `json:"version"`
 	RootHash    string            `json:"root_hash"`
 	Events      int               `json:"events"`
 	LatestEvent string            `json:"latest_event,omitempty"`
@@ -48,19 +42,21 @@ type State struct {
 }
 
 type ArtifactMeta struct {
-	ID       string
-	Kind     string
-	Status   string
-	Revision int
-	Intent   string
-	Parents  []string
+	ID         string
+	Kind       string
+	Status     string
+	Revision   int
+	Intent     string
+	Flow       string
+	Supersedes string
+	Parents    []string
 }
 
 type TestPlan struct {
-	Version   int        `json:"version"`
 	Spec      string     `json:"spec"`
 	Feature   string     `json:"feature"`
 	Scenarios []Scenario `json:"scenarios"`
+	Coverage  []Coverage `json:"coverage,omitempty"`
 }
 
 type Scenario struct {
@@ -73,17 +69,69 @@ type Scenario struct {
 	Then  []string `json:"then"`
 }
 
+type Coverage struct {
+	Rule      string `json:"rule"`
+	Category  string `json:"category"`
+	Status    string `json:"status"`
+	Rationale string `json:"rationale,omitempty"`
+}
+
+type Flow struct {
+	ID             string            `json:"id"`
+	Status         string            `json:"status"`
+	Phase          string            `json:"phase"`
+	Request        string            `json:"request"`
+	Brainstorm     string            `json:"brainstorm,omitempty"`
+	Intent         string            `json:"intent,omitempty"`
+	Specs          []string          `json:"specs,omitempty"`
+	Change         string            `json:"change,omitempty"`
+	IntentReview   string            `json:"intent_review,omitempty"`
+	ContractReview string            `json:"contract_review,omitempty"`
+	DraftHashes    map[string]string `json:"draft_hashes,omitempty"`
+	Verdict        string            `json:"verdict,omitempty"`
+	Created        string            `json:"created"`
+	Updated        string            `json:"updated"`
+}
+
 type Change struct {
-	Version int      `json:"version"`
-	ID      string   `json:"id"`
-	Intent  string   `json:"intent"`
-	Specs   []string `json:"specs"`
-	Base    string   `json:"base"`
-	Status  string   `json:"status"`
-	Started string   `json:"started"`
+	ID                string   `json:"id"`
+	Flow              string   `json:"flow,omitempty"`
+	Intent            string   `json:"intent"`
+	Specs             []string `json:"specs"`
+	Base              string   `json:"base"`
+	Status            string   `json:"status"`
+	Started           string   `json:"started"`
+	Completed         string   `json:"completed,omitempty"`
+	SourceBaseRoot    string   `json:"source_base_root,omitempty"`
+	SourceCurrentRoot string   `json:"source_current_root,omitempty"`
+	ContextHash       string   `json:"context_hash,omitempty"`
+	Transactions      []string `json:"transactions,omitempty"`
+}
+
+type RepositoryLock struct {
+	RootHash string           `json:"root_hash"`
+	Files    []RepositoryFile `json:"files"`
+}
+
+type RepositoryFile struct {
+	Path string `json:"path"`
+	Hash string `json:"hash"`
+	Mode uint32 `json:"mode"`
+}
+
+type Mutation struct {
+	ID         string   `json:"id"`
+	Change     string   `json:"change"`
+	PatchHash  string   `json:"patch_hash"`
+	PatchPath  string   `json:"patch_path"`
+	BeforeRoot string   `json:"before_root"`
+	AfterRoot  string   `json:"after_root"`
+	Paths      []string `json:"paths"`
+	Rules      []string `json:"rules"`
+	Scenarios  []string `json:"scenarios"`
+	At         string   `json:"at"`
 }
 
 type InstallManifest struct {
-	Version int               `json:"version"`
-	Files   map[string]string `json:"files"`
+	Files map[string]string `json:"files"`
 }

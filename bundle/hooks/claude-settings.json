@@ -9,11 +9,10 @@
             "type": "command",
             "command": "telos guard",
             "timeout": 5,
-            "statusMessage": "Checking Telos sealed artifacts"
+            "statusMessage": "Checking Telos strict mutation policy"
           }
         ]
       }
     ]
   }
 }
-

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Telos Intent"
-  short_description: "Refine and seal a precise development intent"
-  default_prompt: "Use $telos-intent to turn this request into a clear, testable intent."

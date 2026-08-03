@@ -20,6 +20,13 @@ func initProject(root, agent string, githubCI bool) error {
 	if st, err := os.Stat(filepath.Join(root, ".telos")); err == nil && st.IsDir() {
 		alreadyInitialized = true
 	}
+	if alreadyInitialized {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(repositoryLockPath))); err == nil {
+			if err := requireRepositoryClean(root); err != nil {
+				return err
+			}
+		}
+	}
 	if err := ensureDirs(root); err != nil {
 		return err
 	}
@@ -28,11 +35,11 @@ func initProject(root, agent string, githubCI bool) error {
 		agents = []string{"codex", "claude"}
 	}
 	if !alreadyInitialized {
-		cfg := Config{Version: configVersion, Profile: "standard", Agents: agents, VerificationCommands: []string{}}
+		cfg := Config{Agents: agents, VerificationCommands: []string{}}
 		if err := atomicWrite(filepath.Join(root, ".telos", "config.toml"), []byte(configText(cfg)), 0o644); err != nil {
 			return err
 		}
-		if err := saveLock(root, Lock{Version: configVersion, Artifacts: []LockedFile{}}); err != nil {
+		if err := saveLock(root, Lock{Artifacts: []LockedFile{}}); err != nil {
 			return err
 		}
 	} else {
@@ -74,11 +81,15 @@ func initProject(root, agent string, githubCI bool) error {
 	if alreadyInitialized {
 		eventType = "project.adapters-refreshed"
 	}
-	return appendEvent(root, eventType, "project", map[string]any{"agents": agents}, "")
+	if err := appendEvent(root, eventType, "project", map[string]any{"agents": agents}, ""); err != nil {
+		return err
+	}
+	_, err := baselineRepository(root, "repository.baselined", "project")
+	return err
 }
 
 func installAgentFiles(root, agent string) error {
-	manifest := InstallManifest{Version: configVersion, Files: map[string]string{}}
+	manifest := InstallManifest{Files: map[string]string{}}
 	manifestPath := filepath.Join(root, ".telos", "install-manifest.json")
 	if err := readJSON(manifestPath, &manifest); err != nil && !os.IsNotExist(err) {
 		return err
@@ -86,7 +97,6 @@ func installAgentFiles(root, agent string) error {
 	if manifest.Files == nil {
 		manifest.Files = map[string]string{}
 	}
-	manifest.Version = configVersion
 	installSkills := func(dest string) error {
 		return fs.WalkDir(bundle.FS, "skills", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -208,17 +218,17 @@ func updateInstructions(path, instructions string) error {
 
 const codexInstructions = `# Telos SDD
 
-- Treat sealed intents, specs, test plans, and generated features as immutable.
-- Start product changes with the matching Telos Skill; do not implement directly from an unsealed request.
-- Run ` + "`telos context --change <id>`" + ` before implementation and ` + "`telos verify`" + ` before claiming completion.
-- Implement only behavior traceable to a sealed RULE and scenario. Do not weaken, skip, or redirect tests.
-- When a sealed artifact is wrong, create a new revision through Telos instead of editing it.`
+- Use the ` + "`$telos`" + ` Skill for every feature, bug fix, refactor, or repository modification.
+- Run ` + "`telos inspect --json`" + ` first and resume its active flow. Never ask the user for Telos commands, IDs, or paths.
+- Treat intents, specs, test plans, generated features, and repository writes as CLI-managed. Never edit them directly.
+- Apply implementation only through ` + "`telos change apply`" + ` with RULE and SCN references.
+- Stop on integrity errors. Never adopt an undeclared write or weaken a test.`
 
 const claudeInstructions = `# Telos SDD
 
 @AGENTS.md
 
-Use the project Telos Skills in .claude/skills and the specialized agents in .claude/agents. Respect the Telos guard hook.`
+Use the project ` + "`/telos`" + ` Skill as the sole user-facing workflow and delegate its specialized agents from .claude/agents. Respect the Telos strict guard hook.`
 
 func mergeSettings(existing []byte, generated []byte) ([]byte, error) {
 	var a, b map[string]any

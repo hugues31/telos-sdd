@@ -1,4 +1,0 @@
-interface:
-  display_name: "Telos Brainstorm"
-  short_description: "Explore an intent with structured idea engines"
-  default_prompt: "Use $telos-brainstorm to explore this product idea before defining its intent."

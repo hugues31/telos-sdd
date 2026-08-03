@@ -1,31 +1,32 @@
 # Telos SDD
 
-**Executable intent integrity for Codex and Claude Code — without Tessl or a hosted runtime.**
+**Agent-first, executable intent integrity for Codex and Claude Code — without Tessl or a hosted runtime.**
 
-Telos moves a software project’s durable value from incidental implementation toward versioned, executable intent:
+Telos turns a product request into an approved, executable contract before allowing code to change. The user speaks to one orchestrator; five isolated specialists and a deterministic Go CLI carry out the workflow.
+
+## Founding principles
+
+### Code is becoming a generated artifact
+
+Modern coding models make source code progressively cheaper to produce and replace. The durable value of a software project therefore moves upstream: into its intent, behavioral specifications, constraints and executable examples.
+
+Telos treats code as one implementation of that contract, not as the primary source of truth. Given the same external context—dependencies, toolchain, runtime services and platform—a sufficiently complete specification should allow a modern coding model to reconstruct a functionally equivalent project with little or no human rewriting. The objective is not byte-for-byte reproduction, but reproduction of every specified behavior, boundary and prohibited side effect.
+
+### A bug is evidence about the specification
+
+Within a fixed external context, Telos treats an accepted bug as evidence that the executable contract was incorrect, imprecise, incomplete or inconsistent with another rule. If an implementation simply violates an already precise contract, verification should reject it; if it reaches users anyway, the contract's executable checks or verification process were themselves insufficient.
+
+Fixing a bug therefore means more than patching code. The intent, rule or scenario that permitted the defect must first be corrected or completed, then the implementation is regenerated or revised from that stronger contract. This prevents the codebase from accumulating fixes whose rationale exists only in source code or commit history.
 
 ```text
-Brainstorm → Intent → Spec → Test plan → .feature → Change context → Code → Evidence
+Request
+  → Intent approval
+  → Specs + scenarios approval
+  → CLI-brokered implementation
+  → Independent verification
 ```
 
-It is an independent Go CLI plus six Agent Skills and three specialized agents. Sealed artifacts are hashed, linked in an append-only ledger, protected by provider-native hooks, and checked before implementation can be declared verified.
-
-> Telos SDD is unrelated to other projects named Telos. Use the full name when referring to this framework.
-
-## Why
-
-Coding agents are very good at satisfying the local signal they can see. That creates predictable failure modes: happy-path-only tests, assertions weakened to match an implementation, speculative code, and requirements that drift during a long session.
-
-Telos separates product decisions from implementation and gives each transition a gate:
-
-- brainstorming must explicitly promote an idea;
-- an intent cannot seal while material questions remain;
-- specs must trace every normative behavior to a stable rule;
-- test plans are designed before implementation and render `.feature` files deterministically;
-- implementation receives a bounded context generated from sealed inputs;
-- verification recomputes hashes and runs repository-owned commands.
-
-This is stronger than prompt discipline, but it is not a proof that a specification is correct. A clear, consistent spec can still encode the wrong product decision; implementation bugs, environment differences, security flaws, and missing test adapters remain possible. Telos makes those failures attributable and reviewable instead of assuming every bug originates in ambiguous prose.
+The CLI owns state, validation, rendering, hashes and writes. Agents own judgment. The user never copies a Telos path, ID, or lifecycle command.
 
 ## Install
 
@@ -41,15 +42,11 @@ go install github.com/hugues31/telos-sdd/cmd/telos@latest
 curl -fsSL https://raw.githubusercontent.com/hugues31/telos-sdd/main/install.sh | sh
 ```
 
-The installer downloads the matching GitHub Release archive and verifies it against `checksums.txt`. Set `TELOS_VERSION=v0.1.0` or `TELOS_INSTALL_DIR=/your/bin` to override its defaults.
-
 ### Release binary — PowerShell
 
 ```powershell
 irm https://raw.githubusercontent.com/hugues31/telos-sdd/main/install.ps1 | iex
 ```
-
-Set `$env:TELOS_VERSION` or `$env:TELOS_INSTALL_DIR` before running it when needed.
 
 ## Add Telos to a repository
 
@@ -59,94 +56,133 @@ telos init --agent all --ci github
 telos doctor
 ```
 
-Provider-specific choices are also available:
+Use `--agent codex` or `--agent claude` to install only one provider adapter. `init` preserves existing project instructions and provider settings while owning its managed block and hook group.
 
-```bash
-telos init --agent codex
-telos init --agent claude
-```
+## Use
 
-`init` preserves existing `AGENTS.md`, `CLAUDE.md`, and provider settings. It owns only its managed instruction block and its hook group, and records installed file hashes in `.telos/install-manifest.json`.
+After initialization, talk normally to your coding agent:
 
-For Codex, Telos installs repository Skills under `.agents/skills`, custom agents under `.codex/agents`, durable guidance in `AGENTS.md`, and a trusted project hook in `.codex/hooks.json`. These are the current project-level extension points documented by [OpenAI for Skills](https://learn.chatgpt.com/docs/build-skills), [AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md), and [hooks](https://learn.chatgpt.com/docs/hooks).
+> Je veux empêcher un compte verrouillé de s’authentifier, sans fermer les sessions déjà ouvertes.
 
-For Claude Code, Telos installs project Skills under `.claude/skills`, subagents under `.claude/agents`, an importing `CLAUDE.md`, and a `PreToolUse` hook in `.claude/settings.json`, following Anthropic’s [Skills](https://code.claude.com/docs/en/slash-commands), [subagents](https://code.claude.com/docs/en/sub-agents), and [hooks](https://code.claude.com/docs/en/hooks) conventions.
+The repository instructions activate `$telos` in Codex or `/telos` in Claude Code. Explicit invocation remains available, but is not required.
 
-Restart the coding agent if its Skills or agents directory did not exist when the current session began. Review and trust the project hook when the provider asks.
+The orchestrator:
 
-## Workflow
+1. runs `telos inspect --json` and resumes the active flow;
+2. uses brainstorming only when the problem or solution space is uncertain;
+3. delegates intent, spec, tests, implementation and verification to separate agents;
+4. asks for two product decisions in the main conversation;
+5. applies every repository mutation through the CLI.
 
-```bash
-# 1. Explore the problem
-telos brainstorm start --mode recommend
+The two approvals are deliberately human:
 
-# 2. Create, refine, validate, then seal intent
-telos intent new --title "Prevent compromised account access"
-telos intent validate INT-...
-telos intent seal INT-...
+- **Intent:** “Est-ce bien le résultat voulu ?”
+- **Executable contract:** “Est-ce exactement le comportement attendu ?”
 
-# 3. Derive and seal behavioral specs
-telos spec new --intent INT-... --title "Locked authentication"
-telos spec validate SPC-...
-telos spec seal SPC-...
+Each review returns a digest of the exact content shown. Any later change invalidates that approval.
 
-# 4. Create the test-plan template, complete it, then render Gherkin
-telos testify --spec SPC-...
-telos testify --spec SPC-...
+## Internal agents
 
-# 5. Establish implementation scope
-telos change begin --intent INT-... --spec SPC-...
-telos context --change CHG-...
-
-# 6. Implement through the Telos Skill, then verify
-telos verify
-```
-
-Invoke the matching workflow explicitly when useful:
-
-| Stage | Codex | Claude Code |
+| Agent | Responsibility | Forbidden |
 | --- | --- | --- |
-| Brainstorm | `$telos-brainstorm` | `/telos-brainstorm` |
-| Intent | `$telos-intent` | `/telos-intent` |
-| Specification | `$telos-spec` | `/telos-spec` |
-| Test architecture | `$telos-testify` | `/telos-testify` |
-| Implementation | `$telos-implement` | `/telos-implement` |
-| Verification | `$telos-verify` | `/telos-verify` |
+| `telos-product` | Brainstorming and measurable intent | Specs, tests, code |
+| `telos-spec-architect` | Observable rules, boundaries and non-effects | Weakening intent from existing code |
+| `telos-test-architect` | Adversarial scenarios and coverage decisions | Inspecting implementation first |
+| `telos-implementer` | Smallest traced Git patch | Direct repository writes |
+| `telos-verifier` | Read-only integrity and test-honesty audit | Repairing or waiving failures |
+
+These are delegated specialists, not extra user-facing commands.
+
+## Strict integrity
+
+Telos inventories every Git-tracked or non-ignored regular file, excluding `.git/**` and internal `.telos/**` data. It stores normalized SHA-256 hashes and content-addressed recovery blobs.
+
+Every implementation patch records:
+
+- its SHA-256 digest;
+- its before and after repository roots;
+- every touched path;
+- the `RULE-NNN` and `SCN-NNN` identifiers that authorize it;
+- append-only ledger evidence.
+
+Provider hooks deny ordinary Edit, Write, apply-patch and obvious shell mutation paths. The authoritative control is recomputation: if any byte differs from the last CLI-declared state, commands fail with:
+
+```text
+TELOS_INTEGRITY_UNDECLARED_CHANGE: project corrupted
+```
+
+The write cannot be adopted after the fact. The orchestrator may inspect the repair plan, request explicit approval, then run `telos repair --restore --json` to reconstruct the last declared state.
+
+Git-ignored build outputs remain outside the inventory. A test or generator that changes a non-ignored file makes verification fail.
+
+## Executable contract
+
+Intent success criteria use stable headings:
+
+```markdown
+### CRIT-001 — Locked authentication is denied
+```
+
+Every normative rule traces one or more criteria:
+
+```markdown
+### RULE-001 — Deny authentication
+
+Traces: CRIT-001
+```
+
+Every rule receives an explicit decision for nine coverage categories: positive, negative, boundary, authorization, state transition, retry/idempotency, concurrency, failure/recovery and prohibited side effects. A category is either backed by a tagged `SCN-NNN` scenario or marked `not_applicable` with a concrete rationale.
+
+Contract sealing is atomic: specs, JSON plans and deterministic `features/*.feature` files are all sealed, or none are.
+
+If implementation exposes a wrong contract, Telos reverses declared patches with `change abort`, then creates an immutable intent or spec successor with `artifact revise`. It never edits a sealed artifact.
+
+## CLI primitives for agents and CI
+
+The workflow API is intentionally machine-oriented. Every command supports a stable `--json` envelope with `ok`, `command`, `result`, `next_actions`, and structured error codes.
+
+```text
+telos inspect --json
+telos flow start --brainstorm none|recommend --json
+telos artifact put --id ... --json
+telos intent new|review|seal --flow ... --json
+telos spec new --flow ... --json
+telos test-plan put --spec ... --json
+telos contract validate|review|seal --flow ... --json
+telos change begin|apply|abort|complete --flow ... --json
+telos artifact revise --id ... --json
+telos verify --flow ... --check-only --json
+telos repair --restore --json
+```
+
+Humans normally need only `init` and `doctor`.
 
 ## Repository model
 
 ```text
 .telos/
-  config.toml             # human-owned policy and verification commands
-  brainstorms/*.md        # divergent exploration
-  intents/*.md            # outcome contract
-  specs/*.md              # normative RULE-* behavior
-  test-plans/*.json       # SCN-* source for deterministic Gherkin
-  changes/*.json          # implementation scope + Git base
-  ledger/events/*.json    # append-only, merge-friendly events
-  lock.json               # normalized SHA-256 artifact set + root hash
-  state.json              # rebuildable projection
-  context.md              # rebuildable implementation context
-features/*.feature        # generated executable contract
+  config.toml
+  flows/*.json             # FLW-* state machine
+  brainstorms/*.md
+  intents/*.md             # CRIT-* outcome contract
+  specs/*.md               # RULE-* behavioral contract
+  test-plans/*.json        # SCN-* plus coverage matrix
+  changes/*.json           # implementation scope and source roots
+  mutations/*.json         # traced patch transactions
+  patches/*.patch          # immutable patch evidence
+  blobs/*                  # content-addressed recovery data
+  ledger/events/*.json     # append-only events
+  lock.json                # sealed artifact root
+  repository-lock.json     # declared repository root
+  context.md               # generated implementation boundary
+features/*.feature         # deterministic executable contract
 ```
 
-Text hashes normalize CRLF/CR to LF, paths to `/`, and artifact ordering lexicographically. A modified or missing upstream artifact marks its descendants stale. The ledger is memory, not authority: `state.json` and `context.md` are rebuildable.
+## Security boundary
 
-## Brainstorm engines
+Telos detects undeclared content and makes ordinary agent bypasses visible. It does not create an operating-system privilege boundary: a malicious process running with the same user privileges can attempt to bypass local hooks and rewrite metadata. Hostile guarantees require an external signer, protected key material or privilege-separated broker.
 
-`choose`, `recommend`, `random`, and `progressive` modes can select among SCAMPER, reverse brainstorming, six thinking hats, assumption reversal, morphological matrix, Jobs to be Done, pre-mortem, first principles, constraint removal, analogical transfer, worst possible idea, and impact/effort convergence. Random selection records its seed.
-
-## What the guard can and cannot enforce
-
-Provider hooks deny ordinary Bash/Edit/Write/apply-patch calls that name a sealed artifact. Read-only modes and file permissions add friction. This is a guardrail, not an operating-system security boundary: a sufficiently privileged user or unobserved tool can still modify files. `telos verify` is the authoritative detection step.
-
-The current MVP deliberately leaves normal source code writable. A future strict profile will broker source mutations, require mutation testing and coverage policy, and support signed attestations. See [docs/roadmap.md](docs/roadmap.md).
-
-## Relationship to IIKit and BMAD
-
-Telos shares IIKit’s central insight that intent needs a verifiable chain, but is deliberately local-first and provider-neutral: one standalone binary, Git-native events, deterministic Gherkin, no Tessl installation, and no required service. IIKit may be a better fit when its managed ecosystem and integrations are desired.
-
-The brainstorming Skill borrows BMAD’s idea of selectable ideation techniques, then adds deterministic selection, explicit promotion, and an integrity chain into executable artifacts. Telos is not affiliated with either project.
+Hashes also cannot prove semantic equivalence between prose and code. Telos combines structural traceability, executable scenarios and an independent verifier to make drift reviewable rather than claiming a formal proof.
 
 ## Development
 

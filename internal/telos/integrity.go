@@ -14,14 +14,13 @@ func loadLock(root string) (Lock, error) {
 	var lock Lock
 	err := readJSON(filepath.Join(root, ".telos", "lock.json"), &lock)
 	if os.IsNotExist(err) {
-		return Lock{Version: configVersion, Artifacts: []LockedFile{}}, nil
+		return Lock{Artifacts: []LockedFile{}}, nil
 	}
 	return lock, err
 }
 
 func saveLock(root string, lock Lock) error {
 	sort.Slice(lock.Artifacts, func(i, j int) bool { return lock.Artifacts[i].Path < lock.Artifacts[j].Path })
-	lock.Version = configVersion
 	lock.RootHash = rootHash(lock.Artifacts)
 	return writeJSON(filepath.Join(root, ".telos", "lock.json"), lock)
 }
@@ -51,7 +50,7 @@ func appendEvent(root, typ, subject string, data map[string]any, hash string) er
 	if err != nil {
 		return err
 	}
-	e := Event{Version: configVersion, ID: id, At: time.Now().UTC(), Type: typ, Subject: subject, Data: data, RootHash: hash}
+	e := Event{ID: id, At: time.Now().UTC(), Type: typ, Subject: subject, Data: data, RootHash: hash}
 	if err := writeJSON(filepath.Join(root, ".telos", "ledger", "events", strings.ToLower(id)+".json"), e); err != nil {
 		return err
 	}
@@ -77,7 +76,7 @@ func rebuildState(root string) error {
 		}
 		return events[i].At.Before(events[j].At)
 	})
-	state := State{Version: configVersion, Status: map[string]string{}}
+	state := State{Status: map[string]string{}}
 	for _, e := range events {
 		state.Events++
 		state.LatestEvent = e.ID
@@ -251,8 +250,8 @@ func validateBody(kind, body string) error {
 		return errors.New("unresolved placeholder (TODO/TBD) found")
 	}
 	required := map[string][]string{
-		"intent": {"## Outcome", "## Actors", "## Scope", "## Non-goals", "## Success criteria", "## Open questions"},
-		"spec":   {"## Context", "## Rules", "## Examples", "## Boundaries", "## Failure modes", "## Observability"},
+		"intent": {"## Outcome", "## Actors", "## Scope", "## Non-goals", "## Success criteria", "## Constraints", "## Open questions"},
+		"spec":   {"## Context", "## Rules", "## Examples", "## Boundaries", "## Non-effects", "## Failure modes", "## Observability"},
 	}
 	for _, heading := range required[kind] {
 		if !strings.Contains(body, heading) {

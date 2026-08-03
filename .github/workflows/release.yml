@@ -15,10 +15,11 @@ jobs:
         goos: [linux, darwin, windows]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
+          cache: false
       - name: Build archive
         env:
           GOOS: ${{ matrix.goos }}
@@ -34,7 +35,7 @@ jobs:
           else
             tar -C dist/package -czf "dist/telos_${version}_${GOOS}_${GOARCH}.tar.gz" "$binary"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: telos-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/telos_*
@@ -44,7 +45,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -55,4 +56,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
-

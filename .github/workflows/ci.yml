@@ -16,11 +16,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - uses: actions/setup-python@v5
+          cache: false
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
       - run: go test ./...
@@ -31,4 +32,3 @@ jobs:
       - name: Confirm generated files are clean
         if: runner.os == 'Linux'
         run: git diff --exit-code
-

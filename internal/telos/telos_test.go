@@ -204,6 +204,9 @@ Each denial emits one account-lock audit event.
 	if err := requireCleanAudit(root); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(intentPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := atomicWrite(intentPath, []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

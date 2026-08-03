@@ -70,7 +70,22 @@ func atomicWrite(path string, data []byte, mode fs.FileMode) error {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	var originalMode fs.FileMode
+	madeDestinationWritable := false
+	if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o200 == 0 {
+		originalMode = info.Mode().Perm()
+		if err = os.Chmod(path, originalMode|0o200); err != nil {
+			return err
+		}
+		madeDestinationWritable = true
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		if madeDestinationWritable {
+			_ = os.Chmod(path, originalMode)
+		}
+		return err
+	}
+	return nil
 }
 
 func writeJSON(path string, v any) error {

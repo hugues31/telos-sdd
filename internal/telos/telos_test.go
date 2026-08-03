@@ -22,6 +22,33 @@ func TestNormalizeAndRootHashAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteReplacesReadOnlyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sealed.txt")
+	if err := os.WriteFile(path, []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(path, []byte("after\n"), 0o444); err != nil {
+		t.Fatalf("replace read-only file: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "after\n" {
+		t.Fatalf("atomic write content = %q, want %q", data, []byte("after\n"))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("atomic write mode = %o, want read-only", info.Mode().Perm())
+	}
+}
+
 func TestFeatureRenderingIsDeterministic(t *testing.T) {
 	plan := TestPlan{Spec: "SPC-1", Feature: "Account lockout", Scenarios: []Scenario{{
 		ID: "SCN-002", Rule: "RULE-003", Name: "Reject a locked account", Tags: []string{"negative", "authorization"},

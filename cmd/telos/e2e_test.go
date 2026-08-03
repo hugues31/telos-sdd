@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -101,6 +102,13 @@ func TestCLIEndToEnd(t *testing.T) {
 	if !complete.OK {
 		t.Fatal("change did not complete")
 	}
+	declaredContent, err := os.ReadFile(filepath.Join(root, "app.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(declaredContent)) != "secured" {
+		t.Fatalf("declared content = %q, want secured with platform-native line endings", declaredContent)
+	}
 
 	if err := os.WriteFile(filepath.Join(root, "app.txt"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -110,7 +118,7 @@ func TestCLIEndToEnd(t *testing.T) {
 		t.Fatalf("unexpected integrity error: %#v", failure)
 	}
 	runE2EJSON(t, root, bin, "", "repair", "--restore", "--json")
-	if data, _ := os.ReadFile(filepath.Join(root, "app.txt")); string(data) != "secured\n" {
+	if data, _ := os.ReadFile(filepath.Join(root, "app.txt")); !bytes.Equal(data, declaredContent) {
 		t.Fatalf("repair did not restore declared content: %q", data)
 	}
 }

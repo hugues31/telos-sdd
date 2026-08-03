@@ -10,7 +10,8 @@
 - happy-path-only coverage through a mandatory per-rule category matrix;
 - speculative code through RULE/SCN references on every patch;
 - partial contract sealing through staged validation and rollback;
-- contract defects being hidden by implementation changes, through abort and immutable revision flows.
+- contract defects being hidden by implementation changes, through abort and immutable revision flows;
+- an orchestrator sealing an artifact, completing a change or restoring the repository without a human decision: `telos guard` answers these commands with an `ask` permission decision so the provider surfaces a native prompt, and denies seals whose digest no longer matches the recorded review.
 
 ## Not protected against
 
@@ -18,6 +19,7 @@
 - a false RULE/SCN label on unrelated code that also fools the independent verifier;
 - an incorrect but internally consistent product decision approved by the user;
 - compromised dependencies, compilers, test runners, agent providers or release infrastructure;
+- a user who approves harness permission prompts without reading them, or a provider that does not honor `PreToolUse` permission decisions;
 - behavior outside the exercised environment;
 - formal semantic equivalence between prose, scenarios and code.
 

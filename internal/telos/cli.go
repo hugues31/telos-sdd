@@ -221,7 +221,7 @@ func runGuard(stdin io.Reader, stdout io.Writer) error {
 		_ = json.Unmarshal(raw, &toolInput)
 		command, _ := toolInput["command"].(string)
 		if isTelosBrokerCommand(command) {
-			return nil
+			return gateBrokerCommand(root, stdout, command)
 		}
 		return denyGuard(stdout, "Telos strict mode permits shell execution only through the Telos CLI broker.")
 	}
@@ -275,6 +275,136 @@ func isTelosBrokerCommand(command string) bool {
 		}
 	}
 	return true
+}
+
+// gateBrokerCommand screens an already-validated broker command for the four
+// human-gate operations: intent seal, contract seal, change complete, and
+// repair --restore. These never pass silently — the human decision happens at
+// the provider permission prompt, not on the orchestrator's word. A seal whose
+// digest no longer matches the recorded review is denied outright so the user
+// is only prompted for seals that can succeed.
+func gateBrokerCommand(root string, stdout io.Writer, command string) error {
+	fields := brokerCommandFields(command)
+	if len(fields) < 2 {
+		return nil
+	}
+	verb := ""
+	if len(fields) > 2 {
+		verb = fields[2]
+	}
+	switch {
+	case fields[1] == "intent" && verb == "seal":
+		return gateIntentSeal(root, stdout, fields)
+	case fields[1] == "contract" && verb == "seal":
+		return gateContractSeal(root, stdout, fields)
+	case fields[1] == "change" && verb == "complete":
+		return gateChangeComplete(root, stdout, fields)
+	case fields[1] == "repair" && hasFlag(fields, "--restore"):
+		return gateRepairRestore(root, stdout)
+	}
+	return nil
+}
+
+func gateIntentSeal(root string, stdout io.Writer, fields []string) error {
+	flow, err := loadFlow(root, flagValue(fields, "--flow"))
+	digest := flagValue(fields, "--review")
+	if err != nil || flow.IntentReview == "" || digest != flow.IntentReview {
+		return denyGuard(stdout, "Telos human gate: the intent seal digest is missing or stale; run telos intent review and present the returned content to the user before sealing.")
+	}
+	title := ""
+	if _, _, body, err := findArtifact(root, "intent", flow.Intent); err == nil {
+		title = artifactTitle(body)
+	}
+	return askGuard(stdout, fmt.Sprintf("Telos human gate — seal intent %s%s for flow %s under review digest %s. Approve only if this exact intent was presented to you and is the desired outcome.", flow.Intent, quoted(title), flow.ID, shortHash(digest)))
+}
+
+func gateContractSeal(root string, stdout io.Writer, fields []string) error {
+	flow, err := loadFlow(root, flagValue(fields, "--flow"))
+	digest := flagValue(fields, "--review")
+	if err != nil || flow.ContractReview == "" || digest != flow.ContractReview {
+		return denyGuard(stdout, "Telos human gate: the contract seal digest is missing or stale; run telos contract review and present the returned content to the user before sealing.")
+	}
+	return askGuard(stdout, fmt.Sprintf("Telos human gate — atomically seal the executable contract for flow %s (specs %s) under review digest %s. Approve only if the presented rules, scenarios, and coverage decisions are exactly the expected behavior.", flow.ID, strings.Join(flow.Specs, ", "), shortHash(digest)))
+}
+
+func gateChangeComplete(root string, stdout io.Writer, fields []string) error {
+	change, err := resolveChange(root, flagValue(fields, "--flow"), flagValue(fields, "--change"))
+	if err != nil {
+		return denyGuard(stdout, "Telos human gate: no change can be resolved for completion; run telos inspect --json.")
+	}
+	return askGuard(stdout, fmt.Sprintf("Telos human gate — complete change %s and close flow %s with independent verifier evidence. Approve only after the independent verifier reported a verified verdict.", change.ID, change.Flow))
+}
+
+func gateRepairRestore(root string, stdout io.Writer) error {
+	reason := "Telos human gate — restore the repository to the last declared state. Every undeclared edit will be discarded."
+	if changed, _, _, err := auditRepository(root); err == nil && len(changed) > 0 {
+		preview := changed
+		if len(preview) > 5 {
+			preview = append(append([]string{}, changed[:5]...), fmt.Sprintf("… %d more", len(changed)-5))
+		}
+		reason = fmt.Sprintf("Telos human gate — restore %d undeclared path(s) to the last declared repository state, discarding their current content: %s.", len(changed), strings.Join(preview, ", "))
+	}
+	return askGuard(stdout, reason)
+}
+
+// brokerCommandFields returns the whitespace-separated fields of the command's
+// first line, excluding any heredoc redirection already validated by
+// isTelosBrokerCommand.
+func brokerCommandFields(command string) []string {
+	firstLine := strings.TrimSpace(strings.Split(strings.ReplaceAll(command, "\r\n", "\n"), "\n")[0])
+	if heredoc := strings.Index(firstLine, "<<"); heredoc >= 0 {
+		firstLine = firstLine[:heredoc]
+	}
+	return strings.Fields(firstLine)
+}
+
+func flagValue(fields []string, name string) string {
+	for i, field := range fields {
+		if field == name && i+1 < len(fields) {
+			return strings.Trim(fields[i+1], `"'`)
+		}
+		if value, ok := strings.CutPrefix(field, name+"="); ok {
+			return strings.Trim(value, `"'`)
+		}
+	}
+	return ""
+}
+
+func hasFlag(fields []string, name string) bool {
+	for _, field := range fields {
+		if field == name || strings.HasPrefix(field, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func artifactTitle(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if title, ok := strings.CutPrefix(line, "# "); ok {
+			return strings.TrimSpace(title)
+		}
+	}
+	return ""
+}
+
+func quoted(s string) string {
+	if s == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (%q)", s)
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+func askGuard(stdout io.Writer, reason string) error {
+	response := map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": reason}}
+	return json.NewEncoder(stdout).Encode(response)
 }
 
 func denyGuard(stdout io.Writer, reason string) error {

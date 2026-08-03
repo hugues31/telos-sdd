@@ -81,6 +81,8 @@ The two approvals are deliberately human:
 
 Each review returns a digest of the exact content shown. Any later change invalidates that approval.
 
+Both approvals are enforced by the harness, not by orchestrator discipline. `telos guard` answers every `intent seal`, `contract seal`, `change complete`, and `repair --restore` with an `ask` permission decision, so the provider surfaces a native permission prompt naming the flow, artifacts, and review digest. An agent cannot seal, complete, or restore silently; declining the prompt refuses the approval. A seal whose digest no longer matches the recorded review is denied outright, so the user is only prompted for seals that can succeed.
+
 ## Internal agents
 
 | Agent | Responsibility | Forbidden |
@@ -105,7 +107,7 @@ Every implementation patch records:
 - the `RULE-NNN` and `SCN-NNN` identifiers that authorize it;
 - append-only ledger evidence.
 
-Provider hooks deny ordinary Edit, Write, apply-patch and obvious shell mutation paths. The authoritative control is recomputation: if any byte differs from the last CLI-declared state, commands fail with:
+Provider hooks deny ordinary Edit, Write, apply-patch and obvious shell mutation paths, and force a native permission prompt on the four human-gate commands. The authoritative control is recomputation: if any byte differs from the last CLI-declared state, commands fail with:
 
 ```text
 TELOS_INTEGRITY_UNDECLARED_CHANGE: project corrupted

@@ -39,6 +39,8 @@ reviewed + sealed intent (CRIT-*)
 
 Review digests bind approval to exact draft bytes. Contract sealing stages and validates every spec, plan and feature before updating the artifact lock once.
 
+Sealing, completion and restore are additionally human-gated at the harness: `telos guard` answers `intent seal`, `contract seal`, `change complete` and `repair --restore` with an `ask` permission decision naming the flow, artifacts and review digest, and denies a seal whose digest no longer matches the recorded review. The approval record is therefore a provider permission prompt, not orchestrator-reported conversation.
+
 ## Repository integrity
 
 The artifact lock and repository lock are independent:
@@ -60,4 +62,4 @@ The JSON plan is the reviewed source and `.feature` is a deterministic projectio
 
 ## Provider boundary
 
-Codex and Claude Code receive the same public Skill content and equivalent custom-agent roles through their native repository layouts. Provider hooks call `telos guard`; no provider adapter contains integrity logic.
+Codex and Claude Code receive the same public Skill content and equivalent custom-agent roles through their native repository layouts. Provider hooks call `telos guard`; no provider adapter contains integrity logic. Guard denies non-broker mutations and never lets a human-gate command pass silently: it answers with `ask` or `deny`, so every seal, completion and restore surfaces a native permission prompt.

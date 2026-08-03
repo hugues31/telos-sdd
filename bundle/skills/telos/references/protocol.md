@@ -31,6 +31,8 @@ Repeat `--rule` and `--scenario` when a patch covers multiple contract elements.
 ## Failures
 
 - `TELOS_APPROVAL_STALE`: show the changed review again and obtain fresh approval.
+- Permission prompt declined on `intent seal`, `contract seal`, `change complete`, or `repair --restore`: the user refused the approval. Return to the matching review or inspection step; do not retry the command unchanged.
+- Guard denial of a seal (`Telos human gate: … digest is missing or stale`): re-run the matching review command and present the new content before sealing again.
 - `TELOS_TRACEABILITY_GAP` or `TELOS_CONTRACT_INVALID`: return to the responsible contract agent.
 - `TELOS_INTEGRITY_UNDECLARED_CHANGE`: report the project as corrupted. Do not continue or adopt the write. Use read-only `telos repair --json`, ask for approval, then restore through the CLI.
 

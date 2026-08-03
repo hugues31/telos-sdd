@@ -122,20 +122,7 @@ func TestInitPreservesUserFilesAndRefreshesIdempotently(t *testing.T) {
 	}
 }
 
-func TestFlowContractAndTamperInvalidation(t *testing.T) {
-	root := t.TempDir()
-	if err := initProject(root, "all", false); err != nil {
-		t.Fatal(err)
-	}
-	flow, err := startFlow(root, "Lock compromised accounts", "none")
-	if err != nil {
-		t.Fatal(err)
-	}
-	intentPath, _, _, err := findArtifact(root, "intent", flow.Intent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	intentBody := `# Lock compromised accounts
+const fixtureIntentBody = `# Lock compromised accounts
 
 ## Outcome
 
@@ -167,27 +154,8 @@ Existing sessions are outside this change.
 
 None.
 `
-	if _, err := putArtifact(root, flow.Intent, intentBody); err != nil {
-		t.Fatal(err)
-	}
-	flow, digest, _, err := reviewIntent(root, flow.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	flow, err = sealReviewedIntent(root, flow.ID, digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	flow, _, err = attachSpec(root, flow.ID, "Locked authentication")
-	if err != nil {
-		t.Fatal(err)
-	}
-	specID := flow.Specs[0]
-	specPath, _, _, err := findArtifact(root, "spec", specID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	specBody := `# Locked authentication
+
+const fixtureSpecBody = `# Locked authentication
 
 ## Context
 
@@ -221,9 +189,8 @@ An audit failure must not allow authentication.
 
 Each denial emits one account-lock audit event.
 `
-	if _, err := putArtifact(root, specID, specBody); err != nil {
-		t.Fatal(err)
-	}
+
+func fixturePlan(specID string) TestPlan {
 	plan := TestPlan{Spec: specID, Feature: slug(specID), Scenarios: []Scenario{{
 		ID: "SCN-001", Rule: "RULE-001", Name: "Deny a correct password after lock", Tags: append([]string(nil), coverageCategories...),
 		Given: []string{"an account is locked"}, When: []string{"the correct password is submitted"}, Then: []string{"authentication is denied", "no session is created"},
@@ -231,7 +198,46 @@ Each denial emits one account-lock audit event.
 	for _, category := range coverageCategories {
 		plan.Coverage = append(plan.Coverage, Coverage{Rule: "RULE-001", Category: category, Status: "covered"})
 	}
-	planData, _ := json.Marshal(plan)
+	return plan
+}
+
+func TestFlowContractAndTamperInvalidation(t *testing.T) {
+	root := t.TempDir()
+	if err := initProject(root, "all", false); err != nil {
+		t.Fatal(err)
+	}
+	flow, err := startFlow(root, "Lock compromised accounts", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentPath, _, _, err := findArtifact(root, "intent", flow.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, flow.Intent, fixtureIntentBody); err != nil {
+		t.Fatal(err)
+	}
+	flow, digest, _, err := reviewIntent(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, err = sealReviewedIntent(root, flow.ID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow, _, err = attachSpec(root, flow.ID, "Locked authentication")
+	if err != nil {
+		t.Fatal(err)
+	}
+	specID := flow.Specs[0]
+	specPath, _, _, err := findArtifact(root, "spec", specID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, specID, fixtureSpecBody); err != nil {
+		t.Fatal(err)
+	}
+	planData, _ := json.Marshal(fixturePlan(specID))
 	if _, err := putTestPlan(root, specID, planData); err != nil {
 		t.Fatal(err)
 	}
@@ -346,6 +352,97 @@ func TestGuardRequiresCLIBrokerForDirectWrites(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("guard denied CLI stdin streaming: %s", out.String())
+	}
+}
+
+func TestGuardForcesHumanGateOnSealCompleteRestore(t *testing.T) {
+	root := t.TempDir()
+	if err := initProject(root, "codex", false); err != nil {
+		t.Fatal(err)
+	}
+	guard := func(command string) string {
+		input := map[string]any{"cwd": root, "tool_name": "Bash", "tool_input": map[string]any{"command": command}}
+		b, _ := json.Marshal(input)
+		var out bytes.Buffer
+		if err := runGuard(bytes.NewReader(b), &out); err != nil {
+			t.Fatalf("guard failed on %q: %v", command, err)
+		}
+		return out.String()
+	}
+	flow, err := startFlow(root, "Lock compromised accounts", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := putArtifact(root, flow.Intent, fixtureIntentBody); err != nil {
+		t.Fatal(err)
+	}
+	if got := guard("telos intent seal --flow " + flow.ID + " --review deadbeef --json"); !strings.Contains(got, `"permissionDecision":"deny"`) {
+		t.Fatalf("unreviewed intent seal was not denied: %s", got)
+	}
+	flow, digest, _, err := reviewIntent(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"telos intent seal --flow " + flow.ID + " --review " + digest + " --json",
+		"telos intent seal --flow=" + flow.ID + " --review=" + digest + " --json",
+	} {
+		got := guard(command)
+		if !strings.Contains(got, `"permissionDecision":"ask"`) || !strings.Contains(got, flow.Intent) {
+			t.Fatalf("reviewed intent seal was not gated with ask (%q): %s", command, got)
+		}
+	}
+	if got := guard("telos intent seal --flow " + flow.ID + " --review deadbeef --json"); !strings.Contains(got, `"permissionDecision":"deny"`) {
+		t.Fatalf("stale intent seal digest was not denied: %s", got)
+	}
+	if got := guard("telos change complete --flow " + flow.ID + " --json"); !strings.Contains(got, `"permissionDecision":"deny"`) {
+		t.Fatalf("unresolvable change completion was not denied: %s", got)
+	}
+	if flow, err = sealReviewedIntent(root, flow.ID, digest); err != nil {
+		t.Fatal(err)
+	}
+	if flow, _, err = attachSpec(root, flow.ID, "Locked authentication"); err != nil {
+		t.Fatal(err)
+	}
+	specID := flow.Specs[0]
+	if _, err := putArtifact(root, specID, fixtureSpecBody); err != nil {
+		t.Fatal(err)
+	}
+	planData, _ := json.Marshal(fixturePlan(specID))
+	if _, err := putTestPlan(root, specID, planData); err != nil {
+		t.Fatal(err)
+	}
+	if got := guard("telos contract seal --flow " + flow.ID + " --json"); !strings.Contains(got, `"permissionDecision":"deny"`) {
+		t.Fatalf("unreviewed contract seal was not denied: %s", got)
+	}
+	flow, contractDigest, _, err := reviewContract(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := guard("telos contract seal --flow " + flow.ID + " --review " + contractDigest + " --json"); !strings.Contains(got, `"permissionDecision":"ask"`) || !strings.Contains(got, specID) {
+		t.Fatalf("reviewed contract seal was not gated with ask: %s", got)
+	}
+	if flow, err = sealReviewedContract(root, flow.ID, contractDigest); err != nil {
+		t.Fatal(err)
+	}
+	flow, change, err := beginFlowChange(root, flow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildContext(root, change.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := guard("telos change complete --flow " + flow.ID + " --json"); !strings.Contains(got, `"permissionDecision":"ask"`) || !strings.Contains(got, change.ID) {
+		t.Fatalf("change completion was not gated with ask: %s", got)
+	}
+	if got := guard("telos repair --restore --json"); !strings.Contains(got, `"permissionDecision":"ask"`) {
+		t.Fatalf("repair --restore was not gated with ask: %s", got)
+	}
+	if got := guard("telos repair --json"); got != "" {
+		t.Fatalf("read-only repair should pass silently: %s", got)
+	}
+	if got := guard("telos inspect --json"); got != "" {
+		t.Fatalf("inspect should pass silently: %s", got)
 	}
 }
 

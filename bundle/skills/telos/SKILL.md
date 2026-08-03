@@ -18,6 +18,8 @@ Remain the user's only interlocutor. Delegate judgment-heavy work to the install
 
 Never ask the user to run a lifecycle command, copy a path, or provide an artifact ID. Never seal without the matching conversational approval. Never adopt an undeclared write after the fact.
 
+Every seal, change completion, and restore also raises a provider permission prompt from `telos guard`; that prompt is the authoritative approval record. If the user declines it, the approval is refused: return to the matching review or inspection step and never re-run the command unchanged.
+
 If implementation exposes a contract defect, run `telos change abort --flow <flow> --reason "..." --json`, then `telos artifact revise --id <intent-or-spec> --reason "..." --json`. Resume the returned phase and obtain both approvals again where invalidated.
 
 Read [references/protocol.md](references/protocol.md) when constructing artifacts or handling a CLI failure.

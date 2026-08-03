@@ -62,7 +62,7 @@ Use `--agent codex` or `--agent claude` to install only one provider adapter. `i
 
 After initialization, talk normally to your coding agent:
 
-> Je veux empêcher un compte verrouillé de s’authentifier, sans fermer les sessions déjà ouvertes.
+> I want to prevent a locked account from signing in without terminating existing sessions.
 
 The repository instructions activate `$telos` in Codex or `/telos` in Claude Code. Explicit invocation remains available, but is not required.
 
@@ -76,8 +76,8 @@ The orchestrator:
 
 The two approvals are deliberately human:
 
-- **Intent:** “Est-ce bien le résultat voulu ?”
-- **Executable contract:** “Est-ce exactement le comportement attendu ?”
+- **Intent:** “Is this the desired outcome?”
+- **Executable contract:** “Is this exactly the expected behavior?”
 
 Each review returns a digest of the exact content shown. Any later change invalidates that approval.
 

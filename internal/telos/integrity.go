@@ -246,7 +246,7 @@ func findArtifact(root, kind, id string) (string, ArtifactMeta, string, error) {
 
 func validateBody(kind, body string) error {
 	lower := strings.ToLower(body)
-	if strings.Contains(lower, "todo") || strings.Contains(lower, "tbd") || strings.Contains(lower, "à compléter") {
+	if strings.Contains(lower, "todo") || strings.Contains(lower, "tbd") || strings.Contains(lower, "to be completed") {
 		return errors.New("unresolved placeholder (TODO/TBD) found")
 	}
 	required := map[string][]string{

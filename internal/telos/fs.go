@@ -213,8 +213,10 @@ func readConfig(root string) (Config, error) {
 			cfg.TestCommands = parseList(val)
 		case "test_files":
 			cfg.TestFiles = parseList(val)
-		case "infra":
-			cfg.Infra = parseList(val)
+		case "untraced":
+			cfg.Untraced = parseList(val)
+		default:
+			return cfg, coded("TELOS_CONFIG_INVALID", "unknown key "+strconv.Quote(key)+" in telos.toml; valid keys: agents, test_commands, test_files, untraced")
 		}
 	}
 	if err := s.Err(); err != nil {

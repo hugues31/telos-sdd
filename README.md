@@ -1,32 +1,38 @@
 # Telos SDD
 
-**Agent-first, executable intent integrity for Codex and Claude Code — without Tessl or a hosted runtime.**
+**The spec lives in the repo. Git is the history. Code follows the approved spec — for Codex and Claude Code, without Tessl or a hosted runtime.**
 
-Telos turns a product request into an approved, executable contract before allowing code to change. The user speaks to one orchestrator; five isolated specialists and a deterministic Go CLI carry out the workflow.
+In a Telos project, the versioned source of truth is `spec/`: a product intent (`spec/PRODUCT.md`) and behavioral rules with executable scenarios (`spec/<domain>.md`), in plain Markdown at the root of the repository. An agent challenges and sharpens your need in conversation, the resulting spec diff is approved by you through a native permission prompt, and only then does code change — through a broker that keeps both trees provably in sync:
+
+- a spec change without implementation fails verification: `TELOS_RULE_NOT_IMPLEMENTED`;
+- a code change without an approved spec fails verification: `TELOS_CODE_CORRUPTED`.
 
 ## Founding principles
 
 ### Code is becoming a generated artifact
 
-Modern coding models make source code progressively cheaper to produce and replace. The durable value of a software project therefore moves upstream: into its intent, behavioral specifications, constraints and executable examples.
-
-Telos treats code as one implementation of that contract, not as the primary source of truth. Given the same external context—dependencies, toolchain, runtime services and platform—a sufficiently complete specification should allow a modern coding model to reconstruct a functionally equivalent project with little or no human rewriting. The objective is not byte-for-byte reproduction, but reproduction of every specified behavior, boundary and prohibited side effect.
+Modern coding models make source code progressively cheaper to produce and replace. The durable value of a software project therefore moves upstream: into its intent, behavioral rules, and executable examples. Telos gives that asset first-class status: the spec is not internal tool data in a hidden directory — it is readable, reviewable, versioned content at the repository root, and its diff appears in every pull request next to the code it justifies.
 
 ### A bug is evidence about the specification
 
-Within a fixed external context, Telos treats an accepted bug as evidence that the executable contract was incorrect, imprecise, incomplete or inconsistent with another rule. If an implementation simply violates an already precise contract, verification should reject it; if it reaches users anyway, the contract's executable checks or verification process were themselves insufficient.
-
-Fixing a bug therefore means more than patching code. The intent, rule or scenario that permitted the defect must first be corrected or completed, then the implementation is regenerated or revised from that stronger contract. This prevents the codebase from accumulating fixes whose rationale exists only in source code or commit history.
+Telos treats an accepted bug as evidence that the contract was incorrect, imprecise, or incomplete. Fixing a bug therefore starts in `spec/`: the rule or scenario that permitted the defect is corrected and re-approved first, then the implementation follows from the stronger contract. The codebase never accumulates fixes whose rationale exists only in commit history.
 
 ```text
 Request
-  → Intent approval
-  → Specs + scenarios approval
-  → CLI-brokered implementation
-  → Independent verification
+  → conversation: the agent challenges and sharpens the need
+  → spec diff (objectives, rules, Gherkin scenarios)
+  → one human approval, enforced by the harness
+  → broker-applied implementation with annotations and tagged tests
+  → telos verify: spec == code, every rule proven
 ```
 
-The CLI owns state, validation, rendering, hashes and writes. Agents own judgment. The user never copies a Telos path, ID, or lifecycle command.
+## Three mechanical invariants
+
+1. **The spec matches its approved root.** Any difference — including a human editing `spec/` directly, which is legitimate — puts the project in `spec_pending`: the agent challenges and normalizes the diff, presents it, and the human approves. The spec is never silently restored.
+2. **The code matches its declared root.** Any out-of-band code edit is `TELOS_CODE_CORRUPTED`. Recovery is Git (`git restore`, checkout of a green commit) or a deliberate, human-gated re-baseline. The write is never adopted.
+3. **Every rule is proven by a tagged test.** A `RULE-NNN` is implemented only when a file matching the configured `test_files` references it and the configured `test_commands` pass. Until then the spec is ahead and `telos verify` fails — which is exactly what blocks a merge in CI.
+
+Every non-infra file carries a `telos: RULE-NNN` annotation in its first lines, validated on the post-image of every patch: code exists only because a rule demands it, and `telos trace RULE-NNN` lists the files and tests of any rule from the tree alone.
 
 ## Install
 
@@ -56,7 +62,7 @@ telos init --agent all --ci github
 telos doctor
 ```
 
-Use `--agent codex` or `--agent claude` to install only one provider adapter. `init` preserves existing project instructions and provider settings while owning its managed block and hook group.
+`init` requires a Git worktree. It creates `telos.toml` (human-owned configuration: test commands, test file patterns, infra exemptions), a `spec/PRODUCT.md` skeleton, and `.telos/state.json` (the only internal file, committed with your code), and installs the skill, agents, and guard hooks for the chosen providers. On an existing codebase, `init` adopts the current tree as the declared baseline; `telos verify` then lists every legacy file to classify — as infra in `telos.toml`, or as implementation of rules you specify progressively.
 
 ## Use
 
@@ -64,127 +70,62 @@ After initialization, talk normally to your coding agent:
 
 > I want to prevent a locked account from signing in without terminating existing sessions.
 
-The repository instructions activate `$telos` in Codex or `/telos` in Claude Code. Explicit invocation remains available, but is not required.
+The repository instructions activate `$telos` in Codex or `/telos` in Claude Code. The orchestrator:
 
-The orchestrator:
+1. runs `telos status --json` and routes on the phase;
+2. delegates challenging, implementation, and audit to three separate agents;
+3. presents the exact spec diff and asks for the one product decision that matters:
 
-1. runs `telos inspect --json` and resumes the active flow;
-2. uses brainstorming only when the problem or solution space is uncertain;
-3. delegates intent, spec, tests, implementation and verification to separate agents;
-4. asks for two product decisions in the main conversation;
-5. applies every repository mutation through the CLI.
+**"Is this exactly the intended behavior?"**
 
-The two approvals are deliberately human:
+That approval is enforced by the harness, not by orchestrator discipline: `telos guard` answers `telos spec approve` with an `ask` permission decision naming the digest and files, so the provider surfaces a native prompt. A digest that no longer matches the reviewed content is denied outright. Declining the prompt refuses the approval.
 
-- **Intent:** “Is this the desired outcome?”
-- **Executable contract:** “Is this exactly the expected behavior?”
-
-Each review returns a digest of the exact content shown. Any later change invalidates that approval.
-
-Both approvals are enforced by the harness, not by orchestrator discipline. `telos guard` answers every `intent seal`, `contract seal`, `change complete`, and `repair --restore` with an `ask` permission decision, so the provider surfaces a native permission prompt naming the flow, artifacts, and review digest. An agent cannot seal, complete, or restore silently; declining the prompt refuses the approval. A seal whose digest no longer matches the recorded review is denied outright, so the user is only prompted for seals that can succeed.
+There is no completion ceremony: green `telos verify` is completion, your Git commit is the record, and the PR diff shows the spec change next to the code that implements it.
 
 ## Internal agents
 
 | Agent | Responsibility | Forbidden |
 | --- | --- | --- |
-| `telos-product` | Brainstorming and measurable intent | Specs, tests, code |
-| `telos-spec-architect` | Observable rules, boundaries and non-effects | Weakening intent from existing code |
-| `telos-test-architect` | Adversarial scenarios and coverage decisions | Inspecting implementation first |
-| `telos-implementer` | Smallest traced Git patch | Direct repository writes |
-| `telos-verifier` | Read-only integrity and test-honesty audit | Repairing or waiving failures |
-
-These are delegated specialists, not extra user-facing commands.
-
-## Strict integrity
-
-Telos inventories every Git-tracked or non-ignored regular file, excluding `.git/**` and internal `.telos/**` data. It stores normalized SHA-256 hashes and content-addressed recovery blobs.
-
-Every implementation patch records:
-
-- its SHA-256 digest;
-- its before and after repository roots;
-- every touched path;
-- the `RULE-NNN` and `SCN-NNN` identifiers that authorize it;
-- append-only ledger evidence.
-
-Provider hooks deny ordinary Edit, Write, apply-patch and obvious shell mutation paths, and force a native permission prompt on the four human-gate commands. The authoritative control is recomputation: if any byte differs from the last CLI-declared state, commands fail with:
-
-```text
-TELOS_INTEGRITY_UNDECLARED_CHANGE: project corrupted
-```
-
-The write cannot be adopted after the fact. The orchestrator may inspect the repair plan, request explicit approval, then run `telos repair --restore --json` to reconstruct the last declared state.
-
-Git-ignored build outputs remain outside the inventory. A test or generator that changes a non-ignored file makes verification fail.
-
-## Executable contract
-
-Intent success criteria use stable headings:
-
-```markdown
-### CRIT-001 — Locked authentication is denied
-```
-
-Every normative rule traces one or more criteria:
-
-```markdown
-### RULE-001 — Deny authentication
-
-Traces: CRIT-001
-```
-
-Every rule receives an explicit decision for nine coverage categories: positive, negative, boundary, authorization, state transition, retry/idempotency, concurrency, failure/recovery and prohibited side effects. A category is either backed by a tagged `SCN-NNN` scenario or marked `not_applicable` with a concrete rationale.
-
-Contract sealing is atomic: specs, JSON plans and deterministic `features/*.feature` files are all sealed, or none are.
-
-If implementation exposes a wrong contract, Telos reverses declared patches with `change abort`, then creates an immutable intent or spec successor with `artifact revise`. It never edits a sealed artifact.
-
-## CLI primitives for agents and CI
-
-The workflow API is intentionally machine-oriented. Every command supports a stable `--json` envelope with `ok`, `command`, `result`, `next_actions`, and structured error codes.
-
-```text
-telos inspect --json
-telos flow start --brainstorm none|recommend --json
-telos artifact put --id ... --json
-telos intent new|review|seal --flow ... --json
-telos spec new --flow ... --json
-telos test-plan put --spec ... --json
-telos contract validate|review|seal --flow ... --json
-telos change begin|apply|abort|complete --flow ... --json
-telos artifact revise --id ... --json
-telos verify --flow ... --check-only --json
-telos repair --restore --json
-```
-
-Humans normally need only `init` and `doctor`.
+| `telos-challenger` | Brainstorming, challenging the need, drafting the spec diff | Approving, touching code |
+| `telos-implementer` | Smallest annotated patches and tagged tests via the broker | Direct writes, weakening assertions |
+| `telos-verifier` | Read-only audit: test honesty, patch scope, annotation truth | Repairing or waiving failures |
 
 ## Repository model
 
 ```text
+telos.toml               # human-owned config: test_commands, test_files, infra patterns
+spec/
+  PRODUCT.md             # vision, OBJ-* objectives, constraints, non-goals
+  <domain>.md            # RULE-* rules, Traces: OBJ-*, ```gherkin scenarios
 .telos/
-  config.toml
-  flows/*.json             # FLW-* state machine
-  brainstorms/*.md
-  intents/*.md             # CRIT-* outcome contract
-  specs/*.md               # RULE-* behavioral contract
-  test-plans/*.json        # SCN-* plus coverage matrix
-  changes/*.json           # implementation scope and source roots
-  mutations/*.json         # traced patch transactions
-  patches/*.patch          # immutable patch evidence
-  blobs/*                  # content-addressed recovery data
-  ledger/events/*.json     # append-only events
-  lock.json                # sealed artifact root
-  repository-lock.json     # declared repository root
-  context.md               # generated implementation boundary
-features/*.feature         # deterministic executable contract
+  state.json             # approved spec root + declared code root (committed)
+<code>                   # every non-infra file annotated `telos: RULE-*`
+<tests>                  # every rule referenced by a tagged test
 ```
+
+OBJ and RULE ids are unique across the repository. Rules trace to objectives; annotations trace files to rules; tags trace tests to rules. The whole chain is recomputable from the working tree — there is no ledger, no blob store, no internal history. Git already does that.
+
+## CLI
+
+Every command supports a stable `--json` envelope with `ok`, `command`, `result`, `next_actions`, and structured error codes.
+
+```text
+telos init [--agent codex|claude|all] [--ci github]
+telos doctor | telos status | telos version
+telos spec put --file spec/<name>.md [--delete]   # brokered spec writes (stdin)
+telos spec review                                 # digest + exact content to present
+telos spec approve --review <digest>              # the single human gate
+telos apply --rule RULE-NNN [--rule ...]          # brokered Git patch (stdin)
+telos verify                                      # recompute every invariant
+telos trace [RULE-NNN]                            # rule → files → tests
+telos guard                                       # provider hook endpoint
+```
+
+Humans normally need only `init` and `doctor` — and their IDE for `spec/`, since a direct spec edit is simply a pending diff the agent will pick up, normalize, and bring to approval.
 
 ## Security boundary
 
-Telos detects undeclared content and makes ordinary agent bypasses visible. It does not create an operating-system privilege boundary: a malicious process running with the same user privileges can attempt to bypass local hooks and rewrite metadata. Hostile guarantees require an external signer, protected key material or privilege-separated broker.
-
-Hashes also cannot prove semantic equivalence between prose and code. Telos combines structural traceability, executable scenarios and an independent verifier to make drift reviewable rather than claiming a formal proof.
+Telos makes undeclared changes visible and forces human decisions through native permission prompts. It does not create an operating-system privilege boundary: a malicious process running with the same user privileges can rewrite state and Git history consistently. Hashes prove byte identity, not semantic equivalence between prose and code; the file-level annotation guarantee is mechanical, while sub-file honesty (a decorative test tag, an unrelated hunk) is audited by the independent verifier and reviewed by the human on the spec diff. See [docs/threat-model.md](docs/threat-model.md).
 
 ## Development
 
@@ -194,7 +135,7 @@ go vet ./...
 python3 scripts/validate-skills.py
 ```
 
-See [docs/architecture.md](docs/architecture.md), [docs/threat-model.md](docs/threat-model.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+See [docs/architecture.md](docs/architecture.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -1,25 +1,30 @@
 ---
 name: telos
-description: Orchestrate a software change from product request through intent, executable contract, CLI-brokered implementation, and independent verification. Use for any feature, bug fix, refactor, or other repository modification in a Telos project; resume the active flow instead of asking the user for Telos commands, IDs, or paths.
+description: Orchestrate a software change in a Telos project, where the spec under spec/ is the versioned source of intent and code follows the approved spec. Use for any feature, bug fix, refactor, or repository modification; route on the phase returned by telos status instead of asking the user for Telos commands or paths.
 ---
 
 # Telos
 
-Remain the user's only interlocutor. Delegate judgment-heavy work to the installed Telos agents, but keep questions and approvals in this conversation.
+Remain the user's only interlocutor. Delegate judgment-heavy work to the installed Telos agents, but keep questions and the single approval in this conversation.
 
-1. Run `telos inspect --json` before reasoning about the request. Stop on any integrity error; offer `telos repair --json`, then request explicit approval before `telos repair --restore --json`.
-2. Resume the returned phase. If no flow is active, decide whether divergent exploration is material. Run `telos flow start --brainstorm recommend --json` for uncertain problems or `telos flow start --brainstorm none --json` for a precise request, passing the request through stdin.
-3. Delegate discovery and intent drafting to `telos-product`. Relay only material questions. Require it to write through `telos artifact put --json`.
-4. Run `telos intent review --flow <flow> --json`. Present the returned content without its ID or path. Ask: “Is this the desired outcome?” Seal only after explicit approval, using the exact returned digest.
-5. Delegate behavioral rules to `telos-spec-architect`. Give the resulting intent and spec content—not repository paths—to `telos-test-architect`; it must remain blind to production code, existing implementation tests, and implementation patches. Both specialists must use the CLI. If tests expose ambiguity, return to the intent/spec workflow instead of inventing an expectation.
-6. Run `telos contract review --flow <flow> --json`. Present specs, scenarios, coverage decisions, and non-effects together. Ask: “Is this exactly the expected behavior?” Seal only after explicit approval with the current digest.
-7. Run `telos change begin --flow <flow> --json`, then delegate implementation to `telos-implementer`. It must submit Git patches through `telos change apply`; never edit repository files directly.
-8. Delegate the final audit to `telos-verifier`. After a `verified` verdict and `telos verify --check-only --json`, pass its evidence to `telos change complete --flow <flow> --json`.
+Run `telos status --json` before reasoning about the request and route on `phase`:
 
-Never ask the user to run a lifecycle command, copy a path, or provide an artifact ID. Never seal without the matching conversational approval. Never adopt an undeclared write after the fact.
+- `corrupted` — code changed outside the broker. Stop. Report the changed files and explain recovery: the human restores via Git (`git restore` / checkout of a green commit) or deliberately re-baselines with `telos init`. Never adopt or repair the write yourself.
+- `spec_pending` — the spec differs from its approved state (a human may have edited it directly; that is legitimate). Delegate to `telos-challenger`: it questions the pending diff, normalizes it into well-formed objectives and rules through `telos spec put`, and never discards the human's intent. Then continue at the review step.
+- `awaiting_approval` — a review digest is recorded. Re-present the reviewed content and continue at the approval step.
+- `implementing` — approved rules lack tagged tests. Continue at the implementation step.
+- `clean` — nothing pending. Engage `telos-challenger` on the user's new request.
 
-Every seal, change completion, and restore also raises a provider permission prompt from `telos guard`; that prompt is the authoritative approval record. If the user declines it, the approval is refused: return to the matching review or inspection step and never re-run the command unchanged.
+The nominal cycle:
 
-If implementation exposes a contract defect, run `telos change abort --flow <flow> --reason "..." --json`, then `telos artifact revise --id <intent-or-spec> --reason "..." --json`. Resume the returned phase and obtain both approvals again where invalidated.
+1. **Challenge.** Delegate brainstorming and requirement analysis to `telos-challenger`. Relay its material questions to the user. It drafts the spec diff — objectives in `spec/PRODUCT.md`, rules with Gherkin scenarios in domain files — exclusively through `telos spec put --json`.
+2. **Review.** Run `telos spec review --json` and present the returned file contents to the user in full. Ask: "Is this exactly the intended behavior?"
+3. **Approve.** After conversational agreement, run `telos spec approve --review <digest> --json`. The provider permission prompt raised by `telos guard` is the authoritative approval record. If the user declines it, the approval is refused: return to step 1 and never re-run the command unchanged.
+4. **Implement.** Delegate to `telos-implementer`. It submits Git patches through `telos apply --rule RULE-NNN --json`, leaving every touched file annotated and every rule proven by a tagged test, and iterates until `telos verify --json` is green.
+5. **Audit.** Delegate a read-only audit to `telos-verifier` (test honesty, patch scope, annotation truthfulness). Only after its verdict and a green `telos verify` do you tell the user the change is complete. There is no completion command: green verification is completion, and Git is the history.
 
-Read [references/protocol.md](references/protocol.md) when constructing artifacts or handling a CLI failure.
+A refactor that changes no spec content skips steps 1–3.
+
+Never ask the user to run a lifecycle command or copy a path. Never edit repository files directly — the guard denies Edit/Write and non-Telos shell commands. If implementation exposes a spec defect, stop implementing and return to step 1: the spec is corrected and re-approved first, then the code follows.
+
+Read [references/protocol.md](references/protocol.md) when drafting spec content or handling a CLI error code.

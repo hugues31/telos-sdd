@@ -1,5 +1,5 @@
 name: Verify Telos integrity
-description: Install Telos and verify the sealed intent chain in a repository
+description: Install Telos and verify that spec and code are in sync in a repository
 
 inputs:
   version:
@@ -19,4 +19,4 @@ runs:
       run: go install github.com/hugues31/telos-sdd/cmd/telos@${{ inputs.version }}
     - name: Verify Telos
       shell: bash
-      run: telos verify --check-only --json
+      run: telos verify --json

@@ -1,12 +1,11 @@
 # Roadmap
 
-Telos establishes the agent-first orchestrator, strict mutation broker, atomic executable contract and deterministic recovery model. Candidate follow-ups:
+Telos establishes the spec-first, git-native model: the versioned spec as source of truth, a single harness-enforced approval on the spec diff, brokered annotated implementation, and per-rule executable proof. Candidate follow-ups:
 
-- external signatures and CI attestations for repository and contract roots;
+- external signatures and CI attestations for spec and code roots;
 - privilege-separated local mutation broker;
-- mutation-testing and coverage-policy adapters;
-- Cucumber message output and framework-specific step adapters;
-- pull-request annotations for untraced code and weakened assertions;
-- semantic contradiction and completeness analysis;
-- worktree-aware concurrent flow coordination;
-- reconstruction benchmarks that regenerate implementations from specs alone.
+- pull-request annotations surfacing the spec diff and per-rule coverage;
+- semantic contradiction and completeness analysis across domain specs;
+- mutation-testing adapters to harden the "tagged test really asserts the rule" guarantee;
+- worktree-aware concurrent change coordination;
+- reconstruction benchmarks that regenerate implementations from `spec/` alone.

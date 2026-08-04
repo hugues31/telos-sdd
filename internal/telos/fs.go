@@ -2,20 +2,18 @@ package telos
 
 import (
 	"bufio"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func findRoot(start string) (string, error) {
@@ -24,7 +22,7 @@ func findRoot(start string) (string, error) {
 		return "", err
 	}
 	for {
-		if st, err := os.Stat(filepath.Join(p, ".telos")); err == nil && st.IsDir() {
+		if st, err := os.Stat(filepath.Join(p, configFile)); err == nil && st.Mode().IsRegular() {
 			return p, nil
 		}
 		next := filepath.Dir(p)
@@ -33,20 +31,6 @@ func findRoot(start string) (string, error) {
 		}
 		p = next
 	}
-}
-
-func ensureDirs(root string) error {
-	dirs := []string{
-		".telos/brainstorms", ".telos/intents", ".telos/specs", ".telos/test-plans",
-		".telos/changes", ".telos/flows", ".telos/mutations", ".telos/patches", ".telos/blobs",
-		".telos/ledger/events", "features",
-	}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(dir)), 0o755); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func atomicWrite(path string, data []byte, mode fs.FileMode) error {
@@ -120,25 +104,54 @@ func fileHash(path string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func rootHash(files []LockedFile) string {
-	ordered := append([]LockedFile(nil), files...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
+func rootHashMap(files map[string]string) string {
+	paths := make([]string, 0, len(files))
+	for p := range files {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
 	h := sha256.New()
-	for _, f := range ordered {
-		io.WriteString(h, filepath.ToSlash(f.Path))
+	for _, p := range paths {
+		io.WriteString(h, p)
 		h.Write([]byte{0})
-		io.WriteString(h, f.Hash)
+		io.WriteString(h, files[p])
 		h.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func newID(prefix string, now time.Time) (string, error) {
-	b := make([]byte, 3)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+// globMatch matches slash-separated relative paths. `*` and `?` stay within
+// one path segment; `**` spans any number of segments, including zero.
+func globMatch(pattern, rel string) bool {
+	return matchSegments(strings.Split(pattern, "/"), strings.Split(rel, "/"))
+}
+
+func matchSegments(pattern, segments []string) bool {
+	if len(pattern) == 0 {
+		return len(segments) == 0
 	}
-	return strings.ToUpper(prefix) + "-" + now.UTC().Format("20060102") + "-" + strings.ToUpper(hex.EncodeToString(b)), nil
+	if pattern[0] == "**" {
+		if matchSegments(pattern[1:], segments) {
+			return true
+		}
+		return len(segments) > 0 && matchSegments(pattern, segments[1:])
+	}
+	if len(segments) == 0 {
+		return false
+	}
+	if ok, err := path.Match(pattern[0], segments[0]); err != nil || !ok {
+		return false
+	}
+	return matchSegments(pattern[1:], segments[1:])
+}
+
+func matchAny(patterns []string, rel string) bool {
+	for _, pattern := range patterns {
+		if globMatch(pattern, rel) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseList(s string) []string {
@@ -153,6 +166,9 @@ func parseList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
 		if v, err := strconv.Unquote(part); err == nil {
 			out = append(out, v)
 		}
@@ -168,103 +184,43 @@ func quoteList(v []string) string {
 	return "[" + strings.Join(parts, ", ") + "]"
 }
 
+func stripComment(line string) string {
+	return strings.SplitN(line, "#", 2)[0]
+}
+
 func readConfig(root string) (Config, error) {
 	cfg := Config{}
-	f, err := os.Open(filepath.Join(root, ".telos", "config.toml"))
+	f, err := os.Open(filepath.Join(root, configFile))
 	if err != nil {
-		return cfg, err
+		return cfg, coded("TELOS_CONFIG_INVALID", "telos.toml is missing or unreadable; run `telos init`")
 	}
 	defer f.Close()
 	s := bufio.NewScanner(f)
 	for s.Scan() {
-		line := strings.TrimSpace(strings.SplitN(s.Text(), "#", 2)[0])
+		line := strings.TrimSpace(stripComment(s.Text()))
 		kv := strings.SplitN(line, "=", 2)
 		if len(kv) != 2 {
 			continue
 		}
 		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+		for strings.HasPrefix(val, "[") && !strings.HasSuffix(val, "]") && s.Scan() {
+			val += " " + strings.TrimSpace(stripComment(s.Text()))
+		}
 		switch key {
 		case "agents":
 			cfg.Agents = parseList(val)
-		case "verification_commands":
-			cfg.VerificationCommands = parseList(val)
+		case "test_commands":
+			cfg.TestCommands = parseList(val)
+		case "test_files":
+			cfg.TestFiles = parseList(val)
+		case "infra":
+			cfg.Infra = parseList(val)
 		}
 	}
-	return cfg, s.Err()
-}
-
-func configText(cfg Config) string {
-	return fmt.Sprintf("agents = %s\nverification_commands = %s\n", quoteList(cfg.Agents), quoteList(cfg.VerificationCommands))
-}
-
-func parseArtifact(data []byte) (ArtifactMeta, string, error) {
-	text := string(normalize(data))
-	if !strings.HasPrefix(text, "+++\n") {
-		return ArtifactMeta{}, "", errors.New("missing TOML frontmatter")
+	if err := s.Err(); err != nil {
+		return cfg, coded("TELOS_CONFIG_INVALID", "telos.toml is unreadable: "+err.Error())
 	}
-	end := strings.Index(text[4:], "\n+++\n")
-	if end < 0 {
-		return ArtifactMeta{}, "", errors.New("unterminated TOML frontmatter")
-	}
-	head := text[4 : 4+end]
-	body := text[4+end+5:]
-	meta := ArtifactMeta{}
-	for _, line := range strings.Split(head, "\n") {
-		kv := strings.SplitN(line, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
-		switch key {
-		case "id":
-			meta.ID, _ = strconv.Unquote(val)
-		case "type":
-			meta.Kind, _ = strconv.Unquote(val)
-		case "status":
-			meta.Status, _ = strconv.Unquote(val)
-		case "revision":
-			meta.Revision, _ = strconv.Atoi(val)
-		case "intent":
-			meta.Intent, _ = strconv.Unquote(val)
-		case "flow":
-			meta.Flow, _ = strconv.Unquote(val)
-		case "supersedes":
-			meta.Supersedes, _ = strconv.Unquote(val)
-		case "parents":
-			meta.Parents = parseList(val)
-		}
-	}
-	if meta.ID == "" || meta.Kind == "" {
-		return meta, body, errors.New("frontmatter requires id and type")
-	}
-	return meta, body, nil
-}
-
-func renderArtifact(meta ArtifactMeta, body string) []byte {
-	var b strings.Builder
-	b.WriteString("+++\n")
-	fmt.Fprintf(&b, "id = %q\ntype = %q\nstatus = %q\nrevision = %d\n", meta.ID, meta.Kind, meta.Status, meta.Revision)
-	if meta.Intent != "" {
-		fmt.Fprintf(&b, "intent = %q\n", meta.Intent)
-	}
-	if meta.Flow != "" {
-		fmt.Fprintf(&b, "flow = %q\n", meta.Flow)
-	}
-	if meta.Supersedes != "" {
-		fmt.Fprintf(&b, "supersedes = %q\n", meta.Supersedes)
-	}
-	if len(meta.Parents) > 0 {
-		fmt.Fprintf(&b, "parents = %s\n", quoteList(meta.Parents))
-	}
-	b.WriteString("+++\n")
-	if !strings.HasPrefix(body, "\n") {
-		b.WriteByte('\n')
-	}
-	b.WriteString(body)
-	if !strings.HasSuffix(body, "\n") {
-		b.WriteByte('\n')
-	}
-	return []byte(b.String())
+	return cfg, nil
 }
 
 func managed(existing, block string) string {

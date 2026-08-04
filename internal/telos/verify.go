@@ -71,6 +71,27 @@ func runVerify(root string, stdout, stderr io.Writer) (map[string]any, error) {
 	if len(untested) > 0 {
 		return nil, codedPaths("TELOS_RULE_NOT_IMPLEMENTED", "these rules have no tagged test yet; the spec is ahead of the implementation", untested)
 	}
+	if len(st.Red) > 0 {
+		var stale, pending []string
+		for _, id := range sortedRedIDs(st.Red) {
+			intact := true
+			for rel, hash := range st.Red[id].Tests {
+				if code[rel] != hash {
+					intact = false
+					break
+				}
+			}
+			if intact {
+				pending = append(pending, id)
+			} else {
+				stale = append(stale, id)
+			}
+		}
+		if len(stale) > 0 {
+			return nil, codedPaths("TELOS_RED_STALE", "sealed failing tests no longer match their recorded red evidence; the state or tree was tampered with", stale)
+		}
+		return nil, codedPaths("TELOS_RED_PENDING", "these rules hold a witnessed failing test and await their green witness; complete the implementation through `telos apply`", pending)
+	}
 	if err := runTestCommands(root, cfg.TestCommands, stdout, stderr); err != nil {
 		return nil, coded("TELOS_TESTS_FAILED", err.Error())
 	}
@@ -129,8 +150,9 @@ func runStatus(root string) (map[string]any, []string, error) {
 		},
 		"rules": map[string]any{
 			"total":    len(model.Rules),
-			"tested":   len(model.Rules) - len(untested),
+			"tested":   len(model.Rules) - len(untested) - len(st.Red),
 			"untested": untested,
+			"red":      sortedRedIDs(st.Red),
 		},
 		"spec_problems": problems,
 	}
@@ -138,7 +160,9 @@ func runStatus(root string) (map[string]any, []string, error) {
 }
 
 // derivePhase orders the derived states: an out-of-band code edit outranks a
-// pending spec, which outranks unimplemented rules. Phases are never stored.
+// pending spec, which outranks unimplemented rules. A rule holding red
+// evidence is still implementing — its failing test awaits its green witness.
+// Phases are never stored.
 func derivePhase(st State, specRoot, codeRoot string, untested int) (string, []string) {
 	switch {
 	case codeRoot != st.Code.Root:
@@ -147,7 +171,7 @@ func derivePhase(st State, specRoot, codeRoot string, untested int) (string, []s
 		return "awaiting_approval", []string{"spec approve"}
 	case specRoot != st.Spec.Root:
 		return "spec_pending", []string{"spec review"}
-	case untested > 0:
+	case untested > 0 || len(st.Red) > 0:
 		return "implementing", []string{"apply", "verify"}
 	}
 	return "clean", []string{"spec put"}

@@ -134,11 +134,10 @@ func fileAnnotations(path string) ([]string, bool, error) {
 	return nil, false, nil
 }
 
-// testedRules collects every RULE id referenced by a file matching the
-// configured test_files patterns. A rule counts as implemented when it appears
-// here and the configured test commands pass.
-func testedRules(root string, cfg Config, code map[string]string) (map[string]bool, error) {
-	out := map[string]bool{}
+// testFileRefs maps every file matching the configured test_files patterns to
+// the RULE ids its content references.
+func testFileRefs(root string, cfg Config, code map[string]string) (map[string][]string, error) {
+	out := map[string][]string{}
 	for rel := range code {
 		if !matchAny(cfg.TestFiles, rel) {
 			continue
@@ -147,7 +146,22 @@ func testedRules(root string, cfg Config, code map[string]string) (map[string]bo
 		if err != nil {
 			return nil, err
 		}
-		for _, id := range ruleRef.FindAllString(string(normalize(data)), -1) {
+		out[rel] = uniqueStrings(ruleRef.FindAllString(string(normalize(data)), -1))
+	}
+	return out, nil
+}
+
+// testedRules collects every RULE id referenced by a file matching the
+// configured test_files patterns. A rule counts as implemented when it appears
+// here and the configured test commands pass.
+func testedRules(root string, cfg Config, code map[string]string) (map[string]bool, error) {
+	refs, err := testFileRefs(root, cfg, code)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, ids := range refs {
+		for _, id := range ids {
 			out[id] = true
 		}
 	}

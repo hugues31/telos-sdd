@@ -22,7 +22,7 @@ Usage:
   telos spec put --file spec/<name>.md [--delete] [--json] < content.md
   telos spec review [--json]
   telos spec approve --review <digest> [--json]
-  telos apply --rule RULE-NNN [--rule ...] [--json] < patch.diff
+  telos apply --rule RULE-NNN [--rule ...] [--expect-pass] [--json] < patch.diff
   telos verify [--json]
   telos trace [RULE-NNN] [--json]
   telos view [--out <path>] [--open] [--json]
@@ -102,6 +102,7 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		f := flags("apply", stderr)
 		var rules stringList
 		f.Var(&rules, "rule", "RULE-NNN reference (repeatable)")
+		expectPass := f.Bool("expect-pass", false, "adopt existing behavior: the suite must pass with the documentation test in place (human-gated)")
 		if err := f.Parse(args[1:]); err != nil {
 			return finish(commandExecution{}, err)
 		}
@@ -109,10 +110,18 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		if err != nil {
 			return finish(commandExecution{}, err)
 		}
-		result, err := runApply(root, rules, patch)
+		result, err := runApply(root, rules, patch, *expectPass, stderr)
 		human := ""
 		if err == nil {
 			human = fmt.Sprintf("Applied patch for %s through Telos.", strings.Join(rules, ", "))
+			switch result["suite"] {
+			case "red":
+				human = fmt.Sprintf("Red witnessed for %s: the failing tests are sealed; only the implementation may turn them green.", strings.Join(rules, ", "))
+			case "green":
+				if proven, ok := result["proven"].([]string); ok && len(proven) > 0 {
+					human = fmt.Sprintf("Suite green witnessed through Telos; proven: %s.", strings.Join(proven, ", "))
+				}
+			}
 		}
 		return finish(commandExecution{Command: "apply", Result: result, Next: []string{"verify"}, Human: human}, err)
 	case "verify":
@@ -354,12 +363,14 @@ func isTelosBrokerCommand(command string) bool {
 	return true
 }
 
-// gateBrokerCommand screens an already-validated broker command for the two
-// human-gated operations: spec approve (the single workflow gate) and re-init
-// (the administrative re-baseline escape hatch). These never pass silently —
-// the human decision happens at the provider permission prompt, not on the
-// orchestrator's word. An approve whose digest no longer matches the recorded
-// review is denied outright so the user is only prompted when it can succeed.
+// gateBrokerCommand screens an already-validated broker command for the
+// human-gated operations: spec approve (the single workflow gate), re-init
+// (the administrative re-baseline escape hatch), and apply on a clean project
+// (the refactor claim) or with --expect-pass (the adoption claim). These never
+// pass silently — the human decision happens
+// at the provider permission prompt, not on the orchestrator's word. An
+// approve whose digest no longer matches the recorded review is denied
+// outright so the user is only prompted when it can succeed.
 func gateBrokerCommand(root string, stdout io.Writer, command string) error {
 	fields := brokerCommandFields(command)
 	if len(fields) < 2 {
@@ -374,8 +385,74 @@ func gateBrokerCommand(root string, stdout io.Writer, command string) error {
 		return gateSpecApprove(root, stdout, fields)
 	case fields[1] == "init":
 		return askGuard(stdout, "Telos human gate — re-initialize Telos in an already-initialized project: this re-baselines the declared spec and code roots, adopting the current tree as-is. Approve only if you deliberately want to reset the declared state.")
+	case fields[1] == "apply":
+		return gateApply(root, stdout, command, fields)
 	}
 	return nil
+}
+
+// gateApply lets spec-driven patches through silently: while approved rules
+// still lack proof, the human decision already happened at spec approval. Two
+// applies carry a claim only the human can accept and are prompted: an apply
+// on a clean project — a code change no spec diff motivates, claiming behavior
+// preservation (refactor, test hardening); a reported bug never qualifies,
+// since it is evidence the spec was too weak — and an apply with --expect-pass,
+// which claims a rule is already satisfied by the current code, so its test
+// will never be witnessed failing. On any other phase the guard stays silent
+// and the command itself fails with the precise error code.
+func gateApply(root string, stdout io.Writer, command string, fields []string) error {
+	result, _, err := runStatus(root)
+	if err != nil {
+		return nil
+	}
+	subject := strings.Join(flagValues(fields, "--rule"), ", ")
+	if subject == "" {
+		subject = "unspecified rules"
+	}
+	if hasFlag(fields, "--expect-pass") {
+		if result["phase"] != "implementing" {
+			return nil
+		}
+		return askGuard(stdout, fmt.Sprintf("Telos human gate — adopt existing behavior as proof: the test for %s is expected to pass immediately, so it will never be witnessed failing. Approve only if the rule documents behavior the code already has; new behavior must enter through a witnessed failing test.", subject))
+	}
+	if result["phase"] != "clean" {
+		return nil
+	}
+	if files := patchFiles(command); len(files) > 0 {
+		subject += " touching " + strings.Join(files, ", ")
+	}
+	return askGuard(stdout, fmt.Sprintf("Telos human gate — code change without a spec change: the project is clean, so this patch for %s claims to preserve behavior (refactor or test hardening). Approve only if no behavior changes; a bug fix must strengthen the spec first.", subject))
+}
+
+func hasFlag(fields []string, name string) bool {
+	for _, field := range fields {
+		if field == name {
+			return true
+		}
+	}
+	return false
+}
+
+// patchFiles lists the paths targeted by the unified diff carried in the
+// command's heredoc body, so the permission prompt names what the patch
+// touches.
+func patchFiles(command string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.ReplaceAll(command, "\r\n", "\n"), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "diff --git a/")
+		if !ok {
+			continue
+		}
+		if i := strings.LastIndex(rest, " b/"); i >= 0 {
+			rest = rest[:i]
+		}
+		if rest != "" && !seen[rest] {
+			seen[rest] = true
+			out = append(out, rest)
+		}
+	}
+	return out
 }
 
 func gateSpecApprove(root string, stdout io.Writer, fields []string) error {
@@ -413,6 +490,19 @@ func flagValue(fields []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func flagValues(fields []string, name string) []string {
+	var out []string
+	for i, field := range fields {
+		if field == name && i+1 < len(fields) {
+			out = append(out, strings.Trim(fields[i+1], `"'`))
+		}
+		if value, ok := strings.CutPrefix(field, name+"="); ok {
+			out = append(out, strings.Trim(value, `"'`))
+		}
+	}
+	return out
 }
 
 func shortHash(h string) string {

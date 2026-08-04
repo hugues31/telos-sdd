@@ -3,20 +3,19 @@
 ## Protected against
 
 - ordinary direct Edit, Write, apply-patch and obvious shell mutation attempts observed by provider hooks;
-- undeclared tracked or non-ignored file changes through repository-root recomputation;
-- direct draft edits through flow-owned draft hashes;
-- sealed artifact drift and stale descendants;
-- rewritten mutation JSON when it differs from stored patch bytes or append-only ledger evidence;
-- happy-path-only coverage through a mandatory per-rule category matrix;
-- speculative code through RULE/SCN references on every patch;
-- partial contract sealing through staged validation and rollback;
-- contract defects being hidden by implementation changes, through abort and immutable revision flows;
-- an orchestrator sealing an artifact, completing a change or restoring the repository without a human decision: `telos guard` answers these commands with an `ask` permission decision so the provider surfaces a native prompt, and denies seals whose digest no longer matches the recorded review.
+- undeclared code changes, through code-root recomputation before and after every broker operation and in `telos verify`;
+- silent spec changes, through spec-root recomputation: any pending diff must pass review and a native human approval prompt before implementation resumes;
+- an approval binding to different bytes than were reviewed: the digest is recomputed at the gate by both the guard and the command, and a stale digest is denied outright;
+- unjustified code, through mandatory file-level `telos:` annotations validated on every patch post-image against the cited rules;
+- specification without proof, through per-rule tagged tests and real execution of the configured test commands;
+- test commands that mutate tracked files, through post-run root recomputation;
+- an agent re-baselining away a corruption: `telos init` inside an initialized project raises an `ask` permission prompt;
+- the broker's own hooks being patched: `telos apply` refuses paths under the provider directories and managed instruction files.
 
 ## Not protected against
 
-- a malicious process with the same OS privileges that bypasses hooks and rewrites source, locks, patches, ledger and Git history consistently;
-- a false RULE/SCN label on unrelated code that also fools the independent verifier;
+- a malicious process with the same OS privileges that bypasses hooks and rewrites source, state, and Git history consistently;
+- a decorative test tag or a compliance annotation on unrelated code that also fools the independent verifier and the human reviewing the spec diff — the file-level guarantee is mechanical, sub-file honesty is audited, not proven;
 - an incorrect but internally consistent product decision approved by the user;
 - compromised dependencies, compilers, test runners, agent providers or release infrastructure;
 - a user who approves harness permission prompts without reading them, or a provider that does not honor `PreToolUse` permission decisions;
@@ -25,6 +24,6 @@
 
 ## Trust anchors
 
-Reviewers trust the Telos binary, the Git history, provider hook installation, configured verification commands and the independent-verifier process. Local hashes prove byte identity and declaration history, not who controlled the operating-system account.
+Reviewers trust the Telos binary, the Git history, provider hook installation, the configured test commands, and the independent-verifier process. Local hashes prove byte identity, not who controlled the operating-system account.
 
 Hostile guarantees require a privilege-separated mutation service or external signer whose key is unavailable to coding agents. Signed CI attestations remain the intended next trust layer.

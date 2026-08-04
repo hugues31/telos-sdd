@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,22 +13,15 @@ import (
 )
 
 type cliEnvelope struct {
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result"`
+	OK     bool           `json:"ok"`
+	Result map[string]any `json:"result"`
 	Error  struct {
 		Code string `json:"code"`
 	} `json:"error"`
 }
 
-type flowResult struct {
-	ID         string   `json:"id"`
-	Intent     string   `json:"intent"`
-	Specs      []string `json:"specs"`
-	Phase      string   `json:"phase"`
-	Brainstorm string   `json:"brainstorm"`
-}
-
-func TestCLIEndToEnd(t *testing.T) {
+func buildCLI(t *testing.T) string {
+	t.Helper()
 	binName := "telos"
 	if runtime.GOOS == "windows" {
 		binName += ".exe"
@@ -37,223 +31,172 @@ func TestCLIEndToEnd(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v\n%s", err, out)
 	}
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "app.txt"), []byte("open\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, root, "init")
-	runGit(t, root, "config", "user.email", "telos@example.test")
-	runGit(t, root, "config", "user.name", "Telos Test")
-	runGit(t, root, "add", "app.txt")
-	runGit(t, root, "commit", "-m", "baseline")
-
-	runE2EJSON(t, root, bin, "", "init", "--agent", "all", "--json")
-	flowEnvelope := runE2EJSON(t, root, bin, "", "flow", "start", "--brainstorm", "none", "--request", "Deny locked accounts", "--json")
-	var flow flowResult
-	decodeResult(t, flowEnvelope, &flow)
-	if flow.ID == "" || flow.Intent == "" || flow.Phase != "intent_draft" {
-		t.Fatalf("unexpected flow: %#v", flow)
-	}
-
-	runE2EJSON(t, root, bin, validE2EIntentV2, "artifact", "put", "--id", flow.Intent, "--json")
-	reviewEnvelope := runE2EJSON(t, root, bin, "", "intent", "review", "--flow", flow.ID, "--json")
-	var review struct {
-		Digest string `json:"digest"`
-	}
-	decodeResult(t, reviewEnvelope, &review)
-	if review.Digest == "" {
-		t.Fatal("intent review returned no digest")
-	}
-	runE2EJSON(t, root, bin, "", "intent", "seal", "--flow", flow.ID, "--review", review.Digest, "--json")
-
-	specEnvelope := runE2EJSON(t, root, bin, "", "spec", "new", "--flow", flow.ID, "--title", "Locked authentication", "--json")
-	var specResult struct {
-		Flow flowResult `json:"flow"`
-	}
-	decodeResult(t, specEnvelope, &specResult)
-	if len(specResult.Flow.Specs) != 1 {
-		t.Fatalf("spec not attached: %#v", specResult)
-	}
-	specID := specResult.Flow.Specs[0]
-	runE2EJSON(t, root, bin, validE2ESpecV2, "artifact", "put", "--id", specID, "--json")
-	plan := completePlan(specID)
-	planData, _ := json.Marshal(plan)
-	runE2EJSON(t, root, bin, string(planData), "test-plan", "put", "--spec", specID, "--json")
-
-	contractEnvelope := runE2EJSON(t, root, bin, "", "contract", "review", "--flow", flow.ID, "--json")
-	var contractReview struct {
-		Digest string `json:"digest"`
-	}
-	decodeResult(t, contractEnvelope, &contractReview)
-	runE2EJSON(t, root, bin, "", "contract", "seal", "--flow", flow.ID, "--review", contractReview.Digest, "--json")
-	runE2EJSON(t, root, bin, "", "change", "begin", "--flow", flow.ID, "--json")
-
-	patch := "diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-open\n+secured\n"
-	traceFailure := runE2EJSONFailureInput(t, root, bin, patch, "change", "apply", "--flow", flow.ID, "--rule", "RULE-999", "--scenario", "SCN-001", "--json")
-	if traceFailure.Error.Code != "TELOS_TRACEABILITY_GAP" {
-		t.Fatalf("unexpected traceability error: %#v", traceFailure)
-	}
-	if data, _ := os.ReadFile(filepath.Join(root, "app.txt")); string(data) != "open\n" {
-		t.Fatalf("rejected patch changed the repository: %q", data)
-	}
-	runE2EJSON(t, root, bin, patch, "change", "apply", "--flow", flow.ID, "--rule", "RULE-001", "--scenario", "SCN-001", "--json")
-	runE2EJSON(t, root, bin, "", "verify", "--flow", flow.ID, "--check-only", "--json")
-	complete := runE2EJSON(t, root, bin, "verified: hashes, traceability, and assertions are valid", "change", "complete", "--flow", flow.ID, "--json")
-	if !complete.OK {
-		t.Fatal("change did not complete")
-	}
-	declaredContent, err := os.ReadFile(filepath.Join(root, "app.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(declaredContent)) != "secured" {
-		t.Fatalf("declared content = %q, want secured with platform-native line endings", declaredContent)
-	}
-
-	if err := os.WriteFile(filepath.Join(root, "app.txt"), []byte("tampered\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	failure := runE2EJSONFailure(t, root, bin, "inspect", "--json")
-	if failure.Error.Code != "TELOS_INTEGRITY_UNDECLARED_CHANGE" {
-		t.Fatalf("unexpected integrity error: %#v", failure)
-	}
-	runE2EJSON(t, root, bin, "", "repair", "--restore", "--json")
-	if data, _ := os.ReadFile(filepath.Join(root, "app.txt")); !bytes.Equal(data, declaredContent) {
-		t.Fatalf("repair did not restore declared content: %q", data)
-	}
+	return bin
 }
 
-func completePlan(specID string) map[string]any {
-	categories := []string{"positive", "negative", "boundary", "authorization", "state-transition", "retry-idempotency", "concurrency", "failure-recovery", "prohibited-side-effect"}
-	coverage := make([]any, 0, len(categories))
-	for _, category := range categories {
-		coverage = append(coverage, map[string]any{"rule": "RULE-001", "category": category, "status": "covered"})
-	}
-	return map[string]any{
-		"spec": specID, "feature": strings.ToLower(specID),
-		"scenarios": []any{map[string]any{
-			"id": "SCN-001", "rule": "RULE-001", "name": "Deny login after lock", "tags": categories,
-			"given": []string{"an account is locked"}, "when": []string{"valid credentials are submitted"}, "then": []string{"authentication is denied", "no session is created"},
-		}},
-		"coverage": coverage,
-	}
-}
-
-func runE2EJSON(t *testing.T, root, bin, input string, args ...string) cliEnvelope {
+func runCLI(t *testing.T, bin, root, stdin string, args ...string) cliEnvelope {
 	t.Helper()
-	cmd := exec.Command(bin, args...)
+	cmd := exec.Command(bin, append(args, "--json")...)
 	cmd.Dir = root
-	cmd.Stdin = strings.NewReader(input)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("telos %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	_ = cmd.Run()
 	var envelope cliEnvelope
-	if err := json.Unmarshal(out, &envelope); err != nil || !envelope.OK {
-		t.Fatalf("invalid success envelope for %s: %v\n%s", strings.Join(args, " "), err, out)
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("telos %v produced invalid JSON: %v\nstdout: %s\nstderr: %s", args, err, stdout.String(), stderr.String())
 	}
 	return envelope
 }
 
-func runE2EJSONFailure(t *testing.T, root, bin string, args ...string) cliEnvelope {
-	return runE2EJSONFailureInput(t, root, bin, "", args...)
-}
-
-func runE2EJSONFailureInput(t *testing.T, root, bin, input string, args ...string) cliEnvelope {
+func expectOK(t *testing.T, envelope cliEnvelope, label string) map[string]any {
 	t.Helper()
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = root
-	cmd.Stdin = strings.NewReader(input)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("telos %s unexpectedly succeeded: %s", strings.Join(args, " "), out)
+	if !envelope.OK {
+		t.Fatalf("%s failed with %s", label, envelope.Error.Code)
 	}
-	var envelope cliEnvelope
-	if json.Unmarshal(out, &envelope) != nil || envelope.OK {
-		t.Fatalf("invalid failure envelope for %s: %s", strings.Join(args, " "), out)
-	}
-	return envelope
+	return envelope.Result
 }
 
-func decodeResult(t *testing.T, envelope cliEnvelope, target any) {
+func expectCode(t *testing.T, envelope cliEnvelope, code, label string) {
 	t.Helper()
-	if err := json.Unmarshal(envelope.Result, target); err != nil {
-		t.Fatal(err)
+	if envelope.OK {
+		t.Fatalf("%s unexpectedly succeeded", label)
+	}
+	if envelope.Error.Code != code {
+		t.Fatalf("%s error = %s, want %s", label, envelope.Error.Code, code)
 	}
 }
 
-func runGit(t *testing.T, root string, args ...string) {
+func git(t *testing.T, root string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
 
-const validE2EIntentV2 = `# Deny locked accounts
+func write(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
-## Outcome
+const productSpec = `# Product
 
-Locked accounts cannot authenticate.
+## Objectives
 
-## Actors
+### OBJ-001 — Application greets reliably
 
-Account owner and security operator.
-
-## Scope
-
-Authentication attempts after lock.
-
-## Non-goals
-
-Recovery is excluded.
-
-## Success criteria
-
-### CRIT-001 — Denied authentication
-
-Every attempt is denied without a session.
-
-## Constraints
-
-Existing sessions are unchanged.
-
-## Open questions
-
-None.
+The application always produces its greeting.
 `
 
-const validE2ESpecV2 = `# Locked authentication
+const coreSpec = "# Core\n\n### RULE-001 — Emit the greeting\n\nTraces: OBJ-001\n\nThe application emits the greeting exactly once.\n\n```gherkin\nScenario: greeting is emitted\n  Given the application runs\n  Then the greeting is produced once\n```\n"
 
-## Context
+func addPatch(path string, lines []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "diff --git a/%s b/%s\n", path, path)
+	b.WriteString("new file mode 100644\n--- /dev/null\n")
+	fmt.Fprintf(&b, "+++ b/%s\n@@ -0,0 +1,%d @@\n", path, len(lines))
+	for _, line := range lines {
+		b.WriteString("+" + line + "\n")
+	}
+	return b.String()
+}
 
-An account is locked.
+func TestCLIEndToEnd(t *testing.T) {
+	bin := buildCLI(t)
+	root := t.TempDir()
+	git(t, root, "init", "--quiet")
+	git(t, root, "config", "user.email", "telos@e2e")
+	git(t, root, "config", "user.name", "telos e2e")
+	write(t, root, "app.txt", "hello\n")
 
-## Rules
+	// Bootstrap an existing project: init adopts the current tree as baseline.
+	expectOK(t, runCLI(t, bin, root, "", "init", "--agent", "all"), "init")
+	for _, rel := range []string{"telos.toml", "spec/PRODUCT.md", ".telos/state.json", ".claude/skills/telos/SKILL.md", ".agents/skills/telos/SKILL.md", ".claude/settings.json", ".codex/hooks.json"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("init did not create %s: %v", rel, err)
+		}
+	}
+	expectOK(t, runCLI(t, bin, root, "", "doctor"), "doctor")
 
-### RULE-001 — Deny authentication
+	// The legacy file is neither infra nor annotated: verify demands adoption.
+	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_ANNOTATION_MISSING", "verify (bootstrap)")
 
-Traces: CRIT-001
+	// The human configures the project (telos.toml is human-owned).
+	write(t, root, "telos.toml", `agents = ["claude", "codex"]
+test_commands = ["go version"]
+test_files = ["*_test.txt"]
+infra = ["README.md", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md"]
+`)
 
-A locked account is denied without creating a session.
+	// Draft the spec through the broker.
+	expectOK(t, runCLI(t, bin, root, productSpec, "spec", "put", "--file", "spec/PRODUCT.md"), "spec put PRODUCT")
+	expectOK(t, runCLI(t, bin, root, coreSpec, "spec", "put", "--file", "spec/core.md"), "spec put core")
+	review := expectOK(t, runCLI(t, bin, root, "", "spec", "review"), "spec review")
+	digest, _ := review["digest"].(string)
+	if digest == "" {
+		t.Fatal("spec review returned no digest")
+	}
 
-## Examples
+	// Any later spec change invalidates the presented digest.
+	expectOK(t, runCLI(t, bin, root, coreSpec+"\nLate drift.\n", "spec", "put", "--file", "spec/core.md"), "spec put drift")
+	expectCode(t, runCLI(t, bin, root, "", "spec", "approve", "--review", digest), "TELOS_APPROVAL_STALE", "stale approve")
+	review = expectOK(t, runCLI(t, bin, root, "", "spec", "review"), "spec re-review")
+	digest, _ = review["digest"].(string)
+	expectOK(t, runCLI(t, bin, root, "", "spec", "approve", "--review", digest), "spec approve")
 
-Valid credentials remain denied.
+	// Approved but unimplemented: the spec is ahead of the code.
+	status := expectOK(t, runCLI(t, bin, root, "", "status"), "status")
+	if status["phase"] != "implementing" {
+		t.Fatalf("phase = %v, want implementing", status["phase"])
+	}
 
-## Boundaries
+	// Broker-applied patches must leave every touched file annotated.
+	expectCode(t, runCLI(t, bin, root, addPatch("core.txt", []string{"unannotated"}), "apply", "--rule", "RULE-001"), "TELOS_ANNOTATION_MISMATCH", "apply unannotated")
+	if _, err := os.Stat(filepath.Join(root, "core.txt")); !os.IsNotExist(err) {
+		t.Fatal("rejected patch left the tree modified")
+	}
+	expectCode(t, runCLI(t, bin, root, addPatch("spec/evil.md", []string{"# nope"}), "apply", "--rule", "RULE-001"), "TELOS_INPUT_INVALID", "apply into spec/")
+	expectCode(t, runCLI(t, bin, root, addPatch(".claude/hax.md", []string{"x"}), "apply", "--rule", "RULE-001"), "TELOS_INPUT_INVALID", "apply into .claude/")
 
-Repeated attempts remain denied.
+	// app.txt gains its annotation; the rule still lacks its tagged test.
+	appPatch := "diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1,1 +1,2 @@\n+telos: RULE-001\n hello\n"
+	expectOK(t, runCLI(t, bin, root, appPatch, "apply", "--rule", "RULE-001"), "apply app annotation")
+	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_RULE_NOT_IMPLEMENTED", "verify (spec ahead)")
+	expectOK(t, runCLI(t, bin, root, addPatch("core_test.txt", []string{"telos: RULE-001", "asserts RULE-001 greeting"}), "apply", "--rule", "RULE-001"), "apply tagged test")
 
-## Non-effects
+	// Green: spec == code, every rule proven.
+	verified := expectOK(t, runCLI(t, bin, root, "", "verify"), "verify (green)")
+	if fmt.Sprint(verified["rules"]) != "1" {
+		t.Fatalf("verify result = %v", verified)
+	}
+	git(t, root, "add", "-A")
+	git(t, root, "commit", "--quiet", "-m", "green")
 
-Existing sessions remain unchanged.
+	// Out-of-band code edit corrupts; git is the recovery path.
+	write(t, root, "app.txt", "tampered\n")
+	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_CODE_CORRUPTED", "verify (tampered)")
+	git(t, root, "checkout", "--", "app.txt")
+	expectOK(t, runCLI(t, bin, root, "", "verify"), "verify (restored)")
 
-## Failure modes
+	// A human spec edit is pending, not corrupted: it goes through adoption.
+	write(t, root, "spec/core.md", coreSpec+"\nHuman refinement.\n")
+	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_SPEC_UNAPPROVED", "verify (human spec edit)")
+	review = expectOK(t, runCLI(t, bin, root, "", "spec", "review"), "adoption review")
+	digest, _ = review["digest"].(string)
+	expectOK(t, runCLI(t, bin, root, "", "spec", "approve", "--review", digest), "adoption approve")
+	expectOK(t, runCLI(t, bin, root, "", "verify"), "verify (adopted)")
 
-Audit failure never permits access.
-
-## Observability
-
-Each denial is auditable.
-`
+	// Traceability is derivable from the tree alone.
+	trace := expectOK(t, runCLI(t, bin, root, "", "trace"), "trace")
+	text := fmt.Sprint(trace)
+	if !strings.Contains(text, "app.txt") || !strings.Contains(text, "core_test.txt") {
+		t.Fatalf("trace misses implementation or test files: %v", text)
+	}
+}

@@ -16,54 +16,24 @@ func initProject(root, agent string, githubCI bool) error {
 	if agent != "codex" && agent != "claude" && agent != "all" {
 		return fmt.Errorf("invalid agent %q", agent)
 	}
-	alreadyInitialized := false
-	if st, err := os.Stat(filepath.Join(root, ".telos")); err == nil && st.IsDir() {
-		alreadyInitialized = true
-	}
-	if alreadyInitialized {
-		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(repositoryLockPath))); err == nil {
-			if err := requireRepositoryClean(root); err != nil {
-				return err
-			}
-		}
-	}
-	if err := ensureDirs(root); err != nil {
-		return err
-	}
 	agents := []string{agent}
 	if agent == "all" {
-		agents = []string{"codex", "claude"}
+		agents = []string{"claude", "codex"}
 	}
+	alreadyInitialized := fileExists(filepath.Join(root, configFile)) == nil
 	if !alreadyInitialized {
-		cfg := Config{Agents: agents, VerificationCommands: []string{}}
-		if err := atomicWrite(filepath.Join(root, ".telos", "config.toml"), []byte(configText(cfg)), 0o644); err != nil {
-			return err
-		}
-		if err := saveLock(root, Lock{Artifacts: []LockedFile{}}); err != nil {
+		if err := atomicWrite(filepath.Join(root, configFile), []byte(defaultConfig(agents)), 0o644); err != nil {
 			return err
 		}
 	} else {
-		cfg, err := readConfig(root)
-		if err != nil {
-			return err
-		}
-		seen := map[string]bool{}
-		for _, configured := range cfg.Agents {
-			seen[configured] = true
-		}
-		for _, requested := range agents {
-			if !seen[requested] {
-				cfg.Agents = append(cfg.Agents, requested)
-				seen[requested] = true
-			}
-		}
-		sort.Strings(cfg.Agents)
-		if err := atomicWrite(filepath.Join(root, ".telos", "config.toml"), []byte(configText(cfg)), 0o644); err != nil {
+		if err := mergeConfigAgents(root, agents); err != nil {
 			return err
 		}
 	}
-	if err := rebuildState(root); err != nil {
-		return err
+	if fileExists(filepath.Join(root, filepath.FromSlash(productFile))) != nil {
+		if err := atomicWrite(filepath.Join(root, filepath.FromSlash(productFile)), []byte(productSkeleton), 0o644); err != nil {
+			return err
+		}
 	}
 	if err := installAgentFiles(root, agent); err != nil {
 		return err
@@ -77,26 +47,92 @@ func initProject(root, agent string, githubCI bool) error {
 			return err
 		}
 	}
-	eventType := "project.initialized"
-	if alreadyInitialized {
-		eventType = "project.adapters-refreshed"
-	}
-	if err := appendEvent(root, eventType, "project", map[string]any{"agents": agents}, ""); err != nil {
+	code, spec, err := inventories(root)
+	if err != nil {
 		return err
 	}
-	_, err := baselineRepository(root, "repository.baselined", "project")
-	return err
+	return saveState(root, State{Version: 1, Spec: snapshotOf(spec), Code: snapshotOf(code)})
+}
+
+func defaultConfig(agents []string) string {
+	return `# Telos SDD — project configuration. Edited by humans only; the agent broker
+# may never write this file.
+
+agents = ` + quoteList(agents) + `
+
+# Commands ` + "`telos verify`" + ` runs; all must pass.
+test_commands = []
+
+# Files whose RULE-NNN references count as executable proof of a rule.
+test_files = []
+
+# Files exempt from the ` + "`telos:`" + ` annotation requirement.
+infra = ["README.md", "LICENSE", ".gitignore", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md", "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml"]
+`
+}
+
+const productSkeleton = `# Product
+
+## Vision
+
+Describe the purpose of this product and the outcome it exists to create.
+
+## Objectives
+
+Add measurable objectives as ` + "`### OBJ-001 — Title`" + ` sections. Every rule in
+the domain spec files traces to at least one objective.
+
+## Constraints
+
+## Non-goals
+`
+
+// mergeConfigAgents rewrites only the `agents` line of an existing telos.toml,
+// preserving the rest of the human-owned file byte for byte.
+func mergeConfigAgents(root string, requested []string) error {
+	cfg, err := readConfig(root)
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	merged := append([]string{}, cfg.Agents...)
+	for _, agent := range cfg.Agents {
+		seen[agent] = true
+	}
+	added := false
+	for _, agent := range requested {
+		if !seen[agent] {
+			merged = append(merged, agent)
+			seen[agent] = true
+			added = true
+		}
+	}
+	if !added {
+		return nil
+	}
+	sort.Strings(merged)
+	path := filepath.Join(root, configFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(normalize(data)), "\n")
+	replaced := false
+	for i, line := range lines {
+		key := strings.TrimSpace(strings.SplitN(stripComment(line), "=", 2)[0])
+		if key == "agents" {
+			lines[i] = "agents = " + quoteList(merged)
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		lines = append([]string{"agents = " + quoteList(merged)}, lines...)
+	}
+	return atomicWrite(path, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 func installAgentFiles(root, agent string) error {
-	manifest := InstallManifest{Files: map[string]string{}}
-	manifestPath := filepath.Join(root, ".telos", "install-manifest.json")
-	if err := readJSON(manifestPath, &manifest); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if manifest.Files == nil {
-		manifest.Files = map[string]string{}
-	}
 	installSkills := func(dest string) error {
 		return fs.WalkDir(bundle.FS, "skills", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -111,55 +147,41 @@ func installAgentFiles(root, agent string) error {
 				return err
 			}
 			target := filepath.Join(root, filepath.FromSlash(dest), filepath.FromSlash(rel))
-			if err := atomicWrite(target, data, 0o644); err != nil {
-				return err
-			}
-			h, _ := fileHash(target)
-			manifest.Files[filepath.ToSlash(strings.TrimPrefix(target, root+string(filepath.Separator)))] = h
-			return nil
+			return atomicWrite(target, data, 0o644)
 		})
 	}
 	if agent == "codex" || agent == "all" {
 		if err := installSkills(".agents/skills"); err != nil {
 			return err
 		}
-		if err := copyBundleTree(root, "adapters/codex/agents", ".codex/agents", &manifest); err != nil {
+		if err := copyBundleTree(root, "adapters/codex/agents", ".codex/agents"); err != nil {
 			return err
 		}
-		if err := mergeHookSettings(root, "hooks/codex-hooks.json", ".codex/hooks.json", &manifest); err != nil {
+		if err := mergeHookSettings(root, "hooks/codex-hooks.json", ".codex/hooks.json"); err != nil {
 			return err
 		}
 		if err := updateInstructions(filepath.Join(root, "AGENTS.md"), codexInstructions); err != nil {
 			return err
 		}
-		recordManagedHash(root, "AGENTS.md", &manifest)
 	}
 	if agent == "claude" || agent == "all" {
 		if err := installSkills(".claude/skills"); err != nil {
 			return err
 		}
-		if err := copyBundleTree(root, "adapters/claude/agents", ".claude/agents", &manifest); err != nil {
+		if err := copyBundleTree(root, "adapters/claude/agents", ".claude/agents"); err != nil {
 			return err
 		}
-		if err := mergeHookSettings(root, "hooks/claude-settings.json", ".claude/settings.json", &manifest); err != nil {
+		if err := mergeHookSettings(root, "hooks/claude-settings.json", ".claude/settings.json"); err != nil {
 			return err
 		}
 		if err := updateInstructions(filepath.Join(root, "CLAUDE.md"), claudeInstructions); err != nil {
 			return err
 		}
-		recordManagedHash(root, "CLAUDE.md", &manifest)
 	}
-	return writeJSON(manifestPath, manifest)
+	return nil
 }
 
-func recordManagedHash(root, rel string, manifest *InstallManifest) {
-	h, err := fileHash(filepath.Join(root, filepath.FromSlash(rel)))
-	if err == nil {
-		manifest.Files[filepath.ToSlash(rel)] = h
-	}
-}
-
-func copyBundleTree(root, src, dst string, manifest *InstallManifest) error {
+func copyBundleTree(root, src, dst string) error {
 	return fs.WalkDir(bundle.FS, src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -168,25 +190,16 @@ func copyBundleTree(root, src, dst string, manifest *InstallManifest) error {
 			return nil
 		}
 		rel := strings.TrimPrefix(path, src+"/")
-		return copyBundleFile(root, path, filepath.ToSlash(filepath.Join(dst, rel)), manifest)
+		data, err := bundle.FS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(root, filepath.FromSlash(dst), filepath.FromSlash(rel))
+		return atomicWrite(target, data, 0o644)
 	})
 }
 
-func copyBundleFile(root, src, dst string, manifest *InstallManifest) error {
-	data, err := bundle.FS.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	target := filepath.Join(root, filepath.FromSlash(dst))
-	if err := atomicWrite(target, data, 0o644); err != nil {
-		return err
-	}
-	h, _ := fileHash(target)
-	manifest.Files[filepath.ToSlash(dst)] = h
-	return nil
-}
-
-func mergeHookSettings(root, src, dst string, manifest *InstallManifest) error {
+func mergeHookSettings(root, src, dst string) error {
 	generated, err := bundle.FS.ReadFile(src)
 	if err != nil {
 		return err
@@ -200,12 +213,7 @@ func mergeHookSettings(root, src, dst string, manifest *InstallManifest) error {
 	if err != nil {
 		return fmt.Errorf("merge %s: %w", dst, err)
 	}
-	if err := atomicWrite(target, merged, 0o644); err != nil {
-		return err
-	}
-	h, _ := fileHash(target)
-	manifest.Files[filepath.ToSlash(dst)] = h
-	return nil
+	return atomicWrite(target, merged, 0o644)
 }
 
 func updateInstructions(path, instructions string) error {
@@ -219,10 +227,10 @@ func updateInstructions(path, instructions string) error {
 const codexInstructions = `# Telos SDD
 
 - Use the ` + "`$telos`" + ` Skill for every feature, bug fix, refactor, or repository modification.
-- Run ` + "`telos inspect --json`" + ` first and resume its active flow. Never ask the user for Telos commands, IDs, or paths.
-- Treat intents, specs, test plans, generated features, and repository writes as CLI-managed. Never edit them directly.
-- Apply implementation only through ` + "`telos change apply`" + ` with RULE and SCN references.
-- Stop on integrity errors. Never adopt an undeclared write or weaken a test.`
+- Run ` + "`telos status --json`" + ` first and act on its phase and next actions.
+- The spec under spec/ is the source of intent. Never edit it directly: use ` + "`telos spec put`" + `, present ` + "`telos spec review`" + `, and let the human approve.
+- Apply code only through ` + "`telos apply --rule RULE-NNN`" + `; every touched file carries a ` + "`telos:`" + ` annotation and every rule gets a tagged test.
+- Stop on TELOS_CODE_CORRUPTED. Never adopt an out-of-band code edit or weaken a test.`
 
 const claudeInstructions = `# Telos SDD
 

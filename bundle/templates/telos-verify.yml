@@ -19,5 +19,5 @@ jobs:
           cache: false
       - name: Install Telos
         run: go install github.com/hugues31/telos-sdd/cmd/telos@latest
-      - name: Verify intent integrity
-        run: telos verify --check-only --json
+      - name: Verify spec-code integrity
+        run: telos verify --json

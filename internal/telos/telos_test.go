@@ -1086,7 +1086,7 @@ func TestViewGeneratesSelfContainedEscapedHTML(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := string(data)
-	for _, want := range []string{"RULE-001", "RULE-002", "OBJ-001", "Deny locked account sign-in", "proven by tests", "not implemented", "tests/auth_test.txt", "class=\"code gherkin\"", "by telos test", "Verification setup", "<code>go run tools/probe.go</code>", "<time id=\"gen\" datetime=\"", "id=\"panel-intent\"", "id=\"panel-contract\""} {
+	for _, want := range []string{"RULE-001", "RULE-002", "OBJ-001", "Deny locked account sign-in", "proven by tests", "not implemented", "tests/auth_test.txt", "class=\"code gherkin\"", "<span class=\"g-sec\">Scenario:</span>", "<span class=\"g-kw\">Given</span>", "by telos test", "Verification setup", "<code>go run tools/probe.go</code>", "<time id=\"gen\" datetime=\"", "id=\"panel-intent\"", "id=\"panel-contract\""} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("view page misses %q", want)
 		}

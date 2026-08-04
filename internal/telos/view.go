@@ -224,6 +224,49 @@ var (
 	inlineBold = regexp.MustCompile(`\*\*([^*]+)\*\*`)
 )
 
+var (
+	gherkinStep    = regexp.MustCompile(`^(\s*)(Given|When|Then|And|But|\*)(\s)`)
+	gherkinSection = regexp.MustCompile(`^(\s*)(Feature|Rule|Background|Scenario Outline|Scenario Template|Scenario|Example|Examples|Scenarios):`)
+	gherkinString  = regexp.MustCompile(`&#34;.*?&#34;`)
+	gherkinParam   = regexp.MustCompile(`&lt;[^&]+&gt;`)
+)
+
+// gherkinInline escapes s, then marks quoted strings and <parameters>. The
+// span wrapping happens after escaping, so spec content can never inject HTML.
+func gherkinInline(s string) string {
+	s = template.HTMLEscapeString(s)
+	s = gherkinString.ReplaceAllString(s, `<span class="g-str">$0</span>`)
+	s = gherkinParam.ReplaceAllString(s, `<span class="g-param">$0</span>`)
+	return s
+}
+
+// renderGherkinLine highlights one line inside a gherkin fence: comments,
+// tags, table rows, section and step keywords, quoted strings, <parameters>.
+func renderGherkinLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.HasPrefix(trimmed, "#"):
+		return `<span class="g-com">` + template.HTMLEscapeString(line) + `</span>`
+	case strings.HasPrefix(trimmed, "@"):
+		return `<span class="g-tag">` + template.HTMLEscapeString(line) + `</span>`
+	case strings.HasPrefix(trimmed, `"""`):
+		return `<span class="g-str">` + template.HTMLEscapeString(line) + `</span>`
+	case strings.HasPrefix(trimmed, "|"):
+		cells := strings.Split(line, "|")
+		for i, cell := range cells {
+			cells[i] = template.HTMLEscapeString(cell)
+		}
+		return strings.Join(cells, `<span class="g-pipe">|</span>`)
+	}
+	if m := gherkinSection.FindStringSubmatch(line); m != nil {
+		return m[1] + `<span class="g-sec">` + m[2] + `:</span>` + gherkinInline(line[len(m[0]):])
+	}
+	if m := gherkinStep.FindStringSubmatch(line); m != nil {
+		return m[1] + `<span class="g-kw">` + template.HTMLEscapeString(m[2]) + `</span>` + m[3] + gherkinInline(line[len(m[0]):])
+	}
+	return gherkinInline(line)
+}
+
 func renderInline(s string) string {
 	s = template.HTMLEscapeString(s)
 	s = inlineCode.ReplaceAllString(s, "<code>$1</code>")
@@ -249,6 +292,7 @@ func renderMarkdown(md string) template.HTML {
 	var b strings.Builder
 	var para []string
 	inCode, inList := false, false
+	codeLang := ""
 	flushPara := func() {
 		if len(para) > 0 {
 			b.WriteString("<p>" + renderInline(strings.Join(para, " ")) + "</p>\n")
@@ -270,14 +314,22 @@ func renderMarkdown(md string) template.HTML {
 				b.WriteString("</code></pre>\n")
 				inCode = false
 			} else {
-				lang := template.HTMLEscapeString(strings.TrimSpace(strings.TrimPrefix(trimmed, "```")))
-				b.WriteString(`<pre class="code ` + lang + `"><code>`)
+				codeLang = strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+				if esc := template.HTMLEscapeString(codeLang); esc != "" {
+					fmt.Fprintf(&b, `<pre class="code %s" data-lang="%s"><code>`, esc, esc)
+				} else {
+					b.WriteString(`<pre class="code"><code>`)
+				}
 				inCode = true
 			}
 			continue
 		}
 		if inCode {
-			b.WriteString(template.HTMLEscapeString(line) + "\n")
+			if codeLang == "gherkin" {
+				b.WriteString(renderGherkinLine(line) + "\n")
+			} else {
+				b.WriteString(template.HTMLEscapeString(line) + "\n")
+			}
 			continue
 		}
 		if level, text := headingOf(trimmed); level > 0 {
@@ -316,67 +368,100 @@ var viewTemplate = template.Must(template.New("view").Parse(`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.ProductTitle}} — Telos spec</title>
+<script>try{var t=localStorage.getItem("telos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <style>
 :root {
-  --bg: #f7f6f3; --panel: #ffffff; --ink: #1f2430; --muted: #6b7280;
-  --line: #e5e2da; --accent: #3f6b4f; --ok-bg: #e3efe6; --ok-ink: #2c5e3f;
-  --todo-bg: #fdf0dc; --todo-ink: #92600f; --bad-bg: #fbe3e0; --bad-ink: #a13c31;
-  --code-bg: #f0eee9;
+  --bg: #fbfbfa; --ink: #16181c; --muted: #6d7280; --faint: #a6aab3;
+  --line: #dedddb; --hair: #ebeae8; --code-bg: #f3f2f0;
+  --accent: #0e7a4c; --amber: #96660d; --red: #ac3a2e;
+  --g-str: #8a5c15; --g-param: #2f6e7e;
+}
+:root[data-theme="dark"] {
+  --bg: #0d0e10; --ink: #e6e6e3; --muted: #8f939c; --faint: #585d66;
+  --line: #26282c; --hair: #1b1d20; --code-bg: #141519;
+  --accent: #4dc08b; --amber: #d3a457; --red: #dd8375;
+  --g-str: #cfa365; --g-param: #7bb6c4;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16181d; --panel: #1e2128; --ink: #e8e6e1; --muted: #9aa0ab;
-    --line: #2c303a; --accent: #8fb89b; --ok-bg: #233529; --ok-ink: #9fd0ad;
-    --todo-bg: #3a2f1a; --todo-ink: #e3b566; --bad-bg: #3d2320; --bad-ink: #e59a8e;
-    --code-bg: #14161b;
+  :root:not([data-theme="light"]) {
+    --bg: #0d0e10; --ink: #e6e6e3; --muted: #8f939c; --faint: #585d66;
+    --line: #26282c; --hair: #1b1d20; --code-bg: #141519;
+    --accent: #4dc08b; --amber: #d3a457; --red: #dd8375;
+    --g-str: #cfa365; --g-param: #7bb6c4;
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink);
-  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 60rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: .75rem; margin-bottom: .5rem; }
-header.top h1 { font-size: 1.7rem; margin: 0; }
-.counts { color: var(--muted); font-size: .9rem; }
-.badge { display: inline-block; border-radius: 999px; padding: .1rem .65rem;
-  font-size: .78rem; font-weight: 600; white-space: nowrap; }
-.badge.ok { background: var(--ok-bg); color: var(--ok-ink); }
-.badge.todo { background: var(--todo-bg); color: var(--todo-ink); }
-.badge.bad { background: var(--bad-bg); color: var(--bad-ink); }
-.badge.ref { background: var(--code-bg); color: var(--muted); font-weight: 500; }
-.banner { border-radius: .6rem; padding: .7rem 1rem; margin: 1rem 0; font-size: .92rem; }
-.banner.todo { background: var(--todo-bg); color: var(--todo-ink); }
-.banner.bad { background: var(--bad-bg); color: var(--bad-ink); }
-section.panel { background: var(--panel); border: 1px solid var(--line);
-  border-radius: .8rem; padding: 1.25rem 1.5rem; margin: 1.25rem 0; }
-section.panel > h2 { margin-top: 0; font-size: 1.15rem; }
-.md h1 { font-size: 1.3rem; } .md h2 { font-size: 1.05rem; } .md h3 { font-size: 1rem; }
-.md pre.code { background: var(--code-bg); border-radius: .5rem; padding: .8rem 1rem;
-  overflow-x: auto; font-size: .85rem; line-height: 1.5; }
-.md code, .rule-meta code { background: var(--code-bg); border-radius: .3rem;
-  padding: .08rem .3rem; font-size: .85em; }
-.md pre.code code { background: none; padding: 0; }
-article.rule { border-top: 1px solid var(--line); padding: 1rem 0; }
+  font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased; }
+code, pre, .rule-id, .badge, .counts, .tab, #q, th, footer, .rule-meta, .theme {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace; }
+main { max-width: 60rem; margin: 0 auto; padding: 3.5rem 1.5rem 5rem; }
+header.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: .9rem; }
+header.top h1 { margin: 0; font-size: 1.85rem; font-weight: 650; letter-spacing: -.02em; }
+.counts { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; }
+.theme { appearance: none; background: none; border: 1px solid var(--line); border-radius: 3px;
+  color: var(--muted); font-size: .72rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .08em; padding: .3em .6em; cursor: pointer; margin-left: auto; }
+.theme:hover { color: var(--ink); border-color: var(--muted); }
+.theme:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.badge { display: inline-block; font-size: .74rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+.badge.ok { color: var(--accent); }
+.badge.todo { color: var(--amber); }
+.badge.bad { color: var(--red); }
+.badge.ok::before, .badge.todo::before, .badge.bad::before {
+  content: "\25CF\00A0"; font-size: .6rem; vertical-align: .1em; }
+.badge.ref { color: var(--muted); font-weight: 500; border: 1px solid var(--line);
+  border-radius: 3px; padding: .15em .45em; text-transform: none; letter-spacing: .02em; }
+a.badge.ref { text-decoration: none; }
+a.badge.ref:hover { color: var(--ink); border-color: var(--muted); }
+.banner { border: 1px solid; border-radius: 4px; padding: .75rem 1rem; margin: 1.5rem 0 0; font-size: .95rem; }
+.banner.todo { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
+.banner.bad { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+section.panel { border-top: 1px solid var(--line); margin: 2.5rem 0 0; padding-top: 1.5rem; }
+section.panel > h2 { margin: 0 0 1rem; font-size: 1.1rem; font-weight: 650; letter-spacing: -.01em; }
+.md { max-width: 48rem; }
+.md h1 { font-size: 1.4rem; letter-spacing: -.015em; }
+.md h2 { font-size: 1.1rem; } .md h3 { font-size: 1rem; }
+.md pre.code { position: relative; background: var(--code-bg); border: 1px solid var(--hair);
+  border-radius: 4px; padding: .9rem 1.1rem; overflow-x: auto; font-size: .875rem; line-height: 1.65; }
+.md pre.code[data-lang]::after { content: attr(data-lang); position: absolute;
+  top: .6rem; right: .8rem; font-size: .66rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .1em; color: var(--faint); }
+.g-kw { color: var(--accent); font-weight: 600; }
+.g-sec { font-weight: 700; }
+.g-str { color: var(--g-str); }
+.g-param { color: var(--g-param); font-style: italic; }
+.g-com, .g-pipe { color: var(--faint); }
+.g-tag { color: var(--muted); }
+.md code { background: var(--code-bg); border-radius: 3px; padding: .1em .35em; font-size: .85em; }
+.md pre.code code { background: none; padding: 0; font-size: inherit; }
+article.rule { border-top: 1px solid var(--hair); padding: 1.15rem 0; }
 article.rule:first-of-type { border-top: 0; }
-.rule-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem; }
-.rule-head h3 { margin: 0; font-size: 1.02rem; }
-.rule-id { font-family: ui-monospace, monospace; font-size: .85rem; color: var(--accent); font-weight: 700; }
-.rule-meta { color: var(--muted); font-size: .82rem; margin: .3rem 0 .5rem; }
+.rule-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .65rem; }
+.rule-head h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+.rule-id { font-size: .82rem; color: var(--accent); font-weight: 700; letter-spacing: .03em; }
+.rule-meta { color: var(--muted); font-size: .78rem; margin: .35rem 0 .6rem; }
 .rule-meta a { color: inherit; }
-#q { width: 100%; padding: .6rem .9rem; border-radius: .6rem; border: 1px solid var(--line);
-  background: var(--panel); color: var(--ink); font-size: .95rem; margin-top: 1rem; }
-.tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--line); margin-top: 1rem; }
-.tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
-  color: var(--muted); font: inherit; font-size: .95rem; font-weight: 600;
-  padding: .5rem .9rem; cursor: pointer; }
+.search { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: .9rem 0 .6rem; }
+#q { width: 100%; padding: .55rem .8rem; border-radius: 4px; border: 1px solid var(--line);
+  background: transparent; color: var(--ink); font-size: .88rem; }
+#q:focus { outline: none; border-color: var(--accent); }
+#q::placeholder { color: var(--faint); }
+.tabs { display: flex; gap: 1.4rem; border-bottom: 1px solid var(--line); margin-top: 2rem; }
+.tab { appearance: none; background: none; border: 0; margin-bottom: -1px;
+  border-bottom: 1px solid transparent; color: var(--muted); font-size: .76rem;
+  font-weight: 600; text-transform: uppercase; letter-spacing: .1em;
+  padding: .6rem .1rem; cursor: pointer; }
 .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
-@media print { .tabs { display: none; } .tab-panel[hidden] { display: block !important; } }
-table { border-collapse: collapse; width: 100%; font-size: .9rem; }
-th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { color: var(--muted); font-weight: 600; }
-a { color: var(--accent); }
-footer { color: var(--muted); font-size: .8rem; margin-top: 2rem; }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+@media print { .tabs, .theme { display: none; } .tab-panel[hidden] { display: block !important; } }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+th, td { text-align: left; padding: .5rem .6rem .5rem 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+footer { color: var(--faint); font-size: .75rem; margin-top: 3rem; }
 </style>
 </head>
 <body>
@@ -387,6 +472,7 @@ footer { color: var(--muted); font-size: .8rem; margin-top: 2rem; }
   {{else if eq .Phase "corrupted"}}<span class="badge bad">corrupted</span>
   {{else}}<span class="badge todo">{{.Phase}}</span>{{end}}
   <span class="counts">{{len .Objectives}} objectives · {{.RuleTotal}} rules · {{.RuleTested}} proven</span>
+  <button class="theme" id="theme" type="button" title="Theme (auto / light / dark)" hidden>auto</button>
 </header>
 
 {{if .Changed}}<div class="banner bad">Code changed outside the broker: {{range $i, $p := .Changed}}{{if $i}}, {{end}}<code>{{$p}}</code>{{end}}. Recover via Git or re-baseline deliberately.</div>{{end}}
@@ -405,7 +491,7 @@ footer { color: var(--muted); font-size: .8rem; margin-top: 2rem; }
 </div>
 
 <div id="panel-contract" class="tab-panel" role="tabpanel" aria-labelledby="tab-contract">
-<input id="q" type="search" placeholder="Filter rules… (id, title, text, file)">
+<div class="search"><input id="q" type="search" placeholder="Filter rules… (id, title, text, file)"></div>
 
 {{range .Domains}}
 <section class="panel domain" id="{{.File}}">
@@ -463,6 +549,24 @@ footer { color: var(--muted); font-size: .8rem; margin-top: 2rem; }
     var d = new Date(gen.getAttribute('datetime'));
     if (!isNaN(d)) gen.textContent = d.toLocaleString();
   }
+
+  var themeBtn = document.getElementById('theme');
+  var themeMode = 'auto';
+  try { themeMode = localStorage.getItem('telos-theme') || 'auto'; } catch (e) {}
+  function applyTheme(mode) {
+    themeMode = mode;
+    if (mode === 'auto') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', mode);
+    themeBtn.textContent = '◐ ' + mode;
+  }
+  applyTheme(themeMode);
+  themeBtn.hidden = false;
+  themeBtn.addEventListener('click', function () {
+    var order = ['auto', 'light', 'dark'];
+    var next = order[(order.indexOf(themeMode) + 1) % order.length];
+    try { localStorage.setItem('telos-theme', next); } catch (e) {}
+    applyTheme(next);
+  });
 
   var tabs = document.querySelectorAll('.tab');
   function activate(panelID) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,91 @@ func writeTestConfig(t *testing.T, root string, testCommands []string) {
 	if err := os.WriteFile(filepath.Join(root, configFile), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+const probeCommand = "go run tools/probe.go"
+
+// writeProbe installs, before init so it lands in the declared baseline, a
+// minimal cross-platform suite: every `expect <path>` line found under tests/
+// must name an existing file, so a test stays red exactly until its
+// implementation exists.
+func writeProbe(t *testing.T, root string) {
+	t.Helper()
+	probe := `package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	entries, err := os.ReadDir("tests")
+	if err != nil {
+		return
+	}
+	var missing []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("tests", entry.Name()))
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			rest, ok := strings.CutPrefix(strings.TrimSpace(line), "expect ")
+			if !ok {
+				continue
+			}
+			rest = strings.TrimSpace(rest)
+			if _, err := os.Stat(filepath.FromSlash(rest)); err != nil {
+				missing = append(missing, rest)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Println("missing:", strings.Join(missing, ", "))
+		os.Exit(1)
+	}
+}
+`
+	path := filepath.Join(root, "tools", "probe.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(probe), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func apply(t *testing.T, root string, rules []string, patch []byte) map[string]any {
+	t.Helper()
+	result, err := runApply(root, rules, patch, false, io.Discard)
+	if err != nil {
+		t.Fatalf("apply %v: %v", rules, err)
+	}
+	return result
+}
+
+// redTestPatch is the canonical witnessed-failing test for RULE-001: it
+// expects src/auth.txt, which no implementation provides yet.
+func redTestPatch() []byte {
+	return addPatch("tests/auth_test.txt", []string{"telos: RULE-001", "asserts RULE-001", "expect src/auth.txt"})
+}
+
+func implPatch() []byte {
+	return addPatch("src/auth.txt", []string{"telos: RULE-001", "content"})
+}
+
+// proveRule001 walks RULE-001 through the full witnessed cycle: red test-only
+// patch, then the implementation the test expects.
+func proveRule001(t *testing.T, root string) {
+	t.Helper()
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+	apply(t, root, []string{"RULE-001"}, implPatch())
 }
 
 func writeSpecFile(t *testing.T, root, rel, content string) {
@@ -374,33 +460,35 @@ func TestSpecReviewRejectsInvalidSpec(t *testing.T) {
 
 func TestApplyEnforcesAnnotationIntersection(t *testing.T) {
 	root := gitRepo(t)
+	writeProbe(t, root)
 	initTelos(t, root)
-	writeTestConfig(t, root, []string{"go version"})
+	writeTestConfig(t, root, []string{probeCommand})
 	approveSpec(t, root)
 
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("src/auth.txt", []string{"no annotation", "content"})); errCode(t, err) != "TELOS_ANNOTATION_MISMATCH" {
+	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"no annotation", "asserts RULE-001", "expect src/auth.txt"}), false, io.Discard); errCode(t, err) != "TELOS_ANNOTATION_MISMATCH" {
 		t.Fatal("un-annotated created file must be rejected")
 	}
-	if _, err := os.Stat(filepath.Join(root, "src", "auth.txt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "tests", "auth_test.txt")); !os.IsNotExist(err) {
 		t.Fatal("rejected patch was not reversed")
 	}
 
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("src/auth.txt", []string{"telos: RULE-999", "content"})); errCode(t, err) != "TELOS_ANNOTATION_MISMATCH" {
+	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"telos: RULE-999", "asserts RULE-001", "expect src/auth.txt"}), false, io.Discard); errCode(t, err) != "TELOS_ANNOTATION_MISMATCH" {
 		t.Fatal("annotation referencing an unknown rule must be rejected")
 	}
 
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tools/tool.cfg", []string{"anything"})); err != nil {
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tools/tool.cfg", []string{"anything"}), false, io.Discard); err != nil {
 		t.Fatalf("untraced file should not need an annotation: %v", err)
 	}
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("src/auth.txt", []string{"telos: RULE-001", "content"})); err != nil {
+	if _, err := runApply(root, []string{"RULE-001"}, implPatch(), false, io.Discard); err != nil {
 		t.Fatalf("valid annotated patch rejected: %v", err)
 	}
 
-	if _, err := runApply(root, []string{"RULE-999"}, addPatch("src/other.txt", []string{"telos: RULE-999"})); errCode(t, err) != "TELOS_TRACEABILITY_GAP" {
+	if _, err := runApply(root, []string{"RULE-999"}, addPatch("src/other.txt", []string{"telos: RULE-999"}), false, io.Discard); errCode(t, err) != "TELOS_TRACEABILITY_GAP" {
 		t.Fatal("citing an unknown rule must fail")
 	}
 	for _, target := range []string{"spec/evil.md", ".telos/state.json", ".claude/settings.json", "telos.toml", "CLAUDE.md"} {
-		if _, err := runApply(root, []string{"RULE-001"}, addPatch(target, []string{"x"})); errCode(t, err) != "TELOS_INPUT_INVALID" {
+		if _, err := runApply(root, []string{"RULE-001"}, addPatch(target, []string{"x"}), false, io.Discard); errCode(t, err) != "TELOS_INPUT_INVALID" {
 			t.Fatalf("patch touching %s must be rejected", target)
 		}
 	}
@@ -414,7 +502,7 @@ func TestApplyRequiresCleanAndApprovedTrees(t *testing.T) {
 	patch := addPatch("src/auth.txt", []string{"telos: RULE-001"})
 
 	writeSpecFile(t, root, "spec/auth.md", authBody+"\nPending edit.\n")
-	if _, err := runApply(root, []string{"RULE-001"}, patch); errCode(t, err) != "TELOS_SPEC_UNAPPROVED" {
+	if _, err := runApply(root, []string{"RULE-001"}, patch, false, io.Discard); errCode(t, err) != "TELOS_SPEC_UNAPPROVED" {
 		t.Fatal("apply with pending spec must fail")
 	}
 	review, err := specReview(root)
@@ -428,15 +516,16 @@ func TestApplyRequiresCleanAndApprovedTrees(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "rogue.txt"), []byte("out of band\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runApply(root, []string{"RULE-001"}, patch); errCode(t, err) != "TELOS_CODE_CORRUPTED" {
+	if _, err := runApply(root, []string{"RULE-001"}, patch, false, io.Discard); errCode(t, err) != "TELOS_CODE_CORRUPTED" {
 		t.Fatal("apply with out-of-band code must fail")
 	}
 }
 
 func TestVerifyPipelineErrorCodes(t *testing.T) {
 	root := gitRepo(t)
+	writeProbe(t, root)
 	initTelos(t, root)
-	writeTestConfig(t, root, []string{"go version"})
+	writeTestConfig(t, root, []string{probeCommand})
 	approveSpec(t, root)
 	var out bytes.Buffer
 
@@ -444,9 +533,11 @@ func TestVerifyPipelineErrorCodes(t *testing.T) {
 		t.Fatal("rule without tagged test must fail verify")
 	}
 
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"telos: RULE-001", "asserts RULE-001"})); err != nil {
-		t.Fatal(err)
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+	if _, err := runVerify(root, &out, &out); errCode(t, err) != "TELOS_RED_PENDING" {
+		t.Fatal("witnessed red without its green witness must fail verify")
 	}
+	apply(t, root, []string{"RULE-001"}, implPatch())
 	if result, err := runVerify(root, &out, &out); err != nil {
 		t.Fatalf("verify should pass: %v", err)
 	} else if result["rules"].(int) != 1 {
@@ -471,7 +562,7 @@ func TestVerifyPipelineErrorCodes(t *testing.T) {
 	if _, err := runVerify(root, &out, &out); errCode(t, err) != "TELOS_TESTS_FAILED" {
 		t.Fatal("failing test command must fail verify")
 	}
-	writeTestConfig(t, root, []string{"go version"})
+	writeTestConfig(t, root, []string{probeCommand})
 
 	if err := os.WriteFile(filepath.Join(root, "tests", "auth_test.txt"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -541,8 +632,9 @@ func TestVerifyReportsUnapprovedSpecForAdoption(t *testing.T) {
 
 func TestStatusPhases(t *testing.T) {
 	root := gitRepo(t)
+	writeProbe(t, root)
 	initTelos(t, root)
-	writeTestConfig(t, root, []string{"go version"})
+	writeTestConfig(t, root, []string{probeCommand})
 	phase := func() string {
 		result, _, err := runStatus(root)
 		if err != nil {
@@ -571,9 +663,11 @@ func TestStatusPhases(t *testing.T) {
 	if got := phase(); got != "implementing" {
 		t.Fatalf("after approve phase = %s", got)
 	}
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"telos: RULE-001"})); err != nil {
-		t.Fatal(err)
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+	if got := phase(); got != "implementing" {
+		t.Fatalf("with red evidence pending phase = %s, want implementing", got)
 	}
+	apply(t, root, []string{"RULE-001"}, implPatch())
 	if got := phase(); got != "clean" {
 		t.Fatalf("after implementation phase = %s", got)
 	}
@@ -587,15 +681,11 @@ func TestStatusPhases(t *testing.T) {
 
 func TestTraceMapsRulesToFilesAndTests(t *testing.T) {
 	root := gitRepo(t)
+	writeProbe(t, root)
 	initTelos(t, root)
-	writeTestConfig(t, root, []string{"go version"})
+	writeTestConfig(t, root, []string{probeCommand})
 	approveSpec(t, root)
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("src/auth.txt", []string{"telos: RULE-001"})); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"telos: RULE-001", "asserts RULE-001"})); err != nil {
-		t.Fatal(err)
-	}
+	proveRule001(t, root)
 	result, err := runTrace(root, "RULE-001")
 	if err != nil {
 		t.Fatal(err)
@@ -683,17 +773,244 @@ func TestGuardDecisions(t *testing.T) {
 	}
 }
 
+func TestGuardGatesApplyOnCleanProject(t *testing.T) {
+	root := gitRepo(t)
+	writeProbe(t, root)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{probeCommand})
+	approveSpec(t, root)
+
+	applyCommand := "telos apply --rule RULE-001 --json <<'EOF'\ndiff --git a/src/auth.txt b/src/auth.txt\nEOF"
+	adoptCommand := "telos apply --rule RULE-001 --expect-pass --json <<'EOF'\ndiff --git a/tests/auth_test.txt b/tests/auth_test.txt\nEOF"
+	if got := guardDecision(t, root, "Bash", map[string]any{"command": applyCommand}); got != "allow" {
+		t.Fatalf("apply while implementing = %s, want allow", got)
+	}
+	if got := guardDecision(t, root, "Bash", map[string]any{"command": adoptCommand}); got != "ask" {
+		t.Fatalf("apply --expect-pass while implementing = %s, want ask", got)
+	}
+	proveRule001(t, root)
+	if got := guardDecision(t, root, "Bash", map[string]any{"command": applyCommand}); got != "ask" {
+		t.Fatalf("apply on a clean project = %s, want ask", got)
+	}
+	if got := guardDecision(t, root, "Bash", map[string]any{"command": adoptCommand}); got != "allow" {
+		t.Fatalf("apply --expect-pass on a clean project = %s, want silence (the command fails precisely)", got)
+	}
+}
+
+func TestApplyWitnessesRedThenGreen(t *testing.T) {
+	root := gitRepo(t)
+	writeProbe(t, root)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{probeCommand})
+	approveSpec(t, root)
+
+	if _, err := runApply(root, []string{"RULE-001"}, implPatch(), false, io.Discard); errCode(t, err) != "TELOS_TEST_FIRST" {
+		t.Fatal("implementation before the witnessed failing test must be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(root, "src", "auth.txt")); !os.IsNotExist(err) {
+		t.Fatal("test-first rejection must leave the tree untouched")
+	}
+
+	passing := addPatch("tests/auth_test.txt", []string{"telos: RULE-001", "asserts RULE-001", "expect tools/probe.go"})
+	if _, err := runApply(root, []string{"RULE-001"}, passing, false, io.Discard); errCode(t, err) != "TELOS_RED_EXPECTED" {
+		t.Fatal("a test the suite already passes is no evidence and must be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(root, "tests", "auth_test.txt")); !os.IsNotExist(err) {
+		t.Fatal("rejected passing test was not reversed")
+	}
+
+	result, err := runApply(root, []string{"RULE-001"}, redTestPatch(), false, io.Discard)
+	if err != nil {
+		t.Fatalf("witnessed red rejected: %v", err)
+	}
+	if result["suite"] != "red" {
+		t.Fatalf("red apply result = %v", result)
+	}
+	st, err := loadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, ok := st.Red["RULE-001"]
+	if !ok {
+		t.Fatal("red evidence was not recorded")
+	}
+	if _, sealed := ev.Tests["tests/auth_test.txt"]; !sealed {
+		t.Fatalf("red evidence files = %v", ev.Tests)
+	}
+
+	result, err = runApply(root, []string{"RULE-001"}, implPatch(), false, io.Discard)
+	if err != nil {
+		t.Fatalf("implementation apply failed: %v", err)
+	}
+	if result["suite"] != "green" || fmt.Sprint(result["proven"]) != "[RULE-001]" {
+		t.Fatalf("green apply result = %v", result)
+	}
+	st, err = loadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Red) != 0 {
+		t.Fatalf("red evidence survived the green witness: %v", st.Red)
+	}
+	if st.Green != st.Code.Root {
+		t.Fatal("the witnessed green root was not recorded")
+	}
+}
+
+func TestApplySealsRedTests(t *testing.T) {
+	root := gitRepo(t)
+	writeProbe(t, root)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{probeCommand})
+	approveSpec(t, root)
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+
+	weaken := "diff --git a/tests/auth_test.txt b/tests/auth_test.txt\n--- a/tests/auth_test.txt\n+++ b/tests/auth_test.txt\n@@ -1,3 +1,3 @@\n telos: RULE-001\n asserts RULE-001\n-expect src/auth.txt\n+expect tools/probe.go\n"
+	mixed := weaken + "diff --git a/src/other.txt b/src/other.txt\nnew file mode 100644\n--- /dev/null\n+++ b/src/other.txt\n@@ -0,0 +1,1 @@\n+telos: RULE-001\n"
+	if _, err := runApply(root, []string{"RULE-001"}, []byte(mixed), false, io.Discard); errCode(t, err) != "TELOS_TEST_SEALED" {
+		t.Fatal("a mixed patch touching a sealed test must be rejected")
+	}
+	if _, err := runApply(root, []string{"RULE-001"}, []byte(weaken), false, io.Discard); errCode(t, err) != "TELOS_RED_EXPECTED" {
+		t.Fatal("rewriting a sealed test into a passing one must be rejected")
+	}
+
+	rewrite := "diff --git a/tests/auth_test.txt b/tests/auth_test.txt\n--- a/tests/auth_test.txt\n+++ b/tests/auth_test.txt\n@@ -1,3 +1,3 @@\n telos: RULE-001\n asserts RULE-001\n-expect src/auth.txt\n+expect src/auth_v2.txt\n"
+	if _, err := runApply(root, []string{"RULE-001"}, []byte(rewrite), false, io.Discard); err != nil {
+		t.Fatalf("rewriting a sealed test back through red must be allowed: %v", err)
+	}
+	st, err := loadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, _, err := inventories(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Red["RULE-001"].Tests["tests/auth_test.txt"] != code["tests/auth_test.txt"] {
+		t.Fatal("re-red did not re-seal the rewritten test bytes")
+	}
+
+	apply(t, root, []string{"RULE-001"}, addPatch("src/auth_v2.txt", []string{"telos: RULE-001", "content"}))
+	if st, err = loadState(root); err != nil || len(st.Red) != 0 {
+		t.Fatalf("cycle did not complete: %v %v", st.Red, err)
+	}
+}
+
+func TestApplyExpectPassAdoptsExistingBehavior(t *testing.T) {
+	root := gitRepo(t)
+	writeProbe(t, root)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{probeCommand})
+	approveSpec(t, root)
+
+	adoption := addPatch("tests/auth_test.txt", []string{"telos: RULE-001", "asserts RULE-001", "expect tools/probe.go"})
+	if _, err := runApply(root, []string{"RULE-001"}, addPatch("src/auth.txt", []string{"telos: RULE-001"}), true, io.Discard); errCode(t, err) != "TELOS_INPUT_INVALID" {
+		t.Fatal("--expect-pass must submit documentation tests only")
+	}
+	failing := redTestPatch()
+	if _, err := runApply(root, []string{"RULE-001"}, failing, true, io.Discard); errCode(t, err) != "TELOS_TESTS_FAILED" {
+		t.Fatal("--expect-pass with a failing test contradicts the adoption claim")
+	}
+	result, err := runApply(root, []string{"RULE-001"}, adoption, true, io.Discard)
+	if err != nil {
+		t.Fatalf("adoption apply failed: %v", err)
+	}
+	if result["suite"] != "green" || fmt.Sprint(result["proven"]) != "[RULE-001]" {
+		t.Fatalf("adoption result = %v", result)
+	}
+	st, err := loadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Red) != 0 {
+		t.Fatal("adoption must not record red evidence")
+	}
+	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/extra_test.txt", []string{"telos: RULE-001", "expect tools/probe.go"}), true, io.Discard); errCode(t, err) != "TELOS_INPUT_INVALID" {
+		t.Fatal("--expect-pass citing an already-referenced rule must be rejected")
+	}
+}
+
+func TestApplyRequiresGreenBaselineForNewRedTests(t *testing.T) {
+	root := gitRepo(t)
+	writeProbe(t, root)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{probeCommand})
+	auditBody := "# Audit\n\n### RULE-002 — Log denied attempts\n\nTraces: OBJ-001\n\nDenied attempts are logged.\n\n```gherkin\nScenario: denied attempt is logged\n  Given a locked account\n  When it signs in\n  Then the attempt is logged\n```\n"
+	writeSpecFile(t, root, productFile, productBody)
+	writeSpecFile(t, root, "spec/auth.md", authBody)
+	writeSpecFile(t, root, "spec/audit.md", auditBody)
+	review, err := specReview(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := specApprove(root, review["digest"].(string)); err != nil {
+		t.Fatal(err)
+	}
+
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+	second := addPatch("tests/audit_test.txt", []string{"telos: RULE-002", "asserts RULE-002", "expect src/audit.txt"})
+	if _, err := runApply(root, []string{"RULE-002"}, second, false, io.Discard); errCode(t, err) != "TELOS_BASELINE_RED" {
+		t.Fatal("a second red test on a red suite is unattributable and must be rejected")
+	}
+	apply(t, root, []string{"RULE-001"}, implPatch())
+	if _, err := runApply(root, []string{"RULE-002"}, second, false, io.Discard); err != nil {
+		t.Fatalf("red test on a green baseline rejected: %v", err)
+	}
+}
+
+func TestApplyRejectsUncitedTestReferences(t *testing.T) {
+	root := gitRepo(t)
+	writeProbe(t, root)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{probeCommand})
+	approveSpec(t, root)
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+
+	smuggled := addPatch("tests/extra_test.txt", []string{"telos: RULE-001", "mentions RULE-002 and RULE-003", "expect src/never.txt"})
+	if _, err := runApply(root, []string{"RULE-001"}, smuggled, false, io.Discard); errCode(t, err) != "TELOS_TEST_FIRST" {
+		t.Fatal("test references outside the witnessed cycle must be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(root, "tests", "extra_test.txt")); !os.IsNotExist(err) {
+		t.Fatal("rejected smuggling patch was not reversed")
+	}
+}
+
+func TestSpecApproveSweepsOrphanRedEvidence(t *testing.T) {
+	root := gitRepo(t)
+	writeProbe(t, root)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{probeCommand})
+	approveSpec(t, root)
+	apply(t, root, []string{"RULE-001"}, redTestPatch())
+
+	writeSpecFile(t, root, "spec/auth.md", "# Authentication\n\nNo rules remain here.\n")
+	review, err := specReview(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := specApprove(root, review["digest"].(string)); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Red) != 0 {
+		t.Fatalf("red evidence for a deleted rule must be swept: %v", st.Red)
+	}
+}
+
 func TestVerifyDetectsTestCommandsMutatingSources(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell redirection differs on Windows")
 	}
 	root := gitRepo(t)
+	writeProbe(t, root)
 	initTelos(t, root)
-	writeTestConfig(t, root, []string{"echo drift >> tests/auth_test.txt"})
+	writeTestConfig(t, root, []string{probeCommand})
 	approveSpec(t, root)
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"telos: RULE-001"})); err != nil {
-		t.Fatal(err)
-	}
+	proveRule001(t, root)
+	writeTestConfig(t, root, []string{"echo drift >> tests/auth_test.txt"})
 	var out bytes.Buffer
 	if _, err := runVerify(root, &out, &out); errCode(t, err) != "TELOS_CODE_CORRUPTED" {
 		t.Fatal("a test command mutating tracked files must corrupt the project")
@@ -740,8 +1057,9 @@ func TestInitIsIdempotentAndPreservesConfig(t *testing.T) {
 
 func TestViewGeneratesSelfContainedEscapedHTML(t *testing.T) {
 	root := gitRepo(t)
+	writeProbe(t, root)
 	initTelos(t, root)
-	writeTestConfig(t, root, []string{"go version"})
+	writeTestConfig(t, root, []string{probeCommand})
 	writeSpecFile(t, root, productFile, productBody)
 	writeSpecFile(t, root, "spec/auth.md", authBody)
 	hostile := "# Web\n\n### RULE-002 — Escape <script>alert(1)</script> everywhere\n\nTraces: OBJ-001\n\nOutput is escaped.\n\n```gherkin\nScenario: escaped\n  Then no <script>alert(1)</script> runs\n```\n"
@@ -753,9 +1071,7 @@ func TestViewGeneratesSelfContainedEscapedHTML(t *testing.T) {
 	if _, err := specApprove(root, review["digest"].(string)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"telos: RULE-001", "asserts RULE-001"})); err != nil {
-		t.Fatal(err)
-	}
+	proveRule001(t, root)
 
 	out := filepath.Join(t.TempDir(), "view.html")
 	result, err := runView(root, "test", out, false)
@@ -770,7 +1086,7 @@ func TestViewGeneratesSelfContainedEscapedHTML(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := string(data)
-	for _, want := range []string{"RULE-001", "RULE-002", "OBJ-001", "Deny locked account sign-in", "proven by tests", "not implemented", "tests/auth_test.txt", "class=\"code gherkin\"", "by telos test", "Verification setup", "<code>go version</code>", "<time id=\"gen\" datetime=\"", "id=\"panel-intent\"", "id=\"panel-contract\""} {
+	for _, want := range []string{"RULE-001", "RULE-002", "OBJ-001", "Deny locked account sign-in", "proven by tests", "not implemented", "tests/auth_test.txt", "class=\"code gherkin\"", "by telos test", "Verification setup", "<code>go run tools/probe.go</code>", "<time id=\"gen\" datetime=\"", "id=\"panel-intent\"", "id=\"panel-contract\""} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("view page misses %q", want)
 		}

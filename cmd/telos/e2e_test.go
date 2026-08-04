@@ -97,6 +97,53 @@ The application always produces its greeting.
 
 const coreSpec = "# Core\n\n### RULE-001 — Emit the greeting\n\nTraces: OBJ-001\n\nThe application emits the greeting exactly once.\n\n```gherkin\nScenario: greeting is emitted\n  Given the application runs\n  Then the greeting is produced once\n```\n"
 
+const legacySpec = "# Legacy\n\n### RULE-002 — Greeting source persists\n\nTraces: OBJ-001\n\nThe greeting source file remains present.\n\n```gherkin\nScenario: source persists\n  Given the application tree\n  Then app.txt exists\n```\n"
+
+// probeProgram is the e2e suite: every `expect <path>` line found under
+// tests/ must name an existing file, so a test stays red exactly until its
+// implementation exists.
+const probeProgram = `package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	entries, err := os.ReadDir("tests")
+	if err != nil {
+		return
+	}
+	var missing []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("tests", entry.Name()))
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			rest, ok := strings.CutPrefix(strings.TrimSpace(line), "expect ")
+			if !ok {
+				continue
+			}
+			rest = strings.TrimSpace(rest)
+			if _, err := os.Stat(filepath.FromSlash(rest)); err != nil {
+				missing = append(missing, rest)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Println("missing:", strings.Join(missing, ", "))
+		os.Exit(1)
+	}
+}
+`
+
 func addPatch(path string, lines []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "diff --git a/%s b/%s\n", path, path)
@@ -115,6 +162,7 @@ func TestCLIEndToEnd(t *testing.T) {
 	git(t, root, "config", "user.email", "telos@e2e")
 	git(t, root, "config", "user.name", "telos e2e")
 	write(t, root, "app.txt", "hello\n")
+	write(t, root, "tools/probe.go", probeProgram)
 
 	// Bootstrap an existing project: init adopts the current tree as baseline.
 	expectOK(t, runCLI(t, bin, root, "", "init", "--agent", "all"), "init")
@@ -130,9 +178,9 @@ func TestCLIEndToEnd(t *testing.T) {
 
 	// The human configures the project (telos.toml is human-owned).
 	write(t, root, "telos.toml", `agents = ["claude", "codex"]
-test_commands = ["go version"]
-test_files = ["*_test.txt"]
-untraced = ["README.md", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md"]
+test_commands = ["go run tools/probe.go"]
+test_files = ["tests/**"]
+untraced = ["README.md", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md", "tools/**"]
 `)
 
 	// Draft the spec through the broker.
@@ -157,21 +205,41 @@ untraced = ["README.md", ".github/**", ".claude/**", ".codex/**", ".agents/**", 
 		t.Fatalf("phase = %v, want implementing", status["phase"])
 	}
 
+	// Proof is test-first: no implementation before the witnessed failing test.
+	appPatch := "diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1,1 +1,2 @@\n+telos: RULE-001\n hello\n"
+	expectCode(t, runCLI(t, bin, root, appPatch, "apply", "--rule", "RULE-001"), "TELOS_TEST_FIRST", "apply implementation first")
+
 	// Broker-applied patches must leave every touched file annotated.
-	expectCode(t, runCLI(t, bin, root, addPatch("core.txt", []string{"unannotated"}), "apply", "--rule", "RULE-001"), "TELOS_ANNOTATION_MISMATCH", "apply unannotated")
-	if _, err := os.Stat(filepath.Join(root, "core.txt")); !os.IsNotExist(err) {
+	expectCode(t, runCLI(t, bin, root, addPatch("tests/core_test.txt", []string{"unannotated", "asserts RULE-001"}), "apply", "--rule", "RULE-001"), "TELOS_ANNOTATION_MISMATCH", "apply unannotated")
+	if _, err := os.Stat(filepath.Join(root, "tests", "core_test.txt")); !os.IsNotExist(err) {
 		t.Fatal("rejected patch left the tree modified")
 	}
 	expectCode(t, runCLI(t, bin, root, addPatch("spec/evil.md", []string{"# nope"}), "apply", "--rule", "RULE-001"), "TELOS_INPUT_INVALID", "apply into spec/")
 	expectCode(t, runCLI(t, bin, root, addPatch(".claude/hax.md", []string{"x"}), "apply", "--rule", "RULE-001"), "TELOS_INPUT_INVALID", "apply into .claude/")
 
-	// app.txt gains its annotation; the rule still lacks its tagged test.
-	appPatch := "diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1,1 +1,2 @@\n+telos: RULE-001\n hello\n"
-	expectOK(t, runCLI(t, bin, root, appPatch, "apply", "--rule", "RULE-001"), "apply app annotation")
-	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_RULE_NOT_IMPLEMENTED", "verify (spec ahead)")
-	expectOK(t, runCLI(t, bin, root, addPatch("core_test.txt", []string{"telos: RULE-001", "asserts RULE-001 greeting"}), "apply", "--rule", "RULE-001"), "apply tagged test")
+	// A test the suite already passes proves nothing.
+	expectCode(t, runCLI(t, bin, root, addPatch("tests/core_test.txt", []string{"telos: RULE-001", "asserts RULE-001", "expect app.txt"}), "apply", "--rule", "RULE-001"), "TELOS_RED_EXPECTED", "apply passing test")
 
-	// Green: spec == code, every rule proven.
+	// The witnessed failing test is recorded and sealed as red evidence.
+	red := expectOK(t, runCLI(t, bin, root, addPatch("tests/core_test.txt", []string{"telos: RULE-001", "asserts RULE-001", "expect out/greeting.txt"}), "apply", "--rule", "RULE-001"), "apply red test")
+	if fmt.Sprint(red["suite"]) != "red" {
+		t.Fatalf("red apply result = %v", red)
+	}
+
+	// Sealed: the failing test may not move to satisfy the implementation.
+	sealedPatch := "diff --git a/tests/core_test.txt b/tests/core_test.txt\n--- a/tests/core_test.txt\n+++ b/tests/core_test.txt\n@@ -1,3 +1,3 @@\n telos: RULE-001\n asserts RULE-001\n-expect out/greeting.txt\n+expect app.txt\n" + appPatch
+	expectCode(t, runCLI(t, bin, root, sealedPatch, "apply", "--rule", "RULE-001"), "TELOS_TEST_SEALED", "apply touching sealed test")
+
+	// app.txt gains its annotation; the suite stays red until the greeting
+	// exists, and verify says exactly that.
+	expectOK(t, runCLI(t, bin, root, appPatch, "apply", "--rule", "RULE-001"), "apply app annotation")
+	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_RED_PENDING", "verify (red pending)")
+
+	// Only the implementation turns the witnessed red into a witnessed green.
+	green := expectOK(t, runCLI(t, bin, root, addPatch("out/greeting.txt", []string{"telos: RULE-001", "greeting"}), "apply", "--rule", "RULE-001"), "apply implementation")
+	if fmt.Sprint(green["suite"]) != "green" || fmt.Sprint(green["proven"]) != "[RULE-001]" {
+		t.Fatalf("green apply result = %v", green)
+	}
 	verified := expectOK(t, runCLI(t, bin, root, "", "verify"), "verify (green)")
 	if fmt.Sprint(verified["rules"]) != "1" {
 		t.Fatalf("verify result = %v", verified)
@@ -193,10 +261,24 @@ untraced = ["README.md", ".github/**", ".claude/**", ".codex/**", ".agents/**", 
 	expectOK(t, runCLI(t, bin, root, "", "spec", "approve", "--review", digest), "adoption approve")
 	expectOK(t, runCLI(t, bin, root, "", "verify"), "verify (adopted)")
 
+	// A rule documenting existing behavior can never be witnessed failing:
+	// adoption is explicit, human-gated by the guard, and requires the suite
+	// to pass with the documentation test in place.
+	expectOK(t, runCLI(t, bin, root, legacySpec, "spec", "put", "--file", "spec/legacy.md"), "spec put legacy")
+	review = expectOK(t, runCLI(t, bin, root, "", "spec", "review"), "legacy review")
+	digest, _ = review["digest"].(string)
+	expectOK(t, runCLI(t, bin, root, "", "spec", "approve", "--review", digest), "legacy approve")
+	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_RULE_NOT_IMPLEMENTED", "verify (spec ahead)")
+	adopted := expectOK(t, runCLI(t, bin, root, addPatch("tests/legacy_test.txt", []string{"telos: RULE-002", "asserts RULE-002", "expect app.txt"}), "apply", "--rule", "RULE-002", "--expect-pass"), "apply adoption test")
+	if fmt.Sprint(adopted["proven"]) != "[RULE-002]" {
+		t.Fatalf("adoption result = %v", adopted)
+	}
+	expectOK(t, runCLI(t, bin, root, "", "verify"), "verify (adopted rule)")
+
 	// Traceability is derivable from the tree alone.
 	trace := expectOK(t, runCLI(t, bin, root, "", "trace"), "trace")
 	text := fmt.Sprint(trace)
-	if !strings.Contains(text, "app.txt") || !strings.Contains(text, "core_test.txt") {
+	if !strings.Contains(text, "app.txt") || !strings.Contains(text, "tests/core_test.txt") {
 		t.Fatalf("trace misses implementation or test files: %v", text)
 	}
 }

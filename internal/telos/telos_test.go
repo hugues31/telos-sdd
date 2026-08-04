@@ -41,7 +41,7 @@ func writeTestConfig(t *testing.T, root string, testCommands []string) {
 	cfg := "agents = [\"claude\"]\n" +
 		"test_commands = " + quoteList(testCommands) + "\n" +
 		"test_files = [\"tests/**\"]\n" +
-		"infra = [\"README.md\", \".claude/**\", \".agents/**\", \".codex/**\", \".github/**\", \"CLAUDE.md\", \"AGENTS.md\", \"infra/**\"]\n"
+		"untraced = [\"README.md\", \".claude/**\", \".agents/**\", \".codex/**\", \".github/**\", \"CLAUDE.md\", \"AGENTS.md\", \"tools/**\"]\n"
 	if err := os.WriteFile(filepath.Join(root, configFile), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ test_commands = [
   "go vet ./...",
 ] # trailing comment
 test_files = ["**/*_test.go"]
-infra = ["README.md"]
+untraced = ["README.md"]
 `
 	if err := os.WriteFile(filepath.Join(root, configFile), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
@@ -181,8 +181,23 @@ infra = ["README.md"]
 	if len(got.TestCommands) != 2 || got.TestCommands[1] != "go vet ./..." {
 		t.Fatalf("test_commands = %v", got.TestCommands)
 	}
-	if len(got.TestFiles) != 1 || len(got.Infra) != 1 {
-		t.Fatalf("test_files = %v, infra = %v", got.TestFiles, got.Infra)
+	if len(got.TestFiles) != 1 || len(got.Untraced) != 1 {
+		t.Fatalf("test_files = %v, untraced = %v", got.TestFiles, got.Untraced)
+	}
+}
+
+func TestReadConfigRejectsUnknownKeys(t *testing.T) {
+	root := t.TempDir()
+	cfg := "agents = [\"claude\"]\ninfra = [\"README.md\"]\n"
+	if err := os.WriteFile(filepath.Join(root, configFile), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readConfig(root)
+	if errCode(t, err) != "TELOS_CONFIG_INVALID" {
+		t.Fatalf("unknown key must fail config parsing, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `"infra"`) || !strings.Contains(err.Error(), "untraced") {
+		t.Fatalf("error must name the bad key and the valid ones, got %v", err)
 	}
 }
 
@@ -374,8 +389,8 @@ func TestApplyEnforcesAnnotationIntersection(t *testing.T) {
 		t.Fatal("annotation referencing an unknown rule must be rejected")
 	}
 
-	if _, err := runApply(root, []string{"RULE-001"}, addPatch("infra/tool.cfg", []string{"anything"})); err != nil {
-		t.Fatalf("infra file should not need an annotation: %v", err)
+	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tools/tool.cfg", []string{"anything"})); err != nil {
+		t.Fatalf("untraced file should not need an annotation: %v", err)
 	}
 	if _, err := runApply(root, []string{"RULE-001"}, addPatch("src/auth.txt", []string{"telos: RULE-001", "content"})); err != nil {
 		t.Fatalf("valid annotated patch rejected: %v", err)
@@ -441,6 +456,16 @@ func TestVerifyPipelineErrorCodes(t *testing.T) {
 	writeTestConfig(t, root, nil)
 	if _, err := runVerify(root, &out, &out); errCode(t, err) != "TELOS_CONFIG_INVALID" {
 		t.Fatal("rules without test_commands must fail verify")
+	}
+	noTestFiles := "agents = [\"claude\"]\n" +
+		"test_commands = [\"go version\"]\n" +
+		"test_files = []\n" +
+		"untraced = [\"README.md\", \".claude/**\", \".agents/**\", \".codex/**\", \".github/**\", \"CLAUDE.md\", \"AGENTS.md\", \"tools/**\"]\n"
+	if err := os.WriteFile(filepath.Join(root, configFile), []byte(noTestFiles), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runVerify(root, &out, &out); errCode(t, err) != "TELOS_CONFIG_INVALID" {
+		t.Fatal("rules without test_files must fail verify")
 	}
 	writeTestConfig(t, root, []string{"telos-definitely-missing-command"})
 	if _, err := runVerify(root, &out, &out); errCode(t, err) != "TELOS_TESTS_FAILED" {
@@ -678,7 +703,7 @@ func TestVerifyDetectsTestCommandsMutatingSources(t *testing.T) {
 func TestInitIsIdempotentAndPreservesConfig(t *testing.T) {
 	root := gitRepo(t)
 	initTelos(t, root)
-	custom := "# my custom notes\nagents = [\"claude\"]\ntest_commands = [\"go version\"]\ntest_files = []\ninfra = [\".claude/**\", \"CLAUDE.md\"]\n"
+	custom := "# my custom notes\nagents = [\"claude\"]\ntest_commands = [\"go version\"]\ntest_files = []\nuntraced = [\".claude/**\", \"CLAUDE.md\"]\n"
 	if err := os.WriteFile(filepath.Join(root, configFile), []byte(custom), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -710,6 +735,58 @@ func TestInitIsIdempotentAndPreservesConfig(t *testing.T) {
 	}
 	if st.Code.Root != rootHashMap(code) || st.Spec.Root != rootHashMap(spec) {
 		t.Fatal("re-init did not re-baseline the declared roots")
+	}
+}
+
+func TestViewGeneratesSelfContainedEscapedHTML(t *testing.T) {
+	root := gitRepo(t)
+	initTelos(t, root)
+	writeTestConfig(t, root, []string{"go version"})
+	writeSpecFile(t, root, productFile, productBody)
+	writeSpecFile(t, root, "spec/auth.md", authBody)
+	hostile := "# Web\n\n### RULE-002 — Escape <script>alert(1)</script> everywhere\n\nTraces: OBJ-001\n\nOutput is escaped.\n\n```gherkin\nScenario: escaped\n  Then no <script>alert(1)</script> runs\n```\n"
+	writeSpecFile(t, root, "spec/web.md", hostile)
+	review, err := specReview(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := specApprove(root, review["digest"].(string)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runApply(root, []string{"RULE-001"}, addPatch("tests/auth_test.txt", []string{"telos: RULE-001", "asserts RULE-001"})); err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "view.html")
+	result, err := runView(root, "test", out, false)
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if result["path"] != out {
+		t.Fatalf("view path = %v", result["path"])
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(data)
+	for _, want := range []string{"RULE-001", "RULE-002", "OBJ-001", "Deny locked account sign-in", "proven by tests", "not implemented", "tests/auth_test.txt", "class=\"code gherkin\"", "by telos test", "Verification setup", "<code>go version</code>", "<time id=\"gen\" datetime=\"", "id=\"panel-intent\"", "id=\"panel-contract\""} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("view page misses %q", want)
+		}
+	}
+	if strings.Contains(page, "<script>alert(1)</script>") {
+		t.Fatal("view page did not escape hostile spec content")
+	}
+
+	if _, err := runView(root, "test", filepath.Join(root, "spec-view.html"), false); errCode(t, err) != "TELOS_INPUT_INVALID" {
+		t.Fatal("non-ignored --out inside the repository must be rejected")
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/spec-view.html\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runView(root, "test", filepath.Join(root, "spec-view.html"), false); err != nil {
+		t.Fatalf("git-ignored --out inside the repository should be accepted: %v", err)
 	}
 }
 

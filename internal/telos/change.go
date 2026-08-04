@@ -129,8 +129,8 @@ func specApprove(root, digest string) (map[string]any, error) {
 
 // runApply is the only write path for code. It requires clean declared roots,
 // applies the patch as one transaction, and validates the post-image: every
-// touched non-infra file must carry a valid `telos:` annotation intersecting
-// the cited rules.
+// touched file must either match an untraced pattern or carry a valid `telos:`
+// annotation intersecting the cited rules.
 func runApply(root string, rules []string, patch []byte) (map[string]any, error) {
 	cfg, err := readConfig(root)
 	if err != nil {
@@ -188,7 +188,7 @@ func runApply(root string, rules []string, patch []byte) (map[string]any, error)
 		if _, statErr := os.Lstat(path); os.IsNotExist(statErr) {
 			continue
 		}
-		if matchAny(cfg.Infra, rel) {
+		if matchAny(cfg.Untraced, rel) {
 			continue
 		}
 		ids, found, annErr := fileAnnotations(path)
@@ -214,7 +214,7 @@ func runApply(root string, rules []string, patch []byte) (map[string]any, error)
 	}
 	if len(bad) > 0 {
 		rollback()
-		return nil, codedPaths("TELOS_ANNOTATION_MISMATCH", "every touched non-infra file must carry a `telos:` annotation of existing rules intersecting the cited --rule references; patch reversed", bad)
+		return nil, codedPaths("TELOS_ANNOTATION_MISMATCH", "every touched file must match an untraced pattern or carry a `telos:` annotation of existing rules intersecting the cited --rule references; patch reversed", bad)
 	}
 	codeAfter, _, err := inventories(root)
 	if err != nil {
@@ -228,23 +228,10 @@ func runApply(root string, rules []string, patch []byte) (map[string]any, error)
 	return map[string]any{"paths": paths, "rules": rules, "code_root": st.Code.Root}, nil
 }
 
-// runTrace maps rules to the files that implement them (annotations) and the
-// tests that prove them (test_files references).
-func runTrace(root, id string) (any, error) {
-	cfg, err := readConfig(root)
-	if err != nil {
-		return nil, err
-	}
-	code, specFiles, err := inventories(root)
-	if err != nil {
-		return nil, err
-	}
-	model, problems := loadSpec(root, specFiles)
-	if len(problems) > 0 {
-		return nil, codedPaths("TELOS_SPEC_INVALID", "the spec has structural problems", problems)
-	}
-	implementedBy := map[string][]string{}
-	testedBy := map[string][]string{}
+// traceMaps derives, from the tree alone, which files implement each rule
+// (annotations) and which tests prove it (test_files references).
+func traceMaps(root string, cfg Config, code map[string]string) (implementedBy, testedBy map[string][]string) {
+	implementedBy, testedBy = map[string][]string{}, map[string][]string{}
 	for _, rel := range sortedKeys(code) {
 		path := filepath.Join(root, filepath.FromSlash(rel))
 		if ids, found, annErr := fileAnnotations(path); annErr == nil && found {
@@ -262,6 +249,25 @@ func runTrace(root, id string) (any, error) {
 			}
 		}
 	}
+	return implementedBy, testedBy
+}
+
+// runTrace maps rules to the files that implement them (annotations) and the
+// tests that prove them (test_files references).
+func runTrace(root, id string) (any, error) {
+	cfg, err := readConfig(root)
+	if err != nil {
+		return nil, err
+	}
+	code, specFiles, err := inventories(root)
+	if err != nil {
+		return nil, err
+	}
+	model, problems := loadSpec(root, specFiles)
+	if len(problems) > 0 {
+		return nil, codedPaths("TELOS_SPEC_INVALID", "the spec has structural problems", problems)
+	}
+	implementedBy, testedBy := traceMaps(root, cfg, code)
 	entry := func(rule string) map[string]any {
 		info := model.Rules[rule]
 		return map[string]any{

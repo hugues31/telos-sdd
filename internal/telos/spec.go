@@ -32,6 +32,7 @@ type specRule struct {
 	Title   string
 	Traces  []string
 	Gherkin bool
+	Section string
 }
 
 // loadSpec parses every file of the spec tree and returns the model plus the
@@ -85,7 +86,7 @@ func loadSpec(root string, specFiles map[string]string) (specModel, []string) {
 				problems = append(problems, rel+": duplicate rule "+id+" (also in "+existing.File+")")
 				continue
 			}
-			rule := &specRule{File: rel, Title: title, Gherkin: strings.Contains(section, "```gherkin")}
+			rule := &specRule{File: rel, Title: title, Gherkin: strings.Contains(section, "```gherkin"), Section: section}
 			if trace := traceLine.FindStringSubmatch(section); trace != nil {
 				rule.Traces = objRef.FindAllString(trace[1], -1)
 			}

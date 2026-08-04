@@ -40,7 +40,7 @@ The only other gated command is `telos init` inside an already-initialized proje
 
 ## The broker
 
-`telos spec put` is the only write path for `spec/**` (path-validated, Markdown only). `telos apply` is the only write path for code: it requires both trees clean, cited rules that exist in the approved spec, applies the Git patch transactionally, then validates the **post-image** — every touched non-infra file must carry a `telos:` annotation of existing rules intersecting the cited `--rule` references, or the patch is reversed. Patches may not touch `spec/**`, `telos.toml`, `.telos/**`, provider directories, or the managed instruction files: the broker protects its own hooks.
+`telos spec put` is the only write path for `spec/**` (path-validated, Markdown only). `telos apply` is the only write path for code: it requires both trees clean, cited rules that exist in the approved spec, applies the Git patch transactionally, then validates the **post-image** — every touched file must match an untraced pattern or carry a `telos:` annotation of existing rules intersecting the cited `--rule` references, or the patch is reversed. Patches may not touch `spec/**`, `telos.toml`, `.telos/**`, provider directories, or the managed instruction files: the broker protects its own hooks.
 
 Spec structure is validated with the same rules everywhere: OBJ headings only in `spec/PRODUCT.md`, RULE headings only in domain files, ids globally unique, every rule tracing to an existing objective and containing a Gherkin block. Referential coherence is mechanical; semantic coherence is the challenger's job, locked in by the human gate.
 

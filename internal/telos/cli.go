@@ -25,6 +25,7 @@ Usage:
   telos apply --rule RULE-NNN [--rule ...] [--json] < patch.diff
   telos verify [--json]
   telos trace [RULE-NNN] [--json]
+  telos view [--out <path>] [--open] [--json]
   telos guard
   telos version [--json]`
 
@@ -128,6 +129,19 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		}
 		result, err := runTrace(root, id)
 		return finish(commandExecution{Command: "trace", Result: result}, err)
+	case "view":
+		f := flags("view", stderr)
+		out := f.String("out", "", "output HTML path (default: system temp; inside the repo it must be git-ignored)")
+		open := f.Bool("open", false, "open the page in the default browser")
+		if err := f.Parse(args[1:]); err != nil {
+			return finish(commandExecution{}, err)
+		}
+		result, err := runView(root, version, *out, *open)
+		human := ""
+		if err == nil {
+			human = fmt.Sprintf("Spec view written to %s.", result["path"])
+		}
+		return finish(commandExecution{Command: "view", Result: result, Human: human}, err)
 	default:
 		return finish(commandExecution{}, fmt.Errorf("unknown command %q; run `telos help`", args[0]))
 	}

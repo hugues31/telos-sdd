@@ -125,14 +125,14 @@ func TestCLIEndToEnd(t *testing.T) {
 	}
 	expectOK(t, runCLI(t, bin, root, "", "doctor"), "doctor")
 
-	// The legacy file is neither infra nor annotated: verify demands adoption.
+	// The legacy file is neither untraced nor annotated: verify demands adoption.
 	expectCode(t, runCLI(t, bin, root, "", "verify"), "TELOS_ANNOTATION_MISSING", "verify (bootstrap)")
 
 	// The human configures the project (telos.toml is human-owned).
 	write(t, root, "telos.toml", `agents = ["claude", "codex"]
 test_commands = ["go version"]
 test_files = ["*_test.txt"]
-infra = ["README.md", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md"]
+untraced = ["README.md", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md"]
 `)
 
 	// Draft the spec through the broker.

@@ -37,7 +37,7 @@ func runVerify(root string, stdout, stderr io.Writer) (map[string]any, error) {
 	}
 	var missing, orphans []string
 	for _, rel := range sortedKeys(code) {
-		if matchAny(cfg.Infra, rel) {
+		if matchAny(cfg.Untraced, rel) {
 			continue
 		}
 		ids, found, annErr := fileAnnotations(filepath.Join(root, filepath.FromSlash(rel)))
@@ -55,13 +55,13 @@ func runVerify(root string, stdout, stderr io.Writer) (map[string]any, error) {
 		}
 	}
 	if len(missing) > 0 {
-		return nil, codedPaths("TELOS_ANNOTATION_MISSING", "every non-infra file must carry a `telos: RULE-NNN` annotation or match an infra pattern in telos.toml", missing)
+		return nil, codedPaths("TELOS_ANNOTATION_MISSING", "every file must carry a `telos: RULE-NNN` annotation or match an untraced pattern in telos.toml", missing)
 	}
 	if len(orphans) > 0 {
 		return nil, codedPaths("TELOS_ANNOTATION_ORPHAN", "annotations reference rules that do not exist in the spec", orphans)
 	}
-	if len(model.Rules) > 0 && len(cfg.TestCommands) == 0 {
-		return nil, coded("TELOS_CONFIG_INVALID", "test_commands must be configured in telos.toml once the spec has rules")
+	if len(model.Rules) > 0 && (len(cfg.TestCommands) == 0 || len(cfg.TestFiles) == 0) {
+		return nil, coded("TELOS_CONFIG_INVALID", "test_commands and test_files must be configured in telos.toml once the spec has rules")
 	}
 	tested, err := testedRules(root, cfg, code)
 	if err != nil {
@@ -113,17 +113,7 @@ func runStatus(root string) (map[string]any, []string, error) {
 	untested := untestedRules(model, tested)
 	specRoot := rootHashMap(specFiles)
 	codeRoot := rootHashMap(code)
-	phase, next := "clean", []string{"spec put"}
-	switch {
-	case codeRoot != st.Code.Root:
-		phase, next = "corrupted", nil
-	case specRoot != st.Spec.Root && st.Review == specRoot:
-		phase, next = "awaiting_approval", []string{"spec approve"}
-	case specRoot != st.Spec.Root:
-		phase, next = "spec_pending", []string{"spec review"}
-	case len(untested) > 0:
-		phase, next = "implementing", []string{"apply", "verify"}
-	}
+	phase, next := derivePhase(st, specRoot, codeRoot, len(untested))
 	result := map[string]any{
 		"phase": phase,
 		"spec": map[string]any{
@@ -145,6 +135,22 @@ func runStatus(root string) (map[string]any, []string, error) {
 		"spec_problems": problems,
 	}
 	return result, next, nil
+}
+
+// derivePhase orders the derived states: an out-of-band code edit outranks a
+// pending spec, which outranks unimplemented rules. Phases are never stored.
+func derivePhase(st State, specRoot, codeRoot string, untested int) (string, []string) {
+	switch {
+	case codeRoot != st.Code.Root:
+		return "corrupted", nil
+	case specRoot != st.Spec.Root && st.Review == specRoot:
+		return "awaiting_approval", []string{"spec approve"}
+	case specRoot != st.Spec.Root:
+		return "spec_pending", []string{"spec review"}
+	case untested > 0:
+		return "implementing", []string{"apply", "verify"}
+	}
+	return "clean", []string{"spec put"}
 }
 
 func untestedRules(model specModel, tested map[string]bool) []string {

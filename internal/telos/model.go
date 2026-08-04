@@ -16,7 +16,7 @@ type Config struct {
 	Agents       []string
 	TestCommands []string
 	TestFiles    []string
-	Infra        []string
+	Untraced     []string
 }
 
 // Snapshot records a declared tree state: a root hash over the sorted

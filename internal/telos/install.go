@@ -66,8 +66,8 @@ test_commands = []
 # Files whose RULE-NNN references count as executable proof of a rule.
 test_files = []
 
-# Files exempt from the ` + "`telos:`" + ` annotation requirement.
-infra = ["README.md", "LICENSE", ".gitignore", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md", "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml"]
+# Files allowed to exist without tracing to a rule (still integrity-checked).
+untraced = ["README.md", "LICENSE", ".gitignore", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md", "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml"]
 `
 }
 

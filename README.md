@@ -32,7 +32,7 @@ Request
 2. **The code matches its declared root.** Any out-of-band code edit is `TELOS_CODE_CORRUPTED`. Recovery is Git (`git restore`, checkout of a green commit) or a deliberate, human-gated re-baseline. The write is never adopted.
 3. **Every rule is proven by a tagged test.** A `RULE-NNN` is implemented only when a file matching the configured `test_files` references it and the configured `test_commands` pass. Until then the spec is ahead and `telos verify` fails — which is exactly what blocks a merge in CI.
 
-Every non-infra file carries a `telos: RULE-NNN` annotation in its first lines, validated on the post-image of every patch: code exists only because a rule demands it, and `telos trace RULE-NNN` lists the files and tests of any rule from the tree alone.
+Every traced file carries a `telos: RULE-NNN` annotation in its first lines, validated on the post-image of every patch: code exists only because a rule demands it, and `telos trace RULE-NNN` lists the files and tests of any rule from the tree alone.
 
 ## Install
 
@@ -62,7 +62,7 @@ telos init --agent all --ci github
 telos doctor
 ```
 
-`init` requires a Git worktree. It creates `telos.toml` (human-owned configuration: test commands, test file patterns, infra exemptions), a `spec/PRODUCT.md` skeleton, and `.telos/state.json` (the only internal file, committed with your code), and installs the skill, agents, and guard hooks for the chosen providers. On an existing codebase, `init` adopts the current tree as the declared baseline; `telos verify` then lists every legacy file to classify — as infra in `telos.toml`, or as implementation of rules you specify progressively.
+`init` requires a Git worktree. It creates `telos.toml` (human-owned configuration: test commands, test file patterns, untraced patterns), a `spec/PRODUCT.md` skeleton, and `.telos/state.json` (the only internal file, committed with your code), and installs the skill, agents, and guard hooks for the chosen providers. On an existing codebase, `init` adopts the current tree as the declared baseline; `telos verify` then lists every legacy file to classify — as untraced in `telos.toml`, or as implementation of rules you specify progressively.
 
 ## Use
 
@@ -93,13 +93,13 @@ There is no completion ceremony: green `telos verify` is completion, your Git co
 ## Repository model
 
 ```text
-telos.toml               # human-owned config: test_commands, test_files, infra patterns
+telos.toml               # human-owned config: test_commands, test_files, untraced patterns
 spec/
   PRODUCT.md             # vision, OBJ-* objectives, constraints, non-goals
   <domain>.md            # RULE-* rules, Traces: OBJ-*, ```gherkin scenarios
 .telos/
   state.json             # approved spec root + declared code root (committed)
-<code>                   # every non-infra file annotated `telos: RULE-*`
+<code>                   # every traced file annotated `telos: RULE-*`
 <tests>                  # every rule referenced by a tagged test
 ```
 
@@ -118,8 +118,11 @@ telos spec approve --review <digest>              # the single human gate
 telos apply --rule RULE-NNN [--rule ...]          # brokered Git patch (stdin)
 telos verify                                      # recompute every invariant
 telos trace [RULE-NNN]                            # rule → files → tests
+telos view [--out <path>] [--open]                # self-contained HTML spec view
 telos guard                                       # provider hook endpoint
 ```
+
+`telos view` renders the whole contract as one static HTML page — product intent, rules with their scenarios, per-rule implementation status, files and tests from the annotations, the objective→rule traceability matrix, and the verification setup from `telos.toml` (so a reader knows what "proven" means; keep secrets out of `test_commands`) — with no external assets. It writes to the system temp directory by default; an `--out` inside the repository must be git-ignored, since a generated page is not part of the declared code tree.
 
 Humans normally need only `init` and `doctor` — and their IDE for `spec/`, since a direct spec edit is simply a pending diff the agent will pick up, normalize, and bring to approval.
 

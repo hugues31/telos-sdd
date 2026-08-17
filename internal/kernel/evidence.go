@@ -14,6 +14,7 @@ import (
 	"github.com/hugues31/telos-sdd/internal/evidence"
 	"github.com/hugues31/telos-sdd/internal/gitx"
 	"github.com/hugues31/telos-sdd/internal/glob"
+	"github.com/hugues31/telos-sdd/internal/policy"
 )
 
 // targetContract returns the contract this Change certifies against: the
@@ -301,7 +302,9 @@ func buildRecord(wt *gitx.Repo, cfg Config, doc *ChangeDoc, kind string, reqs, c
 			}
 		}
 	}
-	if policyBlob, err := wt.RevParse("HEAD:" + ConfigFile); err == nil {
+	if eff, err := policy.Load(wt.WorkDir); err == nil {
+		dep.Policy = eff.Hash
+	} else if policyBlob, berr := wt.RevParse("HEAD:" + ConfigFile); berr == nil {
 		dep.Policy = string(policyBlob)
 	}
 	status := "fail"

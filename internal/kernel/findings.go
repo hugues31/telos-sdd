@@ -9,6 +9,7 @@ import (
 
 	"github.com/hugues31/telos-sdd/internal/coded"
 	"github.com/hugues31/telos-sdd/internal/gitx"
+	"github.com/hugues31/telos-sdd/internal/policy"
 )
 
 // Finding severities and statuses.
@@ -196,12 +197,20 @@ func mutateFinding(wt *gitx.Repo, findingID string, mutate func(*Finding) error)
 	return nil, coded.New("TELOS_NODE_NOT_FOUND", "no finding "+findingID)
 }
 
-// openBlocking lists the open findings whose effective severity blocks
-// certification (KERNEL-006).
-func openBlocking(findings []Finding) []string {
+// openBlocking lists the open findings that block certification
+// (KERNEL-006): effective severity blocking — set by a human, or escalated
+// deterministically by policy.
+func openBlocking(findings []Finding, eff policy.Effective) []string {
 	var out []string
 	for _, f := range findings {
-		if f.Status == FindingOpen && f.Severity == SeverityBlocking {
+		if f.Status != FindingOpen {
+			continue
+		}
+		if f.Severity == SeverityBlocking {
+			out = append(out, f.ID)
+			continue
+		}
+		if f.Severity == "" && eff.Escalate(f.ProposedSeverity, f.Confidence) == "block" {
 			out = append(out, f.ID)
 		}
 	}

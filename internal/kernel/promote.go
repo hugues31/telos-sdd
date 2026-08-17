@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/hugues31/telos-sdd/internal/coded"
+	"github.com/hugues31/telos-sdd/internal/constraints"
 	"github.com/hugues31/telos-sdd/internal/contract"
 	"github.com/hugues31/telos-sdd/internal/evidence"
 	"github.com/hugues31/telos-sdd/internal/gitx"
+	"github.com/hugues31/telos-sdd/internal/policy"
 	"github.com/hugues31/telos-sdd/internal/provenance"
 )
 
@@ -27,6 +29,7 @@ type readyState struct {
 	verified    []string
 	openIDs     []string
 	suiteRecord *evidence.Record
+	eff         policy.Effective
 }
 
 // ReadyReport is the result surface of `telos change ready`.
@@ -94,17 +97,29 @@ func readyComputation(wt *gitx.Repo, cfg Config, echo io.Writer) (*readyState, e
 		return nil, coded.WithPaths("TELOS_RED_PENDING", "witnessed reds await their green; implement until the sealed tests pass", reqs)
 	}
 
-	// KERNEL-006 — blocking findings.
+	// Policy loads before any policy-governed gate: a broken or
+	// kernel-weakening policy forbids certification (KERNEL-008).
+	eff, err := policy.Load(wt.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// KERNEL-006 — blocking findings, human-set or policy-escalated.
 	findings, err := LoadFindings(wt, doc.ID)
 	if err != nil {
 		return nil, err
 	}
-	if blocking := openBlocking(findings); len(blocking) > 0 {
+	if blocking := openBlocking(findings, eff); len(blocking) > 0 {
 		return nil, coded.WithPaths("TELOS_FINDING_BLOCKING", "open blocking findings forbid certification; resolve them or fix the underlying issue", blocking)
 	}
 
 	target, folded, ops, err := targetContract(wt, doc)
 	if err != nil {
+		return nil, err
+	}
+	// Tier-1 structured constraints: a provably contradictory formalized
+	// subset blocks certification.
+	if err := constraints.Check(target); err != nil {
 		return nil, err
 	}
 	tree, err := wt.TreeOf("HEAD")
@@ -184,9 +199,7 @@ func readyComputation(wt *gitx.Repo, cfg Config, echo io.Writer) (*readyState, e
 			dep.Contract = string(sub)
 		}
 	}
-	if policyBlob, perr := wt.RevParse("HEAD:" + ConfigFile); perr == nil {
-		dep.Policy = string(policyBlob)
-	}
+	dep.Policy = eff.Hash
 	prototype := evidence.Record{Kind: evidence.KindSuite, Command: strings.Join(cfg.TestCommands, " && "), Cwd: ".", DependsOn: dep}
 	key := prototype.Key()
 
@@ -259,7 +272,7 @@ func readyComputation(wt *gitx.Repo, cfg Config, echo io.Writer) (*readyState, e
 	return &readyState{
 		doc: doc, bundle: bundle, target: target, foldedSpec: folded,
 		entries: entries, verified: sortedRequirementIDs(target),
-		openIDs: openFindingIDs(findings), suiteRecord: suiteRecord,
+		openIDs: openFindingIDs(findings), suiteRecord: suiteRecord, eff: eff,
 	}, nil
 }
 
@@ -437,7 +450,7 @@ func PromoteChange(wt *gitx.Repo, cfg Config, version string, echo io.Writer) (P
 		ParentCertified: doc.Base,
 		Change:          ChangeInfo{ID: doc.ID, Category: doc.Category, Base: doc.Base},
 		Contract:        ContractInfo{Tree: string(specTree), Requirements: state.verified, DeltaFrom: baseCert.Payload.Contract.Tree},
-		Policy:          PolicyInfo{Blob: string(policyBlob), Hash: ""},
+		Policy:          PolicyInfo{Blob: string(policyBlob), Hash: state.eff.Hash},
 		Approvals:       doc.Approvals,
 		Verification:    Verification{Evidence: state.entries, RequirementsVerified: state.verified, FindingsOpen: state.openIDs},
 		Toolchain:       Toolchain{Telos: version, Go: runtime.Version()},

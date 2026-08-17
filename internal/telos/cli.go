@@ -41,6 +41,7 @@ Usage:
   telos impact <ID> [--json]
   telos explain <symbol> [--json]
   telos context [--budget N] [--focus IDs] [query...] [--json]
+  telos view [--port N] [--open] [--static DIR] [--json]
   telos guard
   telos version [--json]
 
@@ -195,6 +196,9 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		return finish(execution, err)
 	case "context":
 		execution, err := runContext(repo, root, args[1:], stderr)
+		return finish(execution, err)
+	case "view":
+		execution, err := runView(repo, root, args[1:], stdout, stderr)
 		return finish(execution, err)
 	default:
 		return finish(commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unknown command %q; run `telos help`", args[0])))

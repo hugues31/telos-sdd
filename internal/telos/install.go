@@ -1,6 +1,8 @@
 package telos
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -10,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/hugues31/telos-sdd/bundle"
+	"github.com/hugues31/telos-sdd/internal/kernel"
 )
 
 func initProject(root, agent string, githubCI bool) error {
@@ -20,9 +23,9 @@ func initProject(root, agent string, githubCI bool) error {
 	if agent == "all" {
 		agents = []string{"claude", "codex"}
 	}
-	alreadyInitialized := fileExists(filepath.Join(root, configFile)) == nil
+	alreadyInitialized := fileExists(filepath.Join(root, kernel.ConfigFile)) == nil
 	if !alreadyInitialized {
-		if err := atomicWrite(filepath.Join(root, configFile), []byte(defaultConfig(agents)), 0o644); err != nil {
+		if err := atomicWrite(filepath.Join(root, kernel.ConfigFile), []byte(defaultConfig(agents)), 0o644); err != nil {
 			return err
 		}
 	} else {
@@ -30,10 +33,13 @@ func initProject(root, agent string, githubCI bool) error {
 			return err
 		}
 	}
-	if fileExists(filepath.Join(root, filepath.FromSlash(productFile))) != nil {
-		if err := atomicWrite(filepath.Join(root, filepath.FromSlash(productFile)), []byte(productSkeleton), 0o644); err != nil {
+	if fileExists(filepath.Join(root, filepath.FromSlash("spec/PRODUCT.md"))) != nil {
+		if err := atomicWrite(filepath.Join(root, filepath.FromSlash("spec/PRODUCT.md")), []byte(productSkeleton), 0o644); err != nil {
 			return err
 		}
+	}
+	if err := ensureGitignore(root); err != nil {
+		return err
 	}
 	if err := installAgentFiles(root, agent); err != nil {
 		return err
@@ -47,27 +53,34 @@ func initProject(root, agent string, githubCI bool) error {
 			return err
 		}
 	}
-	code, spec, err := inventories(root)
-	if err != nil {
-		return err
+	return nil
+}
+
+func newProjectID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "telos-project"
 	}
-	return saveState(root, State{Version: 1, Spec: snapshotOf(spec), Code: snapshotOf(code)})
+	return hex.EncodeToString(b)
 }
 
 func defaultConfig(agents []string) string {
-	return `# Telos SDD — project configuration. Edited by humans only; the agent broker
-# may never write this file.
+	return `# Telos — project configuration. Edited by humans only; it is tracked and
+# therefore protected content: changing it goes through a privileged Change.
+
+project_id = "` + newProjectID() + `"
 
 agents = ` + quoteList(agents) + `
 
 # Commands ` + "`telos verify`" + ` runs; all must pass.
 test_commands = []
 
-# Files whose RULE-NNN references count as executable proof of a rule.
+# Files whose REQ-NNN references count as executable proof of a requirement.
 test_files = []
 
-# Files allowed to exist without tracing to a rule (still integrity-checked).
-untraced = ["README.md", "LICENSE", ".gitignore", ".github/**", ".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md", "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml"]
+# Evidence dependency-closure strategy: "go" (import graph) or "tree"
+# (whole tracked tree, conservative). Omit to auto-detect from go.mod.
+#closure = "tree"
 `
 }
 
@@ -77,20 +90,42 @@ const productSkeleton = `# Product
 
 Describe the purpose of this product and the outcome it exists to create.
 
-## Objectives
+## Intents
 
-Add measurable objectives as ` + "`### OBJ-001 — Title`" + ` sections. Every rule in
-the domain spec files traces to at least one objective.
+Add product intents as ` + "`### INT-001 — Title`" + ` sections. Every requirement
+in the domain spec files is motivated by at least one intent.
 
 ## Constraints
 
 ## Non-goals
 `
 
+// ensureGitignore makes sure the derived-content directory is ignored:
+// .telos/ holds only disposable caches in V2 (certificates live in git
+// notes), so it must never enter the certified tree.
+func ensureGitignore(root string) error {
+	path := filepath.Join(root, ".gitignore")
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	content := string(normalize(data))
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == ".telos/" {
+			return nil
+		}
+	}
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += ".telos/\n"
+	return atomicWrite(path, []byte(content), 0o644)
+}
+
 // mergeConfigAgents rewrites only the `agents` line of an existing telos.toml,
 // preserving the rest of the human-owned file byte for byte.
 func mergeConfigAgents(root string, requested []string) error {
-	cfg, err := readConfig(root)
+	cfg, err := kernel.ReadConfig(root)
 	if err != nil {
 		return err
 	}
@@ -111,7 +146,7 @@ func mergeConfigAgents(root string, requested []string) error {
 		return nil
 	}
 	sort.Strings(merged)
-	path := filepath.Join(root, configFile)
+	path := filepath.Join(root, kernel.ConfigFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -224,15 +259,21 @@ func updateInstructions(path, instructions string) error {
 	return atomicWrite(path, []byte(managed(string(data), instructions)), 0o644)
 }
 
-const codexInstructions = `# Telos SDD
+// The instruction blocks are rewritten for the full V2 agent surface at M7b
+// (and move into bundle/ then); until the Change lifecycle lands they state
+// the invariants that already hold on the substrate.
 
-- Use the ` + "`$telos`" + ` Skill for every feature, bug fix, refactor, or repository modification.
-- Run ` + "`telos status --json`" + ` first and act on its phase and next actions.
-- The spec under spec/ is the source of intent. Never edit it directly: use ` + "`telos spec put`" + `, present ` + "`telos spec review`" + `, and let the human approve.
-- Apply code only through ` + "`telos apply --rule RULE-NNN`" + `; every touched file carries a ` + "`telos:`" + ` annotation and every rule gets a tagged test.
-- Stop on TELOS_CODE_CORRUPTED. Never adopt an out-of-band code edit or weaken a test.`
+const codexInstructions = `# Telos
 
-const claudeInstructions = `# Telos SDD
+- This repository is under Telos certified-state development.
+- Run ` + "`telos status --json`" + ` first and act on its state and next actions.
+- Never edit files out of band: any divergence from the certified state is
+  reported as corrupted and must be captured as a Change or restored.
+- The contract under spec/ is canonical; it changes only through approved
+  Change transitions (arriving with the v0.6 lifecycle).
+- Stop on TELOS_STATE_CORRUPTED and surface the salvage proposal to the human.`
+
+const claudeInstructions = `# Telos
 
 @AGENTS.md
 
@@ -266,6 +307,8 @@ func mergeSettings(existing []byte, generated []byte) ([]byte, error) {
 			filtered := current[:0]
 			for _, item := range current {
 				encoded, _ := json.Marshal(item)
+				// The dedupe key is load-bearing: it is how re-install
+				// replaces previously installed guard hooks.
 				if !strings.Contains(string(encoded), "telos guard") {
 					filtered = append(filtered, item)
 				}

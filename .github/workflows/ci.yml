@@ -20,15 +20,45 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-          cache: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
       - run: go test ./...
       - run: go vet ./...
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)"
       - run: python scripts/validate-skills.py
       - name: Build CLI
         run: go build ./cmd/telos
       - name: Confirm generated files are clean
         if: runner.os == 'Linux'
         run: git diff --exit-code
+
+  cross-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Cross-compile every release target (CGO-free)
+        run: |
+          set -eu
+          mkdir -p /tmp/xc
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -trimpath -o "/tmp/xc/telos-${target%/*}-${target#*/}" ./cmd/telos
+          done
+      - name: Enforce binary size budget (60 MB)
+        run: |
+          set -eu
+          budget=$((60 * 1024 * 1024))
+          for bin in /tmp/xc/telos-*; do
+            size=$(stat -c%s "$bin")
+            echo "$(basename "$bin"): $((size / 1024 / 1024)) MB"
+            if [ "$size" -gt "$budget" ]; then
+              echo "::error::$(basename "$bin") exceeds the 60 MB budget"
+              exit 1
+            fi
+          done

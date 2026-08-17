@@ -22,30 +22,7 @@ var (
 	gherkinSection = regexp.MustCompile(`^(\s*)(Feature|Rule|Background|Scenario Outline|Scenario Template|Scenario|Example|Examples|Scenarios):`)
 	gherkinString  = regexp.MustCompile(`&#34;.*?&#34;`)
 	gherkinParam   = regexp.MustCompile(`&lt;[^&]+&gt;`)
-
-	slugStrip = regexp.MustCompile(`[^a-z0-9]+`)
 )
-
-// Slugify turns a title into a filesystem/URL-safe slug.
-func Slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = slugStrip.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if s == "" {
-		return "project"
-	}
-	return s
-}
-
-// FirstHeading returns the first `# ` heading of a markdown body.
-func FirstHeading(body string) string {
-	for _, line := range strings.Split(body, "\n") {
-		if title, ok := strings.CutPrefix(line, "# "); ok {
-			return strings.TrimSpace(title)
-		}
-	}
-	return ""
-}
 
 // OpenInBrowser opens path with the platform's default handler.
 func OpenInBrowser(path string) error {

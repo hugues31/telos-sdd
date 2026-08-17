@@ -178,12 +178,6 @@ func (e Effective) Escalate(proposedSeverity string, confidence float64) string 
 	return action
 }
 
-// RequiredKinds maps a requirement class to the evidence kinds its policy
-// demands beyond the kernel defaults.
-func (e Effective) RequiredKinds(class string) EvidenceClassRule {
-	return e.Evidence[class]
-}
-
 // canonicalJSON re-marshals with sorted keys for a stable hash.
 func canonicalJSON(data []byte) ([]byte, error) {
 	var v any

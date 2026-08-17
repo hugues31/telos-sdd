@@ -1,4 +1,4 @@
-# Release checklist — v0.6.0
+# Release checklist
 
 One bump site, then verify outward from the kernel:
 

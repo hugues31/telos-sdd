@@ -66,6 +66,7 @@ func setupCertified(t *testing.T, bin string) string {
 	git(t, root, "init", "--quiet", "-b", "main")
 	git(t, root, "config", "user.email", "telos@e2e")
 	git(t, root, "config", "user.name", "telos e2e")
+	git(t, root, "config", "core.autocrlf", "false")
 	write(t, root, "app.txt", "hello\n")
 	write(t, root, "tools/probe.go", probeProgram)
 	write(t, root, "telos.toml", v2Config)
@@ -241,6 +242,7 @@ func TestLoopConcurrent(t *testing.T) {
 	git(t, root, "init", "--quiet", "-b", "main")
 	git(t, root, "config", "user.email", "telos@e2e")
 	git(t, root, "config", "user.name", "telos e2e")
+	git(t, root, "config", "core.autocrlf", "false")
 	// A tiny two-package Go module so the evidence closures of the two
 	// changes are disjoint: pkga and pkgb do not import each other.
 	write(t, root, "go.mod", "module example.com/toy\n\ngo 1.24\n")

@@ -35,20 +35,38 @@ type ContractCounts struct {
 	Decisions    int `json:"decisions"`
 }
 
-// ProjectStatus is the frozen result schema of `telos status` (root context;
-// the candidate context and the salvage proposal arrive with M2/M4).
+// CandidateStatus describes the Change of a candidate-context status.
+type CandidateStatus struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	Category  string `json:"category"`
+	Title     string `json:"title"`
+	BaseStale bool   `json:"base_stale"`
+	Review    string `json:"review,omitempty"`
+	Worktree  string `json:"worktree"`
+}
+
+// ProjectStatus is the frozen result schema of `telos status` (the salvage
+// proposal arrives with M4).
 type ProjectStatus struct {
-	Context     string          `json:"context"`
-	State       string          `json:"state"`
-	Certificate *CertStatus     `json:"certificate,omitempty"`
-	Dirty       *DirtyInfo      `json:"dirty,omitempty"`
-	Reason      string          `json:"reason,omitempty"`
-	Contract    *ContractCounts `json:"contract,omitempty"`
+	Context     string           `json:"context"`
+	State       string           `json:"state"`
+	Certificate *CertStatus      `json:"certificate,omitempty"`
+	Dirty       *DirtyInfo       `json:"dirty,omitempty"`
+	Reason      string           `json:"reason,omitempty"`
+	Contract    *ContractCounts  `json:"contract,omitempty"`
+	Changes     []ChangeSummary  `json:"changes,omitempty"`
+	Change      *CandidateStatus `json:"change,omitempty"`
 }
 
 // Status derives the project state from the substrate. It never fails on
 // business states — corruption is a status, not an error.
 func Status(repo *gitx.Repo) (ProjectStatus, error) {
+	if id, err := ChangeContext(repo); err != nil {
+		return ProjectStatus{}, err
+	} else if id != "" {
+		return candidateStatus(repo)
+	}
 	st := ProjectStatus{Context: "root"}
 	if _, err := os.Stat(filepath.Join(repo.WorkDir, ConfigFile)); err != nil {
 		st.State = StateUninitialized
@@ -98,5 +116,55 @@ func Status(repo *gitx.Repo) (ProjectStatus, error) {
 			}
 		}
 	}
+	if changes, cerr := OpenChanges(repo); cerr == nil {
+		st.Changes = changes
+	}
+	return st, nil
+}
+
+// candidateStatus reports the status seen from inside a Change's candidate
+// worktree: the state of the certified target branch plus the Change itself.
+func candidateStatus(repo *gitx.Repo) (ProjectStatus, error) {
+	st := ProjectStatus{Context: "candidate"}
+	doc, err := LoadChange(repo)
+	if err != nil {
+		return st, err
+	}
+	candidate := &CandidateStatus{
+		ID:       doc.ID,
+		Status:   doc.Status,
+		Category: doc.Category,
+		Title:    doc.Title,
+		Worktree: repo.WorkDir,
+	}
+	if doc.Review != nil {
+		candidate.Review = doc.Review.Digest
+	}
+	tip, err := repo.RevParse(doc.TargetBranch)
+	if err != nil {
+		st.State = StateCorrupted
+		st.Reason = "the target branch " + doc.TargetBranch + " no longer resolves"
+		st.Change = candidate
+		return st, nil
+	}
+	candidate.BaseStale = string(tip) != doc.Base
+
+	cert, err := LoadCertificate(repo, tip)
+	certValid := err == nil
+	if certValid {
+		tree, terr := repo.TreeOf(string(tip))
+		if terr != nil {
+			return st, terr
+		}
+		certValid = cert.Validate(tip, tree) == nil
+	}
+	if certValid {
+		st.State = StateCertified
+		st.Certificate = &CertStatus{Commit: string(tip), Change: cert.Payload.Change.ID, SealedAt: cert.Payload.SealedAt}
+	} else {
+		st.State = StateCorrupted
+		st.Reason = "the target branch tip carries no valid certificate"
+	}
+	st.Change = candidate
 	return st, nil
 }

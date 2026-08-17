@@ -162,6 +162,46 @@ func (r *Repo) TreeFromFiles(files map[string][]byte) (OID, error) {
 	return OID(strings.TrimSpace(string(out))), nil
 }
 
+// TreeFromEntries writes a tree from existing blob OIDs (no re-hashing)
+// using a temporary index. Paths are slash-separated and repo-relative.
+func (r *Repo) TreeFromEntries(entries map[string]OID) (OID, error) {
+	paths := make([]string, 0, len(entries))
+	for p := range entries {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	var lines strings.Builder
+	for _, p := range paths {
+		fmt.Fprintf(&lines, "100644 %s\t%s\n", entries[p], p)
+	}
+	tmp, err := os.CreateTemp("", "telos-index-*")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	os.Remove(tmpPath)
+	defer os.Remove(tmpPath)
+
+	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_INDEX_FILE="+tmpPath)
+	index := exec.Command("git", "update-index", "--add", "--index-info")
+	index.Dir = r.WorkDir
+	index.Env = env
+	index.Stdin = strings.NewReader(lines.String())
+	if out, err := index.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git update-index: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	write := exec.Command("git", "write-tree")
+	write.Dir = r.WorkDir
+	write.Env = env
+	out, err := write.Output()
+	if err != nil {
+		return "", fmt.Errorf("git write-tree: %w", err)
+	}
+	return OID(strings.TrimSpace(string(out))), nil
+}
+
 // SiblingWorktreePath computes the conventional candidate location for a
 // change: a sibling directory of the repository named after it.
 func (r *Repo) SiblingWorktreePath(changeID string) string {

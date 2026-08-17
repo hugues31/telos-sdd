@@ -21,6 +21,7 @@ func gitRepo(t *testing.T) string {
 		{"config", "user.email", "telos@test"},
 		{"config", "user.name", "telos test"},
 		{"config", "core.autocrlf", "false"},
+		{"config", "gc.auto", "0"},
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root

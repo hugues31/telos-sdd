@@ -8,6 +8,7 @@ import (
 	"io"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -92,10 +93,12 @@ func GoClosure(repo *gitx.Repo, tree gitx.OID, checkout string, pkgDirs []string
 	}
 	selected := map[string]gitx.OID{}
 	packageFiles := 0
-	include := func(rel string) {
+	include := func(rel string) bool {
 		if oid, ok := files[rel]; ok {
 			selected[rel] = oid
+			return true
 		}
+		return false
 	}
 	include("go.mod")
 	include("go.sum")
@@ -117,23 +120,25 @@ func GoClosure(repo *gitx.Repo, tree gitx.OID, checkout string, pkgDirs []string
 		if pkg.Standard {
 			continue
 		}
-		// go list reports native paths; normalize separators BEFORE trimming
-		// the leading one, or Windows closures silently collapse to go.mod
-		// alone (an unsound, too-narrow reuse key).
-		rel := strings.ReplaceAll(strings.TrimPrefix(pkg.Dir, checkout), "\\", "/")
-		rel = strings.TrimPrefix(rel, "/")
-		if strings.HasPrefix(rel, "..") {
+		// go list reports native paths while git reports slash-separated
+		// ones (and forward slashes even on Windows): filepath.Rel resolves
+		// the mixed separators lexically, then everything moves to slashes.
+		relNative, err := filepath.Rel(checkout, pkg.Dir)
+		if err != nil || strings.HasPrefix(relNative, "..") {
 			continue // dependency outside the repo (module cache): pinned via go.sum
 		}
+		rel := filepath.ToSlash(relNative)
 		for _, group := range [][]string{pkg.GoFiles, pkg.CgoFiles, pkg.TestGoFiles, pkg.XTestGoFiles, pkg.EmbedFiles} {
 			for _, f := range group {
-				include(path.Join(rel, f))
-				packageFiles++
+				if include(path.Join(rel, f)) {
+					packageFiles++
+				}
 			}
 		}
 	}
-	// A closure that captured no package files is too narrow to be a sound
-	// reuse key — fall back to the conservative whole-tree closure.
+	// A closure whose listed package files did not resolve against the tree
+	// is too narrow to be a sound reuse key — fall back to the conservative
+	// whole-tree closure.
 	if packageFiles == 0 {
 		return TreeClosure(repo, tree)
 	}

@@ -2,60 +2,94 @@
 
 ## Repository model
 
-- `spec/PRODUCT.md` — vision, measurable objectives as `### OBJ-NNN — Title` sections, constraints, non-goals. Objectives live only here.
-- `spec/<domain>.md` — normative rules as `### RULE-NNN — Title` sections. Every rule carries a `Traces: OBJ-NNN` line and at least one ` ```gherkin ` scenario block. Rules live only in domain files.
-- OBJ and RULE ids are unique across the repository and never reused after deletion.
-- `telos.toml` (root) is human-owned configuration: `test_commands`, `test_files`, `untraced` patterns. Never write it.
-- `.telos/state.json` records the approved spec root and declared code root. Only the CLI writes it.
+- `spec/` — the canonical contract of the CURRENT certified state:
+  `PRODUCT.md` (`### INT-NNN — Title` intents), domain files
+  (`### REQ-NNN — Title` with `Class: behavior|security|invariant|concurrency|performance|architecture`,
+  `Motivated by: INT-NNN`, a ```` ```gherkin ```` block for the first four
+  classes, optionally ```` ```telos-constraint ````), `DECISIONS.md`
+  (`### DEC-NNN` with `Status:`).
+- `changes/CHG-NNN/` — one Change: `intent.md`, `contract.delta.md`
+  (telos:op markers), `decisions.md`, `findings.json`, `evidence/`,
+  `change.json`. Retained after promotion as history and provenance.
+- `telos.toml`, `policies/*.cue` — human-owned, protected; changing them is a
+  privileged transition.
+- Certificates live in git notes; `.telos/` holds only disposable caches.
 
-## Writing spec and code
+## Working rules
 
-Provider hooks permit shell execution only when the first command is the `telos` binary. Stream content with a heredoc; never chain another shell command before or after Telos.
+- The certified root is read-only for you: every write is denied there. Work
+  in the candidate worktree `telos change start` creates.
+- Inside the candidate you edit code and tests freely, EXCEPT: `spec/`
+  (contract changes go through `contract.delta.md`), `telos.toml`,
+  `policies/`, `change.json`, `evidence/`, `findings.json` (broker-owned:
+  use `telos evidence` and `telos findings`), and provider assets.
+- Query before you read the world: `telos search`, `telos show`,
+  `telos related`, `telos impact`, `telos explain`, `telos context --json`.
+  The graph is derived and root-bound; trust its `index.stale` flag.
 
-- Spec: `telos spec put --file spec/<name>.md --json` over stdin (full file content). `--delete` removes a file.
-- Code: `telos apply --rule RULE-NNN --json` with a Git unified patch over stdin. Repeat `--rule` when the patch serves several rules. The patch may not touch `spec/**`, `telos.toml`, `.telos/**`, `.claude/**`, `.codex/**`, `.agents/**`, `CLAUDE.md`, or `AGENTS.md`.
+## Proof protocol
 
-Annotation contract enforced on the patch post-image:
+1. The requirement exists in the target contract (delta reviewed/approved).
+2. Write the citing test: a `test_files` match whose content references the
+   REQ id.
+3. `telos evidence red --req REQ-NNN` — the kernel witnesses the test failing
+   while the same tree WITHOUT it is green, and seals the exact bytes.
+4. Implement the smallest change; `telos evidence green --req REQ-NNN` — the
+   sealed bytes must be intact and the suite green.
+5. `telos change ready` recomputes every gate; `telos change promote`
+   certifies atomically.
 
-- Every touched file that does not match an `untraced` pattern must contain, within its first 10 lines, a comment line `telos: RULE-NNN [RULE-NNN ...]` whose rules exist and intersect the cited `--rule` references.
-- A rule counts as implemented only when a file matching `test_files` references its id and the configured `test_commands` pass. Give every rule a real, asserting test tagged with its id.
-
-## Test-first proof
-
-A rule is proven by a witnessed red-green cycle, enforced mechanically by `telos apply`:
-
-- The first patch citing an unproven rule must touch only `test_files` matches and add a test referencing the rule. The broker runs `test_commands` on a green baseline and requires failure; the witnessed red seals the exact test bytes in `.telos/state.json`. Work one rule's cycle at a time — a second red is not attributable while the suite is already failing.
-- Sealed tests may not change until their rule is proven. The only exception is a test-only patch the suite fails again: a legitimate rewrite re-seals through red. Only implementation patches may turn the suite green; the apply that witnesses green proves the sealed rules and lifts their seals.
-- Announce the witnessed red to the user before implementing: the failing output is the evidence the implementation must answer.
-- A rule that documents behavior the code already has can never be witnessed failing. Submit its test with `--expect-pass`: the guard raises a permission prompt for that adoption claim and the suite must pass with the documentation test in place.
-- Test references are policed on the post-image: a patch may not introduce references to rules outside its own witnessed cycle.
+Behavior the code already has: `telos evidence adopt` (human-gated). A flaky
+test is never certifying evidence — file a finding against the test.
 
 ## Error codes → action
 
-- `TELOS_SPEC_INVALID` — fix the listed structural problems with `telos spec put`; the gate never sees an invalid spec.
-- `TELOS_NOTHING_PENDING` — the spec already matches its approved state; no review needed.
-- `TELOS_APPROVAL_STALE` — the spec changed after review. Re-run `telos spec review` and present the new content before approving.
-- `TELOS_SPEC_UNAPPROVED` — pending spec changes (possibly a direct human edit). Route through the challenger, review, and approval. Never revert the human's edit.
-- `TELOS_CODE_CORRUPTED` — code changed outside the broker. Stop and report; the human recovers via Git or deliberately re-baselines with `telos init`. Never adopt the write.
-- `TELOS_ANNOTATION_MISSING` / `TELOS_ANNOTATION_ORPHAN` — annotate the listed files against real rules, or have the human declare them untraced in `telos.toml`.
-- `TELOS_ANNOTATION_MISMATCH` — the patch was reversed; resubmit with correct annotations intersecting the cited rules.
-- `TELOS_RULE_NOT_IMPLEMENTED` — the spec is ahead: start the listed rules' red cycles with failing test-only patches.
-- `TELOS_TEST_FIRST` — an unproven rule needs its witnessed failing test before any implementation, and no patch may introduce test references outside its own cycle; submit a test-only patch citing the rule.
-- `TELOS_BASELINE_RED` — a new failing test is only attributable on a green baseline; finish or revert the in-flight cycle first.
-- `TELOS_RED_EXPECTED` — the submitted test passes, so it proves nothing: strengthen it until it fails, or claim adoption with `--expect-pass` if the rule documents existing behavior.
-- `TELOS_TEST_SEALED` — the patch touches a witnessed failing test: fix the implementation instead, or rewrite the test through another witnessed red with a test-only patch.
-- `TELOS_RED_PENDING` — a witnessed failing test awaits its green witness; continue implementing through `telos apply`.
-- `TELOS_RED_STALE` — sealed tests no longer match their red evidence. Stop and report; the state was tampered with.
-- `TELOS_TESTS_FAILED` — make the configured test commands pass without weakening assertions.
-- `TELOS_TRACEABILITY_GAP` — a cited rule does not exist in the approved spec; fix the citation or return to the spec cycle.
-- Permission prompt declined on `spec approve` — the user refused the approval. Return to challenging the spec; do not retry unchanged.
-- Permission prompt declined on `apply` — the user judged the patch is not behavior-preserving. Return to the spec cycle: strengthen the rule that should have forbidden the defect, then implement from the approved contract.
-- Permission prompt declined on `apply --expect-pass` — the user rejected the adoption claim: the behavior is new, so it must enter through a witnessed failing test, or the rule itself is wrong and returns to the spec cycle.
+<!-- codes:begin -->
+| Code | Agent action |
+| --- | --- |
+| `TELOS_COMMAND_FAILED` | Unexpected failure; read the message, retry once, then report to the human. |
+| `TELOS_INPUT_INVALID` | The arguments or payload are malformed; fix the invocation, never work around the broker. |
+| `TELOS_INPUT_REQUIRED` | A required flag or stdin payload is missing; supply it. |
+| `TELOS_CONFIG_INVALID` | telos.toml is invalid; report to the human — configuration is human-owned. |
+| `TELOS_GIT_UNAVAILABLE` | Git is not installed or not on PATH; report to the human. |
+| `TELOS_GIT_REPOSITORY_REQUIRED` | Run inside a Git worktree; telos init requires one. |
+| `TELOS_NOT_INITIALIZED` | No Telos project here; telos init is a human decision. |
+| `TELOS_STATE_CORRUPTED` | The certified worktree diverged; present the salvage proposal from telos status — capture the diff as a Change, or restore. |
+| `TELOS_CERTIFICATE_INVALID` | HEAD carries no valid certificate (missing, forged, or bound to another commit); report to the human and route through salvage or restore. |
+| `TELOS_CONTRACT_INVALID` | The contract or delta is structurally invalid; fix the named problems in contract.delta.md. |
+| `TELOS_CONTRACT_TAMPERED` | spec/ was edited directly in the candidate; contract semantics go through contract.delta.md — revert the direct edit and use the delta. |
+| `TELOS_REQUIREMENT_UNKNOWN` | A cited REQ id does not exist in the target contract; fix the citation or the delta. |
+| `TELOS_APPROVAL_REQUIRED` | The transition needs a human approval that is not recorded; run telos change review and present the exact delta. |
+| `TELOS_APPROVAL_STALE` | Content changed since review; run telos change review again and re-present — approvals bind to exact bytes. |
+| `TELOS_NOTHING_PENDING` | No pending delta to review; nothing to do. |
+| `TELOS_TESTS_FAILED` | The suite is red; fix the implementation in the candidate, never weaken tests. |
+| `TELOS_TEST_FIRST` | Unproven requirements are implemented test-first; submit the failing test and witness red before any implementation. |
+| `TELOS_TEST_SEALED` | Sealed red tests may change only through a new red witness; fix the implementation instead. |
+| `TELOS_RED_EXPECTED` | The new test already passes, so it proves nothing; strengthen it, or offer evidence adopt (human-gated) for already-correct behavior. |
+| `TELOS_RED_PENDING` | A witnessed red awaits its green; implement until the sealed tests pass untouched. |
+| `TELOS_RED_STALE` | Sealed test bytes changed; re-witness from red — the seal is never edited to fit. |
+| `TELOS_BASELINE_RED` | A new test is only evidence on a green baseline; make the suite pass first — one cycle at a time. |
+| `TELOS_OBLIGATION_UNMET` | A requirement lacks its required evidence; produce it (witnessed red/green or the kinds its class's policy demands). |
+| `TELOS_FINDING_BLOCKING` | Open blocking findings forbid certification; fix the underlying issue or have the human resolve them. |
+| `TELOS_BASE_STALE` | main moved since this Change's base; run telos change rebase, then retry. |
+| `TELOS_CHANGE_UNKNOWN` | No such Change; list open changes via telos status. |
+| `TELOS_CHANGE_STATE_INVALID` | This verb is not valid in the Change's current status; follow next_actions. |
+| `TELOS_CANDIDATE_REQUIRED` | Run this command inside the Change's candidate worktree. |
+| `TELOS_ROOT_REQUIRED` | Run this command in the certified root worktree, not a candidate. |
+| `TELOS_WORKTREE_CONFLICT` | A salvage or rebase hit conflicts; resolve them in the named worktree — preserved work is never dropped. |
+| `TELOS_INDEX_STALE` | The derived index does not match the current tree; run telos index rebuild. |
+| `TELOS_NODE_NOT_FOUND` | No node with that id; use telos search to locate it. |
+| `TELOS_SYMBOL_AMBIGUOUS` | Several symbols match; requalify using one of the listed candidates. |
+| `TELOS_BUDGET_TOO_SMALL` | The context budget cannot fit the global invariants; retry with at least the stated minimum. |
+| `TELOS_POLICY_INVALID` | policies/ does not compile; report to the human — policy is privileged content. |
+| `TELOS_POLICY_WEAKENS_KERNEL` | Project policy conflicts with a kernel floor; kernel invariants cannot be weakened — remove the offending rule. |
+| `TELOS_CONSTRAINT_UNSAT` | Formalized requirements are provably contradictory; a human must resolve the named REQs. |
+| `TELOS_PORT_BUSY` | The view port is taken; pass --port (0 for an ephemeral port). |
+<!-- codes:end -->
 
-## Reported bugs
+## Human gates
 
-An accepted bug is evidence about the specification. When the user reports wrong or missing behavior, start in `spec/` even if no existing scenario is violated — that only proves the contract was too weak to forbid the defect. Strengthen the rule or scenario, obtain review and approval, then implement. `telos apply` without a pending spec change is reserved for behavior-preserving work (refactors, test hardening) and raises a human permission prompt naming that claim.
-
-## Semantic defects
-
-If a rule proves impossible, contradictory, or wrong during implementation, do not work around it. Stop, report the defect, and restart the cycle: correct the spec, obtain fresh review and approval, then implement from the corrected contract.
+Native permission prompts (never bypass, never re-run unchanged): re-`init`,
+`change approve`, `change abort`, `restore`, `evidence adopt`,
+`findings confirm`, `findings resolve`. A denied prompt is a product
+decision — route back to the challenge conversation.

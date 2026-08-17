@@ -8,9 +8,13 @@ Before opening a pull request, run:
 go test ./...
 go vet ./...
 gofmt -l .
-python3 scripts/validate-skills.py
-git diff --check
+go generate ./bundle && git diff --exit-code
+go run ./tools/gen-bundle -check
 ```
+
+Agent-facing assets are single-sourced: role prose lives in
+`tools/gen-bundle/roles.go` and instruction blocks in `bundle/instructions/`;
+the provider adapters are generated. Never edit a generated adapter by hand.
 
 ## Dependency policy
 

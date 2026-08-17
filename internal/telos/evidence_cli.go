@@ -12,9 +12,24 @@ import (
 
 func runEvidence(repo *gitx.Repo, args []string, stdout, stderr io.Writer) (commandExecution, error) {
 	if len(args) == 0 {
-		return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "evidence requires a verb: red, green, or adopt")
+		return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "evidence requires a verb: red, green, adopt, or mutation")
 	}
 	verb := args[0]
+	cfg, err := kernel.ReadConfig(repo.WorkDir)
+	if err != nil {
+		return commandExecution{}, err
+	}
+	if verb == "mutation" {
+		_, record, outcome, err := kernel.EvidenceMutation(repo, cfg, stdout)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		human := fmt.Sprintf("Mutation run: %d site(s), %d killed, %d survived (score %.2f).", outcome.Sites, outcome.Killed, outcome.Survived, outcome.Score)
+		if outcome.Survived > 0 {
+			human += "\nSurvivors mean the tests cannot tell the mutant from the real program — triage them as findings."
+		}
+		return commandExecution{Command: "evidence.mutation", Result: map[string]any{"record": record, "outcome": outcome}, Human: human}, nil
+	}
 	f := flags("evidence "+verb, stderr)
 	req := f.String("req", "", "REQ-NNN the evidence proves")
 	if err := f.Parse(args[1:]); err != nil {
@@ -24,10 +39,6 @@ func runEvidence(repo *gitx.Repo, args []string, stdout, stderr io.Writer) (comm
 		return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "evidence "+verb+" requires --req REQ-NNN")
 	}
 	reqID := strings.ToUpper(*req)
-	cfg, err := kernel.ReadConfig(repo.WorkDir)
-	if err != nil {
-		return commandExecution{}, err
-	}
 	switch verb {
 	case "red":
 		_, witness, err := kernel.EvidenceRed(repo, cfg, reqID, stdout)

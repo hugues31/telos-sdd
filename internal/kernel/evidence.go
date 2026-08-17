@@ -14,6 +14,7 @@ import (
 	"github.com/hugues31/telos-sdd/internal/evidence"
 	"github.com/hugues31/telos-sdd/internal/gitx"
 	"github.com/hugues31/telos-sdd/internal/glob"
+	"github.com/hugues31/telos-sdd/internal/mutation"
 	"github.com/hugues31/telos-sdd/internal/policy"
 )
 
@@ -278,6 +279,64 @@ func EvidenceAdopt(wt *gitx.Repo, cfg Config, reqID string, echo io.Writer) (*Ch
 		return nil, nil, err
 	}
 	return doc, record, nil
+}
+
+// EvidenceMutation hardens test honesty for Go projects: it mutates the
+// functions this change touched and runs `go test ./...` against each mutant
+// through a build overlay — the candidate tree is never modified. Survivors
+// are reported for triage as findings; they never auto-block.
+func EvidenceMutation(wt *gitx.Repo, cfg Config, echo io.Writer) (*ChangeDoc, *evidence.Record, *mutation.Outcome, error) {
+	doc, err := LoadChange(wt)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if _, err := wt.CommitAll("telos: snapshot " + doc.ID); err != nil {
+		return nil, nil, nil, err
+	}
+	changed, err := wt.DiffNames(doc.Base, "HEAD")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var mutants []mutation.Mutant
+	var files []string
+	for _, path := range changed {
+		if !strings.HasSuffix(path, ".go") || strings.HasPrefix(path, "changes/") || strings.HasPrefix(path, contract.Dir+"/") {
+			continue
+		}
+		content, err := wt.BlobAt("HEAD", path)
+		if err != nil {
+			continue
+		}
+		if m := mutation.Generate(path, content); len(m) > 0 {
+			mutants = append(mutants, m...)
+			files = append(files, path)
+		}
+	}
+	if len(mutants) == 0 {
+		return nil, nil, nil, coded.New("TELOS_NOTHING_PENDING", "no mutable Go changes in this candidate; mutation evidence applies to changed Go functions")
+	}
+	outcome, err := mutation.Run(wt.WorkDir, []string{"./..."}, mutants, mutation.Caps{})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	tree, err := wt.TreeOf("HEAD")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	run := evidence.SuiteRun{Pass: true, DurationMS: 0}
+	record, err := buildRecord(wt, cfg, doc, "mutation", nil, files, tree, run)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	summary, _ := json.Marshal(outcome)
+	record.Result.OutputTail = string(summary)
+	if err := writeRecord(wt, doc, record); err != nil {
+		return nil, nil, nil, err
+	}
+	if _, err := wt.CommitAll("telos: mutation evidence " + doc.ID); err != nil {
+		return nil, nil, nil, err
+	}
+	return doc, record, &outcome, nil
 }
 
 func sealedPaths(sealed []evidence.SealedTest) []string {

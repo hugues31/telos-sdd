@@ -16,6 +16,7 @@ import (
 	"github.com/hugues31/telos-sdd/internal/gitx"
 	"github.com/hugues31/telos-sdd/internal/glob"
 	"github.com/hugues31/telos-sdd/internal/kernel"
+	"github.com/hugues31/telos-sdd/internal/smt"
 )
 
 const usage = `Telos — certified-state development: every accepted state is verified
@@ -419,6 +420,11 @@ func runDoctor(repo *gitx.Repo, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "%-14s %s\n", c.Name+":", status)
 	}
+	z3 := "absent (install z3 for cross-variable contradiction checks)"
+	if smt.Available() {
+		z3 = "ok"
+	}
+	fmt.Fprintf(stdout, "%-14s %s\n", "z3 (optional):", z3)
 	if failed {
 		return errors.New("doctor found configuration errors")
 	}

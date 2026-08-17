@@ -117,9 +117,13 @@ func readyComputation(wt *gitx.Repo, cfg Config, echo io.Writer) (*readyState, e
 	if err != nil {
 		return nil, err
 	}
-	// Tier-1 structured constraints: a provably contradictory formalized
-	// subset blocks certification.
+	// Structured constraints: tier 1 (CUE) always; tier 2 (external z3)
+	// when available — a provably contradictory formalized subset blocks
+	// certification either way.
 	if err := constraints.Check(target); err != nil {
+		return nil, err
+	}
+	if err := constraints.CheckSMT(target, 5*time.Second); err != nil {
 		return nil, err
 	}
 	tree, err := wt.TreeOf("HEAD")

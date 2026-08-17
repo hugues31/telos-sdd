@@ -91,6 +91,7 @@ func GoClosure(repo *gitx.Repo, tree gitx.OID, checkout string, pkgDirs []string
 		return DependsOn{}, err
 	}
 	selected := map[string]gitx.OID{}
+	packageFiles := 0
 	include := func(rel string) {
 		if oid, ok := files[rel]; ok {
 			selected[rel] = oid
@@ -116,18 +117,24 @@ func GoClosure(repo *gitx.Repo, tree gitx.OID, checkout string, pkgDirs []string
 		if pkg.Standard {
 			continue
 		}
-		rel := strings.TrimPrefix(strings.TrimPrefix(pkg.Dir, checkout), "/")
-		rel = strings.ReplaceAll(rel, "\\", "/")
+		// go list reports native paths; normalize separators BEFORE trimming
+		// the leading one, or Windows closures silently collapse to go.mod
+		// alone (an unsound, too-narrow reuse key).
+		rel := strings.ReplaceAll(strings.TrimPrefix(pkg.Dir, checkout), "\\", "/")
+		rel = strings.TrimPrefix(rel, "/")
 		if strings.HasPrefix(rel, "..") {
 			continue // dependency outside the repo (module cache): pinned via go.sum
 		}
 		for _, group := range [][]string{pkg.GoFiles, pkg.CgoFiles, pkg.TestGoFiles, pkg.XTestGoFiles, pkg.EmbedFiles} {
 			for _, f := range group {
 				include(path.Join(rel, f))
+				packageFiles++
 			}
 		}
 	}
-	if len(selected) == 0 {
+	// A closure that captured no package files is too narrow to be a sound
+	// reuse key — fall back to the conservative whole-tree closure.
+	if packageFiles == 0 {
 		return TreeClosure(repo, tree)
 	}
 	return DependsOn{Closure: "go_packages", ClosureDigest: digestEntries(selected), Packages: pkgDirs, Toolchain: toolchain()}, nil

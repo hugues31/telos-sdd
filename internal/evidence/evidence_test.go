@@ -17,6 +17,7 @@ func newRepo(t *testing.T) *gitx.Repo {
 		{"init", "--quiet", "-b", "main"},
 		{"config", "user.email", "telos@test"},
 		{"config", "user.name", "telos test"},
+		{"config", "core.autocrlf", "false"},
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir

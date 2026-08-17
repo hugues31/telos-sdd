@@ -16,6 +16,7 @@ import (
 	"github.com/hugues31/telos-sdd/internal/graph"
 	"github.com/hugues31/telos-sdd/internal/index"
 	"github.com/hugues31/telos-sdd/internal/kernel"
+	"github.com/hugues31/telos-sdd/internal/view"
 )
 
 func osReadFile(root, rel string) ([]byte, error) {
@@ -252,6 +253,45 @@ func runContext(repo *gitx.Repo, root string, args []string, stderr io.Writer) (
 	human := fmt.Sprintf("Context pack: %d/%d estimated tokens across %d section(s), %d omission(s).",
 		pack.EstimatedTokens, pack.Budget, len(pack.Sections), len(pack.Omitted))
 	return commandExecution{Command: "context", Result: result, Human: human}, nil
+}
+
+func runView(repo *gitx.Repo, root string, args []string, stdout io.Writer, stderr io.Writer) (commandExecution, error) {
+	f := flags("view", stderr)
+	port := f.Int("port", 7343, "listen port (0 for ephemeral)")
+	open := f.Bool("open", false, "open in the default browser")
+	static := f.String("static", "", "render every page into a directory and exit")
+	if err := f.Parse(args); err != nil {
+		return commandExecution{}, err
+	}
+	db, err := openIndex(root)
+	if err != nil {
+		return commandExecution{}, err
+	}
+	defer db.Close()
+	opts := view.Options{
+		Port:    *port,
+		Querier: db,
+		Status:  func() (kernel.ProjectStatus, error) { return kernel.Status(repo) },
+	}
+	if *static != "" {
+		written, err := view.StaticExport(opts, *static)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		return commandExecution{Command: "view", Result: map[string]any{"dir": *static, "pages": written},
+			Human: fmt.Sprintf("Rendered %d page(s) into %s.", len(written), *static)}, nil
+	}
+	if *open {
+		go func() {
+			// Best effort once the server is listening.
+			_ = view.OpenInBrowser(fmt.Sprintf("http://127.0.0.1:%d", *port))
+		}()
+	}
+	url, err := view.Serve(opts, stdout)
+	if err != nil {
+		return commandExecution{}, err
+	}
+	return commandExecution{Command: "view", Result: map[string]any{"url": url}, Human: "View stopped."}, nil
 }
 
 func runExplain(root string, args []string) (commandExecution, error) {

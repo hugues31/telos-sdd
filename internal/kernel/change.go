@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hugues31/telos-sdd/internal/coded"
+	"github.com/hugues31/telos-sdd/internal/evidence"
 	"github.com/hugues31/telos-sdd/internal/gitx"
 )
 
@@ -37,19 +38,20 @@ type PendingReview struct {
 // Change. It lives in the candidate worktree and is kernel-owned protected
 // content there.
 type ChangeDoc struct {
-	Schema         int            `json:"change"`
-	ID             string         `json:"id"`
-	Category       string         `json:"category"`
-	Title          string         `json:"title"`
-	Base           string         `json:"base"`
-	TargetBranch   string         `json:"target_branch"`
-	Branch         string         `json:"branch"`
-	Status         string         `json:"status"`
-	Approvals      []Approval     `json:"approvals"`
-	Privileged     bool           `json:"privileged"`
-	CreatedAt      string         `json:"created_at"`
-	PromotedCommit string         `json:"promoted_commit,omitempty"`
-	Review         *PendingReview `json:"review,omitempty"`
+	Schema         int                            `json:"change"`
+	ID             string                         `json:"id"`
+	Category       string                         `json:"category"`
+	Title          string                         `json:"title"`
+	Base           string                         `json:"base"`
+	TargetBranch   string                         `json:"target_branch"`
+	Branch         string                         `json:"branch"`
+	Status         string                         `json:"status"`
+	Approvals      []Approval                     `json:"approvals"`
+	Privileged     bool                           `json:"privileged"`
+	CreatedAt      string                         `json:"created_at"`
+	PromotedCommit string                         `json:"promoted_commit,omitempty"`
+	Review         *PendingReview                 `json:"review,omitempty"`
+	RedWitnesses   map[string]evidence.RedWitness `json:"red_witnesses,omitempty"`
 }
 
 var changeIDPattern = regexp.MustCompile(`^CHG-([0-9]{3,})$`)

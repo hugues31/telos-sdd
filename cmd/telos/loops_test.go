@@ -109,8 +109,6 @@ func certificateJSON(t *testing.T, root string) map[string]any {
 // approval → witnessed red/green in the candidate → certification → atomic
 // promotion of exactly one new certified commit on main.
 func TestLoopFeature(t *testing.T) {
-	t.Skip("V2 acceptance loop 1 — un-skipped at M3 (docs/design-v2.md §0)")
-
 	bin := buildCLI(t)
 	root := setupCertified(t, bin)
 

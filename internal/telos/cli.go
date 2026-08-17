@@ -28,12 +28,15 @@ Usage:
   telos change start --category behavior_change|behavior_preserving --title <t> [--json]
   telos change show|diff|review [--json]           (inside the candidate)
   telos change approve --digest <oid> [--json]     (inside the candidate)
+  telos change ready|promote [--json]              (inside the candidate)
   telos change abort CHG-NNN [--json]              (from the certified root)
+  telos evidence red|green|adopt --req REQ-NNN [--json]
+  telos findings list|add|confirm|resolve [...] [--json]
   telos guard
   telos version [--json]
 
-Evidence, promotion, salvage, and the knowledge commands arrive milestone by
-milestone in the v0.6 rewrite; see docs/design-v2.md.`
+Salvage/rebase and the knowledge commands arrive milestone by milestone in
+the v0.6 rewrite; see docs/design-v2.md.`
 
 // Run dispatches the CLI. Every command supports the stable JSON envelope
 // {ok, command, result, next_actions, error{code,message,paths}}.
@@ -132,16 +135,22 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		}
 		return finish(commandExecution{Command: "verify", Result: report, Human: human}, err)
 	case "change":
-		execution, err := runChange(repo, args[1:], stderr)
+		execution, err := runChange(repo, version, args[1:], commandStdout, stderr)
+		return finish(execution, err)
+	case "evidence":
+		execution, err := runEvidence(repo, args[1:], commandStdout, stderr)
+		return finish(execution, err)
+	case "findings":
+		execution, err := runFindings(repo, args[1:], stderr)
 		return finish(execution, err)
 	default:
 		return finish(commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unknown command %q; run `telos help`", args[0])))
 	}
 }
 
-func runChange(repo *gitx.Repo, args []string, stderr io.Writer) (commandExecution, error) {
+func runChange(repo *gitx.Repo, version string, args []string, stdout, stderr io.Writer) (commandExecution, error) {
 	if len(args) == 0 {
-		return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "change requires a verb: start, show, diff, review, approve, or abort")
+		return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "change requires a verb: start, show, diff, review, approve, ready, promote, or abort")
 	}
 	switch args[0] {
 	case "start":
@@ -197,6 +206,31 @@ func runChange(repo *gitx.Repo, args []string, stderr io.Writer) (commandExecuti
 		}
 		human := fmt.Sprintf("%s approved (%s bound to %s).", doc.ID, doc.Approvals[len(doc.Approvals)-1].Kind, shortDigest(*digest))
 		return commandExecution{Command: "change.approve", Result: map[string]any{"change": doc}, Human: human}, nil
+	case "ready":
+		cfg, err := kernel.ReadConfig(repo.WorkDir)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		report, err := kernel.ReadyChange(repo, cfg, stdout)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		human := fmt.Sprintf("%s is ready: every certification gate passes (%d evidence record(s), %d requirement(s)).", report.ID, len(report.Evidence), len(report.Requirements))
+		return commandExecution{Command: "change.ready", Result: report, Next: []string{"change promote"}, Human: human}, nil
+	case "promote":
+		cfg, err := kernel.ReadConfig(repo.WorkDir)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		result, err := kernel.PromoteChange(repo, cfg, version, stdout)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		human := fmt.Sprintf("%s promoted: %s is now the certified state of %s.", result.ID, result.Commit[:12], result.Branch)
+		if result.Cleaned {
+			human += "\nThe candidate worktree was removed; return to " + result.Root + "."
+		}
+		return commandExecution{Command: "change.promote", Result: result, Next: []string{"status"}, Human: human}, nil
 	case "abort":
 		if len(args) < 2 {
 			return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "change abort takes the CHG-NNN id, run from the certified root")
@@ -328,7 +362,7 @@ func fileExists(path string) error { _, err := os.Stat(path); return err }
 // kernel-owned. Everything else in a candidate is freely editable.
 var candidateProtected = []string{
 	"spec/**", "telos.toml", "policies/**",
-	"changes/*/change.json", "changes/*/evidence/**",
+	"changes/*/change.json", "changes/*/evidence/**", "changes/*/findings.json",
 	".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md",
 }
 
@@ -469,6 +503,21 @@ func gateBrokerCommand(root string, stdout io.Writer, command string) error {
 			subject = fields[3]
 		}
 		return askGuard(stdout, "Telos human gate — abort "+subject+": its candidate worktree and branch are removed, discarding unpromoted work. Approve only if that work should be lost.")
+	case fields[1] == "evidence" && verb == "adopt":
+		subject := flagValue(fields, "--req")
+		if subject == "" {
+			subject = "the cited requirement"
+		}
+		return askGuard(stdout, "Telos human gate — adopt existing behavior as proof: the test for "+subject+" is expected to pass immediately, so it will never be witnessed failing. Approve only if the requirement documents behavior the code already has; new behavior must enter through a witnessed failing test.")
+	case fields[1] == "findings" && (verb == "confirm" || verb == "resolve"):
+		subject := "the named finding"
+		if len(fields) > 3 {
+			subject = fields[3]
+		}
+		if verb == "confirm" {
+			return askGuard(stdout, "Telos human gate — confirm "+subject+" at its proposed severity: a confirmed blocking finding forbids certification until resolved. This is the human decision the critic cannot make.")
+		}
+		return askGuard(stdout, "Telos human gate — resolve "+subject+": resolving is the human judgment that closes it (real, not_an_issue, or duplicate). A blocking finding resolved here stops gating certification.")
 	}
 	return nil
 }

@@ -49,7 +49,10 @@ func initProject(root, agent string, githubCI bool) error {
 		if err != nil {
 			return err
 		}
-		if err := atomicWrite(filepath.Join(root, ".github", "workflows", "telos-verify.yml"), data, 0o644); err != nil {
+		// The initializing binary pins its consumers: their CI never tracks
+		// @latest, so a new major behavior cannot silently reach them.
+		pinned := strings.ReplaceAll(string(data), "TELOS_PIN", ConsumerPin)
+		if err := atomicWrite(filepath.Join(root, ".github", "workflows", "telos-verify.yml"), []byte(pinned), 0o644); err != nil {
 			return err
 		}
 	}
@@ -195,7 +198,7 @@ func installAgentFiles(root, agent string) error {
 		if err := mergeHookSettings(root, "hooks/codex-hooks.json", ".codex/hooks.json"); err != nil {
 			return err
 		}
-		if err := updateInstructions(filepath.Join(root, "AGENTS.md"), codexInstructions); err != nil {
+		if err := updateInstructionsFromBundle(root, "AGENTS.md", "instructions/codex.md"); err != nil {
 			return err
 		}
 	}
@@ -209,11 +212,23 @@ func installAgentFiles(root, agent string) error {
 		if err := mergeHookSettings(root, "hooks/claude-settings.json", ".claude/settings.json"); err != nil {
 			return err
 		}
-		if err := updateInstructions(filepath.Join(root, "CLAUDE.md"), claudeInstructions); err != nil {
+		if err := updateInstructionsFromBundle(root, "CLAUDE.md", "instructions/claude.md"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// updateInstructionsFromBundle splices a bundle-authored instruction block
+// into the managed section of the target file. Instruction content lives in
+// bundle/instructions/ (CONTRIBUTING: provider files originate under
+// bundle/), never in Go constants.
+func updateInstructionsFromBundle(root, target, bundlePath string) error {
+	instructions, err := bundle.FS.ReadFile(bundlePath)
+	if err != nil {
+		return err
+	}
+	return updateInstructions(filepath.Join(root, target), string(instructions))
 }
 
 func copyBundleTree(root, src, dst string) error {
@@ -258,26 +273,6 @@ func updateInstructions(path, instructions string) error {
 	}
 	return atomicWrite(path, []byte(managed(string(data), instructions)), 0o644)
 }
-
-// The instruction blocks are rewritten for the full V2 agent surface at M7b
-// (and move into bundle/ then); until the Change lifecycle lands they state
-// the invariants that already hold on the substrate.
-
-const codexInstructions = `# Telos
-
-- This repository is under Telos certified-state development.
-- Run ` + "`telos status --json`" + ` first and act on its state and next actions.
-- Never edit files out of band: any divergence from the certified state is
-  reported as corrupted and must be captured as a Change or restored.
-- The contract under spec/ is canonical; it changes only through approved
-  Change transitions (arriving with the v0.6 lifecycle).
-- Stop on TELOS_STATE_CORRUPTED and surface the salvage proposal to the human.`
-
-const claudeInstructions = `# Telos
-
-@AGENTS.md
-
-Use the project ` + "`/telos`" + ` Skill as the sole user-facing workflow and delegate its specialized agents from .claude/agents. Respect the Telos strict guard hook.`
 
 func mergeSettings(existing []byte, generated []byte) ([]byte, error) {
 	var a, b map[string]any

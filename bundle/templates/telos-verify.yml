@@ -16,8 +16,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-          cache: false
       - name: Install Telos
-        run: go install github.com/hugues31/telos-sdd/cmd/telos@latest
-      - name: Verify spec-code integrity
+        run: go install github.com/hugues31/telos-sdd/cmd/telos@TELOS_PIN
+      - name: Verify the certified state
         run: telos verify --json

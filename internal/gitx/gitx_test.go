@@ -130,8 +130,8 @@ func TestDirtyPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dirty) != 2 {
-		t.Fatalf("DirtyPaths = %v, want a.txt and new.txt", dirty)
+	if len(dirty) != 2 || dirty[0] != "a.txt" || dirty[1] != "new.txt" {
+		t.Fatalf("DirtyPaths = %v, want [a.txt new.txt]", dirty)
 	}
 	if err := repo.ResetHardTo("HEAD"); err != nil {
 		t.Fatal(err)

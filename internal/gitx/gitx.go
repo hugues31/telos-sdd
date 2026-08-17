@@ -118,10 +118,23 @@ func (r *Repo) SubtreeOf(rev, dir string) (OID, error) {
 	return OID(out), nil
 }
 
+// runRaw executes git without trimming stdout — porcelain -z records are
+// position-sensitive (a leading space is a status column, not noise).
+func (r *Repo) runRaw(args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = r.WorkDir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return string(out), nil
+}
+
 // DirtyPaths lists worktree paths differing from HEAD (staged, unstaged, and
 // untracked-not-ignored), sorted by git. Empty means clean.
 func (r *Repo) DirtyPaths() ([]string, error) {
-	out, err := r.run(nil, "status", "--porcelain", "-z", "--untracked-files=all")
+	out, err := r.runRaw("status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return nil, err
 	}

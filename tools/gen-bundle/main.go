@@ -48,6 +48,16 @@ func main() {
 	fmt.Println("bundle generated")
 }
 
+// readNormalized reads a file with line endings normalized, so CRLF
+// checkouts (Windows runners) never masquerade as content differences.
+func readNormalized(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(string(data), "\r\n", "\n"), nil
+}
+
 // validate checks generated-file parity plus the cross-checks that keep the
 // agent-facing prose honest against the CLI: every referenced verb exists,
 // every referenced error code exists, and every code is documented.
@@ -62,8 +72,8 @@ func validate(root string) []string {
 			{filepath.Join(root, "adapters", "claude", "agents", r.Name+".md"), claudeAdapter(r)},
 			{filepath.Join(root, "adapters", "codex", "agents", r.Name+".toml"), codexAdapter(r)},
 		} {
-			data, err := os.ReadFile(pair[0])
-			if err != nil || strings.ReplaceAll(string(data), "\r\n", "\n") != pair[1] {
+			data, err := readNormalized(pair[0])
+			if err != nil || data != pair[1] {
 				errs = append(errs, pair[0]+" drifted from roles.go; run `go generate ./bundle`")
 			}
 		}
@@ -76,8 +86,8 @@ func validate(root string) []string {
 			return err
 		}
 		if strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".toml") || strings.HasSuffix(path, ".yaml") {
-			data, _ := os.ReadFile(path)
-			prose.Write(data)
+			data, _ := readNormalized(path)
+			prose.WriteString(data)
 			prose.WriteString("\n")
 		}
 		return nil
@@ -107,28 +117,28 @@ func validate(root string) []string {
 			errs = append(errs, "bundle references unknown code "+m)
 		}
 	}
-	protocol, err := os.ReadFile(filepath.Join(root, "skills", "telos", "references", "protocol.md"))
+	protocol, err := readNormalized(filepath.Join(root, "skills", "telos", "references", "protocol.md"))
 	if err != nil {
 		errs = append(errs, "protocol.md unreadable")
 	} else {
 		for _, c := range telos.Codes {
-			if !strings.Contains(string(protocol), "`"+c.Name+"`") {
+			if !strings.Contains(protocol, "`"+c.Name+"`") {
 				errs = append(errs, "protocol.md misses code "+c.Name)
 			}
 		}
 	}
 
 	// Skill frontmatter and the Codex skill metadata keep their V1 contracts.
-	skill, err := os.ReadFile(filepath.Join(root, "skills", "telos", "SKILL.md"))
-	if err != nil || !strings.HasPrefix(string(skill), "---\nname: telos\n") {
+	skill, err := readNormalized(filepath.Join(root, "skills", "telos", "SKILL.md"))
+	if err != nil || !strings.HasPrefix(skill, "---\nname: telos\n") {
 		errs = append(errs, "SKILL.md frontmatter must start with `name: telos`")
 	}
-	openai, err := os.ReadFile(filepath.Join(root, "skills", "telos", "agents", "openai.yaml"))
+	openai, err := readNormalized(filepath.Join(root, "skills", "telos", "agents", "openai.yaml"))
 	if err != nil {
 		errs = append(errs, "skills/telos/agents/openai.yaml missing")
 	} else {
 		for _, want := range []string{"display_name:", "short_description:", "default_prompt:", "$telos"} {
-			if !strings.Contains(string(openai), want) {
+			if !strings.Contains(openai, want) {
 				errs = append(errs, "openai.yaml misses "+want)
 			}
 		}

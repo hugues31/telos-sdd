@@ -34,11 +34,17 @@ Usage:
   telos restore [--json]
   telos evidence red|green|adopt --req REQ-NNN [--json]
   telos findings list|add|confirm|resolve [...] [--json]
+  telos index rebuild|status [--json]
+  telos search <query> [--json]
+  telos show <ID> [--json]
+  telos related <ID> [--depth N] [--all-edges] [--json]
+  telos impact <ID> [--json]
+  telos explain <symbol> [--json]
   telos guard
   telos version [--json]
 
-The knowledge commands (search, related, impact, context, view) arrive
-milestone by milestone in the v0.6 rewrite; see docs/design-v2.md.`
+The context compiler, policies, and the web view arrive milestone by
+milestone in the v0.6 rewrite; see docs/design-v2.md.`
 
 // Run dispatches the CLI. Every command supports the stable JSON envelope
 // {ok, command, result, next_actions, error{code,message,paths}}.
@@ -167,6 +173,24 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		return finish(execution, err)
 	case "findings":
 		execution, err := runFindings(repo, args[1:], stderr)
+		return finish(execution, err)
+	case "index":
+		execution, err := runIndex(root, args[1:])
+		return finish(execution, err)
+	case "search":
+		execution, err := runSearch(root, args[1:])
+		return finish(execution, err)
+	case "show":
+		execution, err := runShow(root, args[1:])
+		return finish(execution, err)
+	case "related":
+		execution, err := runRelated(root, args[1:], stderr)
+		return finish(execution, err)
+	case "impact":
+		execution, err := runImpact(root, args[1:])
+		return finish(execution, err)
+	case "explain":
+		execution, err := runExplain(root, args[1:])
 		return finish(execution, err)
 	default:
 		return finish(commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unknown command %q; run `telos help`", args[0])))

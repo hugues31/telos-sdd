@@ -73,33 +73,34 @@ type NodeID string
 // section for spec-side nodes ("" for code nodes); Attrs carries
 // kind-specific metadata (class, status, path, package, signature, severity).
 type Node struct {
-	ID        NodeID
-	Kind      NodeKind
-	Title     string
-	Body      string
-	Attrs     map[string]string
-	Authority Authority
-	Origin    string
-	ChangeID  string
+	ID        NodeID            `json:"id"`
+	Kind      NodeKind          `json:"kind"`
+	Title     string            `json:"title"`
+	Body      string            `json:"body,omitempty"`
+	Attrs     map[string]string `json:"attrs,omitempty"`
+	Authority Authority         `json:"authority"`
+	Origin    string            `json:"origin,omitempty"`
+	ChangeID  string            `json:"change_id,omitempty"`
 }
 
 // Edge is one directed relation.
 type Edge struct {
-	From, To  NodeID
-	Kind      EdgeKind
-	Authority Authority
-	Origin    string
-	ChangeID  string
-	Attrs     map[string]string
+	From      NodeID            `json:"from"`
+	To        NodeID            `json:"to"`
+	Kind      EdgeKind          `json:"kind"`
+	Authority Authority         `json:"authority"`
+	Origin    string            `json:"origin,omitempty"`
+	ChangeID  string            `json:"change_id,omitempty"`
+	Attrs     map[string]string `json:"attrs,omitempty"`
 }
 
-// Direction selects traversal direction.
+// Direction selects traversal direction; the zero value is Both.
 type Direction int
 
 const (
-	Out Direction = iota
+	Both Direction = iota
+	Out
 	In
-	Both
 )
 
 // TraverseOpt bounds a Neighbors traversal. Zero values mean: depth 1, Both,
@@ -149,26 +150,26 @@ type SearchOpt struct {
 
 // Hit is one full-text search result.
 type Hit struct {
-	ID        NodeID
-	Kind      NodeKind
-	Title     string
-	Score     float64
-	Snippet   string
-	Origin    string
-	Authority Authority
+	ID        NodeID    `json:"id"`
+	Kind      NodeKind  `json:"kind"`
+	Title     string    `json:"title"`
+	Score     float64   `json:"score"`
+	Snippet   string    `json:"snippet"`
+	Origin    string    `json:"origin,omitempty"`
+	Authority Authority `json:"authority"`
 }
 
 // EvidenceRow summarizes one evidence record for a requirement, with
 // freshness computed at query time against the current tree (never stored).
 type EvidenceRow struct {
-	ID           string
-	Kind         string
-	Result       string
-	Fresh        bool
-	Reusable     bool
-	ChangeID     string
-	CreatedAt    string
-	Requirements []NodeID
+	ID           string   `json:"id"`
+	Kind         string   `json:"kind"`
+	Result       string   `json:"result"`
+	Fresh        bool     `json:"fresh"`
+	Reusable     bool     `json:"reusable"`
+	ChangeID     string   `json:"change_id"`
+	CreatedAt    string   `json:"created_at"`
+	Requirements []NodeID `json:"requirements"`
 }
 
 // FindingFilter selects findings.
@@ -181,17 +182,17 @@ type FindingFilter struct {
 
 // FindingRow is one finding as served by the index.
 type FindingRow struct {
-	ID                string
-	ChangeID          string
-	Critic            string
-	ProposedSeverity  string
-	Confidence        float64
-	EffectiveSeverity string
-	Blocking          bool
-	Status            string
-	Resolution        string
-	SubjectID         NodeID
-	Rationale         string
+	ID                string  `json:"id"`
+	ChangeID          string  `json:"change_id"`
+	Critic            string  `json:"critic"`
+	ProposedSeverity  string  `json:"proposed_severity"`
+	Confidence        float64 `json:"confidence,omitempty"`
+	EffectiveSeverity string  `json:"severity,omitempty"`
+	Blocking          bool    `json:"blocking"`
+	Status            string  `json:"status"`
+	Resolution        string  `json:"resolution,omitempty"`
+	SubjectID         NodeID  `json:"subject,omitempty"`
+	Rationale         string  `json:"rationale"`
 }
 
 // IndexStats reports node/edge counts by kind and the critic health metric

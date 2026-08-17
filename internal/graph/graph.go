@@ -93,13 +93,13 @@ type Edge struct {
 	Attrs     map[string]string
 }
 
-// Direction selects traversal direction.
+// Direction selects traversal direction; the zero value is Both.
 type Direction int
 
 const (
-	Out Direction = iota
+	Both Direction = iota
+	Out
 	In
-	Both
 )
 
 // TraverseOpt bounds a Neighbors traversal. Zero values mean: depth 1, Both,

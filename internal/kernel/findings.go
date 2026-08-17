@@ -49,19 +49,19 @@ type Resolution struct {
 // M6 on, by deterministic policy escalation). Only an open finding with
 // effective severity "blocking" forbids certification (KERNEL-006).
 type Finding struct {
-	Schema           int            `json:"finding"`
-	ID               string         `json:"id"`
-	Change           string         `json:"change"`
-	Source           FindingSource  `json:"source"`
-	Target           FindingTarget  `json:"target"`
-	ProposedSeverity string         `json:"proposed_severity"`
-	Confidence       float64        `json:"confidence,omitempty"`
-	Rationale        string         `json:"rationale"`
-	Severity         string         `json:"severity,omitempty"`
-	EscalatedBy      string         `json:"escalated_by,omitempty"`
-	Status           string         `json:"status"`
-	Resolution       *Resolution    `json:"resolution,omitempty"`
-	CreatedAt        string         `json:"created_at"`
+	Schema           int           `json:"finding"`
+	ID               string        `json:"id"`
+	Change           string        `json:"change"`
+	Source           FindingSource `json:"source"`
+	Target           FindingTarget `json:"target"`
+	ProposedSeverity string        `json:"proposed_severity"`
+	Confidence       float64       `json:"confidence,omitempty"`
+	Rationale        string        `json:"rationale"`
+	Severity         string        `json:"severity,omitempty"`
+	EscalatedBy      string        `json:"escalated_by,omitempty"`
+	Status           string        `json:"status"`
+	Resolution       *Resolution   `json:"resolution,omitempty"`
+	CreatedAt        string        `json:"created_at"`
 }
 
 func findingsPath(wt *gitx.Repo, id string) string {

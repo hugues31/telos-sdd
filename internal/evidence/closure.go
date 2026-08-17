@@ -102,13 +102,13 @@ func GoClosure(repo *gitx.Repo, tree gitx.OID, checkout string, pkgDirs []string
 	dec := json.NewDecoder(strings.NewReader(string(out)))
 	for {
 		var pkg struct {
-			Dir         string
-			GoFiles     []string
-			CgoFiles    []string
-			TestGoFiles []string
+			Dir          string
+			GoFiles      []string
+			CgoFiles     []string
+			TestGoFiles  []string
 			XTestGoFiles []string
-			EmbedFiles  []string
-			Standard    bool
+			EmbedFiles   []string
+			Standard     bool
 		}
 		if err := dec.Decode(&pkg); err != nil {
 			break

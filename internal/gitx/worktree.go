@@ -162,6 +162,42 @@ func (r *Repo) TreeFromFiles(files map[string][]byte) (OID, error) {
 	return OID(strings.TrimSpace(string(out))), nil
 }
 
+// StashPush stashes every worktree change including untracked files.
+func (r *Repo) StashPush(message string) error {
+	_, err := r.run(nil, "stash", "push", "--include-untracked", "--quiet", "-m", message)
+	return err
+}
+
+// StashApply applies the most recent stash without dropping it.
+func (r *Repo) StashApply() error {
+	_, err := r.run(nil, "stash", "apply", "--quiet")
+	return err
+}
+
+// StashDrop drops the most recent stash.
+func (r *Repo) StashDrop() error {
+	_, err := r.run(nil, "stash", "drop", "--quiet")
+	return err
+}
+
+// CleanUntracked removes untracked files and directories.
+func (r *Repo) CleanUntracked() error {
+	_, err := r.run(nil, "clean", "-fdq")
+	return err
+}
+
+// RebaseOnto replays branch's commits after oldBase onto newTip. On conflict
+// the rebase is aborted (the worktree returns to its pre-rebase state) and
+// the error carries git's conflict report.
+func (r *Repo) RebaseOnto(newTip, oldBase OID, branch string) error {
+	_, err := r.run(nil, "rebase", "--onto", string(newTip), string(oldBase), branch)
+	if err != nil {
+		_, _ = r.run(nil, "rebase", "--abort")
+		return err
+	}
+	return nil
+}
+
 // TreeFromEntries writes a tree from existing blob OIDs (no re-hashing)
 // using a temporary index. Paths are slash-separated and repo-relative.
 func (r *Repo) TreeFromEntries(entries map[string]OID) (OID, error) {

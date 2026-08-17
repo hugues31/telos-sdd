@@ -46,13 +46,22 @@ type CandidateStatus struct {
 	Worktree  string `json:"worktree"`
 }
 
-// ProjectStatus is the frozen result schema of `telos status` (the salvage
-// proposal arrives with M4).
+// SalvageProposal is the one-gesture conversion status offers on a corrupted
+// root: capture the diff as a Change (new, or routed into an open one whose
+// paths overlap).
+type SalvageProposal struct {
+	Proposal string `json:"proposal"` // new_change|into
+	Into     string `json:"into,omitempty"`
+	Prompt   string `json:"prompt"`
+}
+
+// ProjectStatus is the frozen result schema of `telos status`.
 type ProjectStatus struct {
 	Context     string           `json:"context"`
 	State       string           `json:"state"`
 	Certificate *CertStatus      `json:"certificate,omitempty"`
 	Dirty       *DirtyInfo       `json:"dirty,omitempty"`
+	Salvage     *SalvageProposal `json:"salvage,omitempty"`
 	Reason      string           `json:"reason,omitempty"`
 	Contract    *ContractCounts  `json:"contract,omitempty"`
 	Changes     []ChangeSummary  `json:"changes,omitempty"`
@@ -107,6 +116,7 @@ func Status(repo *gitx.Repo) (ProjectStatus, error) {
 		st.State = StateCorrupted
 		st.Reason = "worktree diverged from the certified state"
 		st.Dirty = &DirtyInfo{Paths: dirty}
+		st.Salvage = salvageProposal(repo, dirty)
 	default:
 		st.State = StateCertified
 		st.Certificate = &CertStatus{Commit: string(head), Change: cert.Payload.Change.ID, SealedAt: cert.Payload.SealedAt}
@@ -120,6 +130,35 @@ func Status(repo *gitx.Repo) (ProjectStatus, error) {
 		st.Changes = changes
 	}
 	return st, nil
+}
+
+// salvageProposal proposes the one-gesture capture: into an open change
+// whose diff overlaps the dirty paths, or as a new change otherwise.
+func salvageProposal(repo *gitx.Repo, dirty []string) *SalvageProposal {
+	dirtySet := map[string]bool{}
+	for _, p := range dirty {
+		dirtySet[p] = true
+	}
+	if changes, err := OpenChanges(repo); err == nil {
+		for _, c := range changes {
+			if c.Base == "" {
+				continue
+			}
+			if paths, err := repo.DiffNames(c.Base, "refs/heads/"+changeBranchPrefix+c.ID); err == nil {
+				for _, p := range paths {
+					if dirtySet[p] {
+						return &SalvageProposal{Proposal: "into", Into: c.ID,
+							Prompt: "Capture this edit into " + c.ID + "? (telos salvage --into " + c.ID + ")"}
+					}
+				}
+			}
+		}
+	}
+	next := "a new Change"
+	if id, err := nextChangeID(repo); err == nil {
+		next = id
+	}
+	return &SalvageProposal{Proposal: "new_change", Prompt: "Capture this edit as " + next + "? (telos salvage)"}
 }
 
 // candidateStatus reports the status seen from inside a Change's candidate

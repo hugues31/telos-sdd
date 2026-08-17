@@ -28,15 +28,17 @@ Usage:
   telos change start --category behavior_change|behavior_preserving --title <t> [--json]
   telos change show|diff|review [--json]           (inside the candidate)
   telos change approve --digest <oid> [--json]     (inside the candidate)
-  telos change ready|promote [--json]              (inside the candidate)
+  telos change ready|promote|rebase [--json]       (inside the candidate)
   telos change abort CHG-NNN [--json]              (from the certified root)
+  telos salvage [--into CHG-NNN] [--title <t>] [--json]
+  telos restore [--json]
   telos evidence red|green|adopt --req REQ-NNN [--json]
   telos findings list|add|confirm|resolve [...] [--json]
   telos guard
   telos version [--json]
 
-Salvage/rebase and the knowledge commands arrive milestone by milestone in
-the v0.6 rewrite; see docs/design-v2.md.`
+The knowledge commands (search, related, impact, context, view) arrive
+milestone by milestone in the v0.6 rewrite; see docs/design-v2.md.`
 
 // Run dispatches the CLI. Every command supports the stable JSON envelope
 // {ok, command, result, next_actions, error{code,message,paths}}.
@@ -137,6 +139,29 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 	case "change":
 		execution, err := runChange(repo, version, args[1:], commandStdout, stderr)
 		return finish(execution, err)
+	case "salvage":
+		f := flags("salvage", stderr)
+		into := f.String("into", "", "route the diff into an open CHG-NNN")
+		title := f.String("title", "", "title for the new change")
+		if err := f.Parse(args[1:]); err != nil {
+			return finish(commandExecution{}, err)
+		}
+		result, err := kernel.Salvage(repo, strings.ToUpper(*into), *title)
+		if err != nil {
+			return finish(commandExecution{}, err)
+		}
+		human := fmt.Sprintf("Captured %d path(s) into %s.\nYour work moved to %s; the certified worktree was restored.", len(result.Paths), result.Change, result.Worktree)
+		if len(result.SpecTouched) > 0 {
+			human += "\nNote: the diff touches spec/ — move those edits into contract.delta.md before review."
+		}
+		return finish(commandExecution{Command: "salvage", Result: result, Next: []string{"change review"}, Human: human}, nil)
+	case "restore":
+		paths, err := kernel.Restore(repo)
+		if err != nil {
+			return finish(commandExecution{}, err)
+		}
+		human := fmt.Sprintf("Restored the certified state; %d path(s) discarded.", len(paths))
+		return finish(commandExecution{Command: "restore", Result: map[string]any{"paths": paths}, Human: human}, nil)
 	case "evidence":
 		execution, err := runEvidence(repo, args[1:], commandStdout, stderr)
 		return finish(execution, err)
@@ -206,6 +231,20 @@ func runChange(repo *gitx.Repo, version string, args []string, stdout, stderr io
 		}
 		human := fmt.Sprintf("%s approved (%s bound to %s).", doc.ID, doc.Approvals[len(doc.Approvals)-1].Kind, shortDigest(*digest))
 		return commandExecution{Command: "change.approve", Result: map[string]any{"change": doc}, Human: human}, nil
+	case "rebase":
+		cfg, err := kernel.ReadConfig(repo.WorkDir)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		report, err := kernel.RebaseChange(repo, cfg)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		human := fmt.Sprintf("%s rebased onto %s: %d evidence record(s) survived, %d invalidated.", report.ID, report.NewBase[:12], len(report.EvidenceKept), len(report.EvidenceInvalidated))
+		if !report.ApprovalsKept {
+			human += "\nThe contract context changed: review and approve again."
+		}
+		return commandExecution{Command: "change.rebase", Result: report, Next: []string{"change ready"}, Human: human}, nil
 	case "ready":
 		cfg, err := kernel.ReadConfig(repo.WorkDir)
 		if err != nil {
@@ -495,6 +534,8 @@ func gateBrokerCommand(root string, stdout io.Writer, command string) error {
 	switch {
 	case fields[1] == "init":
 		return askGuard(stdout, "Telos human gate — re-initialize Telos in an already-initialized project: this seals a NEW genesis certificate adopting the current tree as-is, outside any verified transition. Approve only if you deliberately want a destructive reset of the certified state.")
+	case fields[1] == "restore":
+		return askGuard(stdout, "Telos human gate — restore the certified state: the out-of-band diff is DISCARDED. Approve only if that work should be lost; `telos salvage` preserves it as a Change instead.")
 	case fields[1] == "change" && verb == "approve":
 		return gateChangeApprove(root, stdout, fields)
 	case fields[1] == "change" && verb == "abort":

@@ -8,27 +8,31 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/hugues31/telos-sdd/internal/coded"
+	"github.com/hugues31/telos-sdd/internal/contract"
+	"github.com/hugues31/telos-sdd/internal/gitx"
+	"github.com/hugues31/telos-sdd/internal/kernel"
 )
 
-const usage = `Telos SDD — the spec lives in the repo; code follows the approved spec
+const usage = `Telos — certified-state development: every accepted state is verified
 
 Usage:
   telos init [--agent codex|claude|all] [--ci github] [--json]
-  telos doctor [--json]
   telos status [--json]
-  telos spec put --file spec/<name>.md [--delete] [--json] < content.md
-  telos spec review [--json]
-  telos spec approve --review <digest> [--json]
-  telos apply --rule RULE-NNN [--rule ...] [--expect-pass] [--json] < patch.diff
   telos verify [--json]
-  telos trace [RULE-NNN] [--json]
-  telos view [--out <path>] [--open] [--json]
+  telos doctor [--json]
   telos guard
-  telos version [--json]`
+  telos version [--json]
 
+The Change lifecycle (change start/review/approve/ready/promote, salvage,
+evidence, findings, search, context, view) arrives milestone by milestone in
+the v0.6 rewrite; see docs/design-v2.md.`
+
+// Run dispatches the CLI. Every command supports the stable JSON envelope
+// {ok, command, result, next_actions, error{code,message,paths}}.
 func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Writer) error {
 	jsonMode, args := extractJSON(args)
 	label := commandLabel(args)
@@ -78,142 +82,49 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		return finish(commandExecution{}, err)
 	}
 	if args[0] == "init" {
-		err := runInit(cwd, args[1:], commandStdout, stderr)
-		return finish(commandExecution{}, err)
+		execution, err := runInit(cwd, version, args[1:], stderr)
+		return finish(execution, err)
 	}
 	root, err := findRoot(cwd)
 	if err != nil {
-		return finish(commandExecution{}, err)
+		return finish(commandExecution{}, coded.New("TELOS_NOT_INITIALIZED", err.Error()))
 	}
+	repo, err := gitx.Open(root)
+	if err != nil {
+		return finish(commandExecution{}, coded.New("TELOS_GIT_REPOSITORY_REQUIRED", err.Error()))
+	}
+
 	switch args[0] {
 	case "doctor":
-		return finish(commandExecution{}, runDoctor(root, commandStdout))
+		return finish(commandExecution{}, runDoctor(repo, commandStdout))
 	case "status":
-		result, next, err := runStatus(root)
+		st, err := kernel.Status(repo)
 		human := ""
+		var next []string
 		if err == nil {
-			human = fmt.Sprintf("Phase: %s.", result["phase"])
+			human = fmt.Sprintf("State: %s.", st.State)
+			switch st.State {
+			case kernel.StateUninitialized:
+				next = []string{"init"}
+			case kernel.StateCorrupted:
+				human += " " + st.Reason
+			}
 		}
-		return finish(commandExecution{Command: "status", Result: result, Next: next, Human: human}, err)
-	case "spec":
-		execution, err := runSpec(root, args[1:], stdin, stderr)
-		return finish(execution, err)
-	case "apply":
-		f := flags("apply", stderr)
-		var rules stringList
-		f.Var(&rules, "rule", "RULE-NNN reference (repeatable)")
-		expectPass := f.Bool("expect-pass", false, "adopt existing behavior: the suite must pass with the documentation test in place (human-gated)")
-		if err := f.Parse(args[1:]); err != nil {
-			return finish(commandExecution{}, err)
-		}
-		patch, err := io.ReadAll(stdin)
+		return finish(commandExecution{Command: "status", Result: st, Next: next, Human: human}, err)
+	case "verify":
+		cfg, err := kernel.ReadConfig(root)
 		if err != nil {
 			return finish(commandExecution{}, err)
 		}
-		result, err := runApply(root, rules, patch, *expectPass, stderr)
+		report, err := kernel.Verify(repo, cfg, commandStdout, stderr)
 		human := ""
 		if err == nil {
-			human = fmt.Sprintf("Applied patch for %s through Telos.", strings.Join(rules, ", "))
-			switch result["suite"] {
-			case "red":
-				human = fmt.Sprintf("Red witnessed for %s: the failing tests are sealed; only the implementation may turn them green.", strings.Join(rules, ", "))
-			case "green":
-				if proven, ok := result["proven"].([]string); ok && len(proven) > 0 {
-					human = fmt.Sprintf("Suite green witnessed through Telos; proven: %s.", strings.Join(proven, ", "))
-				}
-			}
+			human = fmt.Sprintf("Verified: certificate %s sealed, %d requirement(s), worktree matches the certified state.", report.Change, report.Requirements)
 		}
-		return finish(commandExecution{Command: "apply", Result: result, Next: []string{"verify"}, Human: human}, err)
-	case "verify":
-		result, err := runVerify(root, commandStdout, stderr)
-		human := ""
-		if err == nil {
-			human = fmt.Sprintf("Verified: %d rule(s) implemented, spec and code in sync.", result["rules"])
-		}
-		return finish(commandExecution{Command: "verify", Result: result, Human: human}, err)
-	case "trace":
-		id := ""
-		if len(args) > 1 {
-			id = args[1]
-		}
-		result, err := runTrace(root, id)
-		return finish(commandExecution{Command: "trace", Result: result}, err)
-	case "view":
-		f := flags("view", stderr)
-		out := f.String("out", "", "output HTML path (default: system temp; inside the repo it must be git-ignored)")
-		open := f.Bool("open", false, "open the page in the default browser")
-		if err := f.Parse(args[1:]); err != nil {
-			return finish(commandExecution{}, err)
-		}
-		result, err := runView(root, version, *out, *open)
-		human := ""
-		if err == nil {
-			human = fmt.Sprintf("Spec view written to %s.", result["path"])
-		}
-		return finish(commandExecution{Command: "view", Result: result, Human: human}, err)
+		return finish(commandExecution{Command: "verify", Result: report, Human: human}, err)
 	default:
-		return finish(commandExecution{}, fmt.Errorf("unknown command %q; run `telos help`", args[0]))
+		return finish(commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unknown command %q; run `telos help`", args[0])))
 	}
-}
-
-func runSpec(root string, args []string, stdin io.Reader, stderr io.Writer) (commandExecution, error) {
-	if len(args) == 0 {
-		return commandExecution{}, coded("TELOS_INPUT_REQUIRED", "spec requires a verb: put, review, or approve")
-	}
-	switch args[0] {
-	case "put":
-		f := flags("spec put", stderr)
-		file := f.String("file", "", "spec file path under spec/")
-		del := f.Bool("delete", false, "delete the spec file")
-		if err := f.Parse(args[1:]); err != nil {
-			return commandExecution{}, err
-		}
-		var content []byte
-		if !*del {
-			var err error
-			if content, err = io.ReadAll(stdin); err != nil {
-				return commandExecution{}, err
-			}
-		}
-		result, err := specPut(root, *file, content, *del)
-		human := ""
-		if err == nil {
-			human = fmt.Sprintf("Wrote %s through Telos.", result["path"])
-			if *del {
-				human = fmt.Sprintf("Deleted %s through Telos.", result["path"])
-			}
-		}
-		return commandExecution{Command: "spec.put", Result: result, Next: []string{"spec review"}, Human: human}, err
-	case "review":
-		result, err := specReview(root)
-		human := ""
-		if err == nil {
-			human = fmt.Sprintf("Spec review digest %s. Present the returned content to the user before approval.", shortHash(fmt.Sprint(result["digest"])))
-		}
-		return commandExecution{Command: "spec.review", Result: result, Next: []string{"spec approve"}, Human: human}, err
-	case "approve":
-		f := flags("spec approve", stderr)
-		review := f.String("review", "", "review digest")
-		if err := f.Parse(args[1:]); err != nil {
-			return commandExecution{}, err
-		}
-		result, err := specApprove(root, *review)
-		human := ""
-		if err == nil {
-			human = "Spec approved; the approved root is the new implementation target."
-		}
-		return commandExecution{Command: "spec.approve", Result: result, Next: []string{"apply", "verify"}, Human: human}, err
-	default:
-		return commandExecution{}, coded("TELOS_INPUT_INVALID", fmt.Sprintf("unknown spec verb %q", args[0]))
-	}
-}
-
-type stringList []string
-
-func (s *stringList) String() string { return strings.Join(*s, ",") }
-func (s *stringList) Set(v string) error {
-	*s = append(*s, strings.ToUpper(strings.TrimSpace(v)))
-	return nil
 }
 
 func flags(name string, stderr io.Writer) *flag.FlagSet {
@@ -222,63 +133,79 @@ func flags(name string, stderr io.Writer) *flag.FlagSet {
 	return f
 }
 
-func runInit(cwd string, args []string, stdout, stderr io.Writer) error {
+func runInit(cwd, version string, args []string, stderr io.Writer) (commandExecution, error) {
 	f := flags("init", stderr)
 	agent := f.String("agent", "all", "agent integration")
 	ci := f.String("ci", "", "CI integration")
 	if err := f.Parse(args); err != nil {
-		return err
+		return commandExecution{}, err
 	}
 	if f.NArg() != 0 {
-		return errors.New("init takes no positional arguments")
+		return commandExecution{}, coded.New("TELOS_INPUT_INVALID", "init takes no positional arguments")
 	}
 	if *ci != "" && *ci != "github" {
-		return fmt.Errorf("unsupported CI %q", *ci)
+		return commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unsupported CI %q", *ci))
 	}
 	if *agent != "codex" && *agent != "claude" && *agent != "all" {
-		return fmt.Errorf("invalid agent %q", *agent)
+		return commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("invalid agent %q", *agent))
 	}
-	if err := requireGitWorktree(cwd); err != nil {
-		return err
+	if !gitx.Available() {
+		return commandExecution{}, coded.New("TELOS_GIT_UNAVAILABLE", "Git is required; install Git before running `telos init`")
 	}
-	if err := initProject(cwd, *agent, *ci == "github"); err != nil {
-		return err
+	if !gitx.IsRepo(cwd) {
+		return commandExecution{}, coded.New("TELOS_GIT_REPOSITORY_REQUIRED", "not a Git repository; run `git init` before `telos init`")
 	}
-	fmt.Fprintf(stdout, "Initialized Telos SDD in %s for %s.\nThe spec lives in spec/; tell your coding agent what you want to build.\n", cwd, *agent)
-	return nil
-}
-
-func requireGitWorktree(root string) error {
-	git, err := exec.LookPath("git")
+	repo, err := gitx.Open(cwd)
 	if err != nil {
-		return coded("TELOS_GIT_UNAVAILABLE", "Git is required; install Git before running `telos init`")
+		return commandExecution{}, err
 	}
-	out, err := exec.Command(git, "-C", root, "rev-parse", "--is-inside-work-tree").Output()
-	if err != nil || strings.TrimSpace(string(out)) != "true" {
-		return coded("TELOS_GIT_REPOSITORY_REQUIRED", "not a Git repository; run `git init` before `telos init`")
+	if err := initProject(repo.WorkDir, *agent, *ci == "github"); err != nil {
+		return commandExecution{}, err
 	}
-	return nil
+	cfg, err := kernel.ReadConfig(repo.WorkDir)
+	if err != nil {
+		return commandExecution{}, err
+	}
+	cert, err := kernel.Genesis(repo, cfg, kernel.GenesisOptions{Version: version})
+	if err != nil {
+		return commandExecution{}, err
+	}
+	result := map[string]any{"root": repo.WorkDir, "commit": cert.Payload.Commit, "change": cert.Payload.Change.ID}
+	human := fmt.Sprintf("Initialized Telos in %s: genesis certificate sealed on %s.\nThe contract lives in spec/; tell your coding agent what you want to build.", repo.WorkDir, cert.Payload.Commit[:12])
+	return commandExecution{Command: "init", Result: result, Next: []string{"status"}, Human: human}, nil
 }
 
-func runDoctor(root string, stdout io.Writer) error {
+func runDoctor(repo *gitx.Repo, stdout io.Writer) error {
 	type check struct {
 		Name string
 		Err  error
 	}
-	cfg, cfgErr := readConfig(root)
-	_, stateErr := loadState(root)
+	cfg, cfgErr := kernel.ReadConfig(repo.WorkDir)
+	var certErr error
+	st, stErr := kernel.Status(repo)
+	switch {
+	case stErr != nil:
+		certErr = stErr
+	case st.State != kernel.StateCertified:
+		certErr = errors.New(st.State + ": " + st.Reason)
+	}
 	checks := []check{
 		{"Telos config", cfgErr},
-		{"Telos state", stateErr},
-		{"Product spec", fileExists(filepath.Join(root, filepath.FromSlash(productFile)))},
-		{"Git", commandExists("git")},
+		{"Git", func() error {
+			if !gitx.Available() {
+				return errors.New("git not found")
+			}
+			return nil
+		}()},
+		{"Product spec", fileExists(filepath.Join(repo.WorkDir, filepath.FromSlash(contract.ProductFile)))},
+		{"Certificate", certErr},
 	}
 	for _, agent := range cfg.Agents {
 		switch agent {
 		case "codex":
-			checks = append(checks, check{"Codex Skill", fileExists(filepath.Join(root, ".agents", "skills", "telos", "SKILL.md"))})
+			checks = append(checks, check{"Codex Skill", fileExists(filepath.Join(repo.WorkDir, ".agents", "skills", "telos", "SKILL.md"))})
 		case "claude":
-			checks = append(checks, check{"Claude Skill", fileExists(filepath.Join(root, ".claude", "skills", "telos", "SKILL.md"))})
+			checks = append(checks, check{"Claude Skill", fileExists(filepath.Join(repo.WorkDir, ".claude", "skills", "telos", "SKILL.md"))})
 		}
 	}
 	failed := false
@@ -295,9 +222,11 @@ func runDoctor(root string, stdout io.Writer) error {
 	return nil
 }
 
-func fileExists(path string) error    { _, err := os.Stat(path); return err }
-func commandExists(name string) error { _, err := exec.LookPath(name); return err }
+func fileExists(path string) error { _, err := os.Stat(path); return err }
 
+// runGuard is the provider PreToolUse hook endpoint. It is deliberately
+// fail-open on malformed input and outside Telos projects: a crashing guard
+// must never brick the agent. Silence is allow.
 func runGuard(stdin io.Reader, stdout io.Writer) error {
 	var input map[string]any
 	if err := json.NewDecoder(stdin).Decode(&input); err != nil {
@@ -364,152 +293,29 @@ func isTelosBrokerCommand(command string) bool {
 }
 
 // gateBrokerCommand screens an already-validated broker command for the
-// human-gated operations: spec approve (the single workflow gate), re-init
-// (the administrative re-baseline escape hatch), and apply on a clean project
-// (the refactor claim) or with --expect-pass (the adoption claim). These never
-// pass silently — the human decision happens
-// at the provider permission prompt, not on the orchestrator's word. An
-// approve whose digest no longer matches the recorded review is denied
-// outright so the user is only prompted when it can succeed.
+// human-gated operations. At M1 the only gate is re-initialization (a fresh
+// genesis adopting the current tree); the Change-lifecycle gates (approve,
+// adopt, restore, abort) return with their commands.
 func gateBrokerCommand(root string, stdout io.Writer, command string) error {
 	fields := brokerCommandFields(command)
 	if len(fields) < 2 {
 		return nil
 	}
-	verb := ""
-	if len(fields) > 2 {
-		verb = fields[2]
-	}
-	switch {
-	case fields[1] == "spec" && verb == "approve":
-		return gateSpecApprove(root, stdout, fields)
-	case fields[1] == "init":
-		return askGuard(stdout, "Telos human gate — re-initialize Telos in an already-initialized project: this re-baselines the declared spec and code roots, adopting the current tree as-is. Approve only if you deliberately want to reset the declared state.")
-	case fields[1] == "apply":
-		return gateApply(root, stdout, command, fields)
+	if fields[1] == "init" {
+		return askGuard(stdout, "Telos human gate — re-initialize Telos in an already-initialized project: this seals a NEW genesis certificate adopting the current tree as-is, outside any verified transition. Approve only if you deliberately want a destructive reset of the certified state.")
 	}
 	return nil
 }
 
-// gateApply lets spec-driven patches through silently: while approved rules
-// still lack proof, the human decision already happened at spec approval. Two
-// applies carry a claim only the human can accept and are prompted: an apply
-// on a clean project — a code change no spec diff motivates, claiming behavior
-// preservation (refactor, test hardening); a reported bug never qualifies,
-// since it is evidence the spec was too weak — and an apply with --expect-pass,
-// which claims a rule is already satisfied by the current code, so its test
-// will never be witnessed failing. On any other phase the guard stays silent
-// and the command itself fails with the precise error code.
-func gateApply(root string, stdout io.Writer, command string, fields []string) error {
-	result, _, err := runStatus(root)
-	if err != nil {
-		return nil
-	}
-	subject := strings.Join(flagValues(fields, "--rule"), ", ")
-	if subject == "" {
-		subject = "unspecified rules"
-	}
-	if hasFlag(fields, "--expect-pass") {
-		if result["phase"] != "implementing" {
-			return nil
-		}
-		return askGuard(stdout, fmt.Sprintf("Telos human gate — adopt existing behavior as proof: the test for %s is expected to pass immediately, so it will never be witnessed failing. Approve only if the rule documents behavior the code already has; new behavior must enter through a witnessed failing test.", subject))
-	}
-	if result["phase"] != "clean" {
-		return nil
-	}
-	if files := patchFiles(command); len(files) > 0 {
-		subject += " touching " + strings.Join(files, ", ")
-	}
-	return askGuard(stdout, fmt.Sprintf("Telos human gate — code change without a spec change: the project is clean, so this patch for %s claims to preserve behavior (refactor or test hardening). Approve only if no behavior changes; a bug fix must strengthen the spec first.", subject))
-}
-
-func hasFlag(fields []string, name string) bool {
-	for _, field := range fields {
-		if field == name {
-			return true
-		}
-	}
-	return false
-}
-
-// patchFiles lists the paths targeted by the unified diff carried in the
-// command's heredoc body, so the permission prompt names what the patch
-// touches.
-func patchFiles(command string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, line := range strings.Split(strings.ReplaceAll(command, "\r\n", "\n"), "\n") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "diff --git a/")
-		if !ok {
-			continue
-		}
-		if i := strings.LastIndex(rest, " b/"); i >= 0 {
-			rest = rest[:i]
-		}
-		if rest != "" && !seen[rest] {
-			seen[rest] = true
-			out = append(out, rest)
-		}
-	}
-	return out
-}
-
-func gateSpecApprove(root string, stdout io.Writer, fields []string) error {
-	digest := flagValue(fields, "--review")
-	st, err := loadState(root)
-	if err != nil {
-		return denyGuard(stdout, "Telos human gate: no recorded state; run telos spec review before approving.")
-	}
-	_, specFiles, invErr := inventories(root)
-	if invErr != nil || st.Review == "" || digest == "" || digest != st.Review || rootHashMap(specFiles) != st.Review {
-		return denyGuard(stdout, "Telos human gate: the spec review digest is missing or stale; run telos spec review and present the returned content to the user before approving.")
-	}
-	changed := changedPaths(st.Spec.Files, specFiles)
-	return askGuard(stdout, fmt.Sprintf("Telos human gate — approve the spec diff %s covering %s. Approve only if this exact spec content was presented to you and is exactly the intended behavior.", shortHash(digest), strings.Join(changed, ", ")))
-}
-
-// brokerCommandFields returns the whitespace-separated fields of the command's
-// first line, excluding any heredoc redirection already validated by
-// isTelosBrokerCommand.
+// brokerCommandFields returns the whitespace-separated fields of the
+// command's first line, excluding any heredoc redirection already validated
+// by isTelosBrokerCommand.
 func brokerCommandFields(command string) []string {
 	firstLine := strings.TrimSpace(strings.Split(strings.ReplaceAll(command, "\r\n", "\n"), "\n")[0])
 	if heredoc := strings.Index(firstLine, "<<"); heredoc >= 0 {
 		firstLine = firstLine[:heredoc]
 	}
 	return strings.Fields(firstLine)
-}
-
-func flagValue(fields []string, name string) string {
-	for i, field := range fields {
-		if field == name && i+1 < len(fields) {
-			return strings.Trim(fields[i+1], `"'`)
-		}
-		if value, ok := strings.CutPrefix(field, name+"="); ok {
-			return strings.Trim(value, `"'`)
-		}
-	}
-	return ""
-}
-
-func flagValues(fields []string, name string) []string {
-	var out []string
-	for i, field := range fields {
-		if field == name && i+1 < len(fields) {
-			out = append(out, strings.Trim(fields[i+1], `"'`))
-		}
-		if value, ok := strings.CutPrefix(field, name+"="); ok {
-			out = append(out, strings.Trim(value, `"'`))
-		}
-	}
-	return out
-}
-
-func shortHash(h string) string {
-	if len(h) > 12 {
-		return h[:12]
-	}
-	return h
 }
 
 func askGuard(stdout io.Writer, reason string) error {

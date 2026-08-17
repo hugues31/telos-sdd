@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hugues31/telos-sdd/internal/gitx"
 	"github.com/hugues31/telos-sdd/internal/kernel"
 )
 
@@ -97,6 +98,88 @@ func TestGuardDecisions(t *testing.T) {
 	var out bytes.Buffer
 	if err := runGuard(strings.NewReader("not json"), &out); err != nil || out.Len() != 0 {
 		t.Errorf("malformed guard input must fail open: %v %q", err, out.String())
+	}
+}
+
+const testProjectConfig = `project_id = "guard-candidate"
+agents = ["claude"]
+test_commands = []
+test_files = ["tests/**"]
+`
+
+const testProduct = `# Product
+
+### INT-001 — Greets reliably
+
+The application greets.
+`
+
+const testDelta = "<!-- telos:op add file: spec/core.md -->\n" +
+	"### REQ-001 — Emit the greeting\nClass: behavior\nMotivated by: INT-001\n\n```gherkin\nScenario: g\n  Given a\n  Then b\n```\n"
+
+func TestGuardCandidateContext(t *testing.T) {
+	root := gitRepo(t)
+	writeFile(t, root, kernel.ConfigFile, testProjectConfig)
+	writeFile(t, root, "spec/PRODUCT.md", testProduct)
+	writeFile(t, root, "app.txt", "hello\n")
+	repo, err := gitx.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := kernel.ReadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kernel.Genesis(repo, cfg, kernel.GenesisOptions{Version: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	doc, wt, err := kernel.StartChange(repo, kernel.CategoryBehaviorChange, "guard test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.WorktreeRemove(wt) })
+
+	abs := func(rel string) string { return filepath.Join(wt, filepath.FromSlash(rel)) }
+	cases := []struct {
+		name, tool string
+		input      map[string]any
+		want       string
+	}{
+		{"code edit allowed", "Edit", map[string]any{"file_path": abs("src/main.go")}, "allow"},
+		{"delta edit allowed", "Edit", map[string]any{"file_path": abs("changes/CHG-001/contract.delta.md")}, "allow"},
+		{"intent edit allowed", "Write", map[string]any{"file_path": abs("changes/CHG-001/intent.md")}, "allow"},
+		{"spec edit denied", "Edit", map[string]any{"file_path": abs("spec/core.md")}, "deny"},
+		{"config edit denied", "Edit", map[string]any{"file_path": abs("telos.toml")}, "deny"},
+		{"change record denied", "Write", map[string]any{"file_path": abs("changes/CHG-001/change.json")}, "deny"},
+		{"evidence dir denied", "Write", map[string]any{"file_path": abs("changes/CHG-001/evidence/EVD-x.json")}, "deny"},
+		{"provider assets denied", "Edit", map[string]any{"file_path": abs(".claude/settings.json")}, "deny"},
+		{"builds run freely", "Bash", map[string]any{"command": "go test ./..."}, "allow"},
+		{"apply_patch denied", "apply_patch", map[string]any{}, "deny"},
+		{"abort asks", "Bash", map[string]any{"command": "telos change abort " + doc.ID}, "ask"},
+		{"approve without review denied", "Bash", map[string]any{"command": "telos change approve --digest abc"}, "deny"},
+	}
+	for _, c := range cases {
+		if got := guardDecision(t, wt, c.tool, c.input); got != c.want {
+			t.Errorf("%s: decision = %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// With a recorded review, approve asks on the right digest and denies a
+	// stale one.
+	wtRepo, err := gitx.Open(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, wt, "changes/"+doc.ID+"/contract.delta.md", testDelta)
+	_, bundle, err := kernel.ReviewChange(wtRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := guardDecision(t, wt, "Bash", map[string]any{"command": "telos change approve --digest " + bundle.Digest}); got != "ask" {
+		t.Errorf("approve with reviewed digest = %q, want ask", got)
+	}
+	if got := guardDecision(t, wt, "Bash", map[string]any{"command": "telos change approve --digest 0000"}); got != "deny" {
+		t.Errorf("approve with stale digest = %q, want deny", got)
 	}
 }
 

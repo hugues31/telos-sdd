@@ -55,7 +55,7 @@ func TestParseDeltaTemplateCommentsAreEmpty(t *testing.T) {
 
 func TestFoldAddReplaceRemove(t *testing.T) {
 	base := map[string][]byte{
-		ProductFile:   []byte(product),
+		ProductFile:    []byte(product),
 		"spec/core.md": []byte(core),
 	}
 

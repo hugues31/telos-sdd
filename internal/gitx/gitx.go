@@ -263,6 +263,11 @@ func (r *Repo) DiffNames(a, b string) ([]string, error) {
 	return paths, nil
 }
 
+// DiffPatch returns the unified diff between two revisions, verbatim.
+func (r *Repo) DiffPatch(a, b string) (string, error) {
+	return r.runRaw("diff", "--binary", a, b)
+}
+
 // NoteShow returns the note blob attached to commit under ref, or ErrNoNote.
 func (r *Repo) NoteShow(ref string, commit OID) ([]byte, error) {
 	oid, err := r.run(nil, "notes", "--ref="+ref, "list", string(commit))

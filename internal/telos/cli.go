@@ -14,6 +14,7 @@ import (
 	"github.com/hugues31/telos-sdd/internal/coded"
 	"github.com/hugues31/telos-sdd/internal/contract"
 	"github.com/hugues31/telos-sdd/internal/gitx"
+	"github.com/hugues31/telos-sdd/internal/glob"
 	"github.com/hugues31/telos-sdd/internal/kernel"
 )
 
@@ -24,12 +25,15 @@ Usage:
   telos status [--json]
   telos verify [--json]
   telos doctor [--json]
+  telos change start --category behavior_change|behavior_preserving --title <t> [--json]
+  telos change show|diff|review [--json]           (inside the candidate)
+  telos change approve --digest <oid> [--json]     (inside the candidate)
+  telos change abort CHG-NNN [--json]              (from the certified root)
   telos guard
   telos version [--json]
 
-The Change lifecycle (change start/review/approve/ready/promote, salvage,
-evidence, findings, search, context, view) arrives milestone by milestone in
-the v0.6 rewrite; see docs/design-v2.md.`
+Evidence, promotion, salvage, and the knowledge commands arrive milestone by
+milestone in the v0.6 rewrite; see docs/design-v2.md.`
 
 // Run dispatches the CLI. Every command supports the stable JSON envelope
 // {ok, command, result, next_actions, error{code,message,paths}}.
@@ -103,10 +107,15 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		var next []string
 		if err == nil {
 			human = fmt.Sprintf("State: %s.", st.State)
-			switch st.State {
-			case kernel.StateUninitialized:
+			switch {
+			case st.Context == "candidate" && st.Change != nil:
+				human = fmt.Sprintf("Candidate %s (%s, %s).", st.Change.ID, st.Change.Category, st.Change.Status)
+				if st.Change.BaseStale {
+					human += " The base moved: rebase before promotion."
+				}
+			case st.State == kernel.StateUninitialized:
 				next = []string{"init"}
-			case kernel.StateCorrupted:
+			case st.State == kernel.StateCorrupted:
 				human += " " + st.Reason
 			}
 		}
@@ -122,9 +131,96 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 			human = fmt.Sprintf("Verified: certificate %s sealed, %d requirement(s), worktree matches the certified state.", report.Change, report.Requirements)
 		}
 		return finish(commandExecution{Command: "verify", Result: report, Human: human}, err)
+	case "change":
+		execution, err := runChange(repo, args[1:], stderr)
+		return finish(execution, err)
 	default:
 		return finish(commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unknown command %q; run `telos help`", args[0])))
 	}
+}
+
+func runChange(repo *gitx.Repo, args []string, stderr io.Writer) (commandExecution, error) {
+	if len(args) == 0 {
+		return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "change requires a verb: start, show, diff, review, approve, or abort")
+	}
+	switch args[0] {
+	case "start":
+		f := flags("change start", stderr)
+		category := f.String("category", "", "behavior_change or behavior_preserving")
+		title := f.String("title", "", "short human title")
+		if err := f.Parse(args[1:]); err != nil {
+			return commandExecution{}, err
+		}
+		if *category == "" {
+			return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "change start requires --category")
+		}
+		doc, worktree, err := kernel.StartChange(repo, *category, *title)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		result := map[string]any{"id": doc.ID, "worktree": worktree, "branch": doc.Branch, "base": doc.Base, "category": doc.Category}
+		human := fmt.Sprintf("Started %s in %s.\nDevelop there; describe contract changes in changes/%s/contract.delta.md.", doc.ID, worktree, doc.ID)
+		return commandExecution{Command: "change.start", Result: result, Next: []string{"change review"}, Human: human}, nil
+	case "show":
+		doc, err := kernel.LoadChange(repo)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		paths, _ := repo.DiffNames(doc.Base, "HEAD")
+		return commandExecution{Command: "change.show", Result: map[string]any{"change": doc, "changed_paths": paths}}, nil
+	case "diff":
+		doc, err := kernel.LoadChange(repo)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		patch, err := repo.DiffPatch(doc.Base, "HEAD")
+		if err != nil {
+			return commandExecution{}, err
+		}
+		return commandExecution{Command: "change.diff", Result: map[string]any{"id": doc.ID, "patch": patch}}, nil
+	case "review":
+		doc, bundle, err := kernel.ReviewChange(repo)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		human := fmt.Sprintf("Review %s recorded for %s (%s). Present the exact content to the human before approval.", shortDigest(bundle.Digest), doc.ID, bundle.Kind)
+		return commandExecution{Command: "change.review", Result: bundle, Next: []string{"change approve"}, Human: human}, nil
+	case "approve":
+		f := flags("change approve", stderr)
+		digest := f.String("digest", "", "the reviewed digest")
+		if err := f.Parse(args[1:]); err != nil {
+			return commandExecution{}, err
+		}
+		doc, err := kernel.ApproveChange(repo, *digest)
+		if err != nil {
+			return commandExecution{}, err
+		}
+		human := fmt.Sprintf("%s approved (%s bound to %s).", doc.ID, doc.Approvals[len(doc.Approvals)-1].Kind, shortDigest(*digest))
+		return commandExecution{Command: "change.approve", Result: map[string]any{"change": doc}, Human: human}, nil
+	case "abort":
+		if len(args) < 2 {
+			return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "change abort takes the CHG-NNN id, run from the certified root")
+		}
+		if ctx, err := kernel.ChangeContext(repo); err != nil {
+			return commandExecution{}, err
+		} else if ctx != "" {
+			return commandExecution{}, coded.New("TELOS_ROOT_REQUIRED", "run change abort from the certified root, not inside the candidate being removed")
+		}
+		id := strings.ToUpper(args[1])
+		if err := kernel.AbortChange(repo, id); err != nil {
+			return commandExecution{}, err
+		}
+		return commandExecution{Command: "change.abort", Result: map[string]any{"id": id}, Human: id + " aborted: worktree and branch removed."}, nil
+	default:
+		return commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unknown change verb %q", args[0]))
+	}
+}
+
+func shortDigest(d string) string {
+	if len(d) > 12 {
+		return d[:12]
+	}
+	return d
 }
 
 func flags(name string, stderr io.Writer) *flag.FlagSet {
@@ -186,6 +282,8 @@ func runDoctor(repo *gitx.Repo, stdout io.Writer) error {
 	switch {
 	case stErr != nil:
 		certErr = stErr
+	case st.Context == "candidate":
+		certErr = nil // candidate worktrees are legitimately in flight
 	case st.State != kernel.StateCertified:
 		certErr = errors.New(st.State + ": " + st.Reason)
 	}
@@ -224,6 +322,16 @@ func runDoctor(repo *gitx.Repo, stdout io.Writer) error {
 
 func fileExists(path string) error { _, err := os.Stat(path); return err }
 
+// candidateProtected lists the paths an agent may not edit directly even
+// inside its own candidate worktree: contract semantics go through the delta,
+// evidence and the change record through the broker, and provider assets stay
+// kernel-owned. Everything else in a candidate is freely editable.
+var candidateProtected = []string{
+	"spec/**", "telos.toml", "policies/**",
+	"changes/*/change.json", "changes/*/evidence/**",
+	".claude/**", ".codex/**", ".agents/**", "CLAUDE.md", "AGENTS.md",
+}
+
 // runGuard is the provider PreToolUse hook endpoint. It is deliberately
 // fail-open on malformed input and outside Telos projects: a crashing guard
 // must never brick the agent. Silence is allow.
@@ -240,6 +348,13 @@ func runGuard(stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return nil
 	}
+	inCandidate := false
+	if repo, err := gitx.Open(root); err == nil {
+		if id, err := kernel.ChangeContext(repo); err == nil && id != "" {
+			inCandidate = true
+		}
+	}
+
 	toolName, _ := input["tool_name"].(string)
 	raw, _ := json.Marshal(input["tool_input"])
 	if strings.EqualFold(toolName, "Bash") || strings.EqualFold(toolName, "Shell") {
@@ -249,12 +364,50 @@ func runGuard(stdin io.Reader, stdout io.Writer) error {
 		if isTelosBrokerCommand(command) {
 			return gateBrokerCommand(root, stdout, command)
 		}
+		if inCandidate {
+			return nil // candidates are working space: builds and tests run freely
+		}
 		return denyGuard(stdout, "Telos strict mode permits shell execution only through the Telos CLI broker.")
 	}
-	if strings.EqualFold(toolName, "Edit") || strings.EqualFold(toolName, "Write") || strings.EqualFold(toolName, "apply_patch") {
-		return denyGuard(stdout, "Telos strict mode denies direct repository writes; use the Telos CLI broker.")
+	if strings.EqualFold(toolName, "Edit") || strings.EqualFold(toolName, "Write") {
+		if inCandidate {
+			var toolInput map[string]any
+			_ = json.Unmarshal(raw, &toolInput)
+			path, _ := toolInput["file_path"].(string)
+			rel := relToRoot(root, path)
+			if rel == "" {
+				return nil // outside the project: not our concern
+			}
+			if glob.MatchAny(candidateProtected, rel) {
+				return denyGuard(stdout, "Telos: "+rel+" is protected even in a candidate — contract changes go through contract.delta.md, evidence and the change record through the broker.")
+			}
+			return nil
+		}
+		return denyGuard(stdout, "Telos strict mode denies direct writes in the certified worktree; work in a Change candidate (telos change start).")
+	}
+	if strings.EqualFold(toolName, "apply_patch") {
+		if inCandidate {
+			return denyGuard(stdout, "Telos: use per-file edits in the candidate; apply_patch cannot be screened against protected paths.")
+		}
+		return denyGuard(stdout, "Telos strict mode denies direct writes in the certified worktree; work in a Change candidate (telos change start).")
 	}
 	return nil
+}
+
+// relToRoot converts a tool-provided path to a slash-separated repo-relative
+// path, or "" when it falls outside the project.
+func relToRoot(root, path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 func isTelosBrokerCommand(command string) bool {
@@ -293,18 +446,59 @@ func isTelosBrokerCommand(command string) bool {
 }
 
 // gateBrokerCommand screens an already-validated broker command for the
-// human-gated operations. At M1 the only gate is re-initialization (a fresh
-// genesis adopting the current tree); the Change-lifecycle gates (approve,
-// adopt, restore, abort) return with their commands.
+// human-gated operations: re-init (destructive reset), change approve
+// (digest-bound — denied outright when stale so the human is only prompted
+// when approval can succeed), and change abort (destructive).
 func gateBrokerCommand(root string, stdout io.Writer, command string) error {
 	fields := brokerCommandFields(command)
 	if len(fields) < 2 {
 		return nil
 	}
-	if fields[1] == "init" {
+	verb := ""
+	if len(fields) > 2 {
+		verb = fields[2]
+	}
+	switch {
+	case fields[1] == "init":
 		return askGuard(stdout, "Telos human gate — re-initialize Telos in an already-initialized project: this seals a NEW genesis certificate adopting the current tree as-is, outside any verified transition. Approve only if you deliberately want a destructive reset of the certified state.")
+	case fields[1] == "change" && verb == "approve":
+		return gateChangeApprove(root, stdout, fields)
+	case fields[1] == "change" && verb == "abort":
+		subject := "the named change"
+		if len(fields) > 3 {
+			subject = fields[3]
+		}
+		return askGuard(stdout, "Telos human gate — abort "+subject+": its candidate worktree and branch are removed, discarding unpromoted work. Approve only if that work should be lost.")
 	}
 	return nil
+}
+
+// gateChangeApprove denies stale approvals outright and asks otherwise,
+// naming the digest and what it binds. It reads the recorded review without
+// recomputation (the command itself recomputes on the exact content).
+func gateChangeApprove(root string, stdout io.Writer, fields []string) error {
+	repo, err := gitx.Open(root)
+	if err != nil {
+		return denyGuard(stdout, "Telos human gate: cannot open the candidate repository.")
+	}
+	doc, err := kernel.LoadChange(repo)
+	if err != nil {
+		return denyGuard(stdout, "Telos human gate: change approve runs inside a candidate with a recorded review; run telos change review first.")
+	}
+	digest := flagValue(fields, "--digest")
+	if doc.Review == nil || digest == "" || digest != doc.Review.Digest {
+		return denyGuard(stdout, "Telos human gate: the review digest is missing or stale; run telos change review and present the returned content to the user before approving.")
+	}
+	subject := doc.ID + " (" + doc.Category + ")"
+	claim := "this exact contract delta was presented to you and is exactly the intended behavior"
+	if doc.Review.Kind == "preserving_claim" {
+		claim = "this change was presented to you and preserves all certified behavior (refactor or hardening; a bug fix must strengthen the contract instead)"
+	}
+	prompt := "Telos human gate — approve " + subject + " with digest " + shortDigest(digest) + ". Approve only if " + claim + "."
+	if doc.Privileged {
+		prompt = "PRIVILEGED " + prompt + " This change touches certification policy content (telos.toml or policies/): review it with elevated scrutiny."
+	}
+	return askGuard(stdout, prompt)
 }
 
 // brokerCommandFields returns the whitespace-separated fields of the
@@ -316,6 +510,18 @@ func brokerCommandFields(command string) []string {
 		firstLine = firstLine[:heredoc]
 	}
 	return strings.Fields(firstLine)
+}
+
+func flagValue(fields []string, name string) string {
+	for i, field := range fields {
+		if field == name && i+1 < len(fields) {
+			return strings.Trim(fields[i+1], `"'`)
+		}
+		if value, ok := strings.CutPrefix(field, name+"="); ok {
+			return strings.Trim(value, `"'`)
+		}
+	}
+	return ""
 }
 
 func askGuard(stdout io.Writer, reason string) error {

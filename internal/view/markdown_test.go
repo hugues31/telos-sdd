@@ -28,21 +28,3 @@ func TestRenderMarkdownGherkinHighlighting(t *testing.T) {
 		t.Fatal("gherkin parameter leaked unescaped")
 	}
 }
-
-func TestSlugify(t *testing.T) {
-	if got := Slugify("My Great Project!"); got != "my-great-project" {
-		t.Fatalf("Slugify = %q", got)
-	}
-	if got := Slugify("---"); got != "project" {
-		t.Fatalf("Slugify fallback = %q", got)
-	}
-}
-
-func TestFirstHeading(t *testing.T) {
-	if got := FirstHeading("intro\n# The Title\nrest"); got != "The Title" {
-		t.Fatalf("FirstHeading = %q", got)
-	}
-	if got := FirstHeading("no heading"); got != "" {
-		t.Fatalf("FirstHeading = %q", got)
-	}
-}

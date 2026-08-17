@@ -1,33 +1,59 @@
 # Threat model
 
+Telos makes undeclared changes visible and forces human decisions through
+native permission prompts. It is not an operating-system privilege boundary.
+
+## SEALED vs ATTESTED
+
+The default seal is `SEALED`: HMAC-SHA256 with a secret embedded in the
+binary, over the exact certificate payload bytes. It detects every ordinary
+out-of-protocol edit and makes a valid seal producible only through the
+kernel's verified-transition path (`Seal(VerifiedTransition)` — there is no
+sign-arbitrary-state API). It does NOT resist an adversary who can run the
+same binary against a rewritten history: such an adversary can re-run the
+whole protocol. A future `ATTESTED` mode (signed commits/tags, external CI
+attestation, remote signing) can raise that bar; the certificate format
+already carries the `seal.mode` field for it.
+
 ## Protected against
 
-- ordinary direct Edit, Write, apply-patch and obvious shell mutation attempts observed by provider hooks;
-- undeclared code changes, through code-root recomputation before and after every broker operation and in `telos verify`;
-- silent spec changes, through spec-root recomputation: any pending diff must pass review and a native human approval prompt before implementation resumes;
-- an approval binding to different bytes than were reviewed: the digest is recomputed at the gate by both the guard and the command, and a stale digest is denied outright;
-- unjustified code, through mandatory file-level `telos:` annotations validated on every patch post-image against the cited rules;
-- specification without proof, through per-rule tagged tests and real execution of the configured test commands;
-- tautological or decorative tests, through the witnessed red-green cycle: a rule's test must be seen failing by the broker on a green baseline before any implementation, and the sealed test bytes may not change until the suite is witnessed green — a test the suite already passes is rejected unless the human accepts the explicit `--expect-pass` adoption claim at a permission prompt;
-- a test rewritten to satisfy the implementation: sealed files change only through another witnessed-red test-only patch, and test references cannot be smuggled in outside a rule's own cycle;
-- test commands that mutate tracked files, through post-run root recomputation;
-- an agent re-baselining away a corruption: `telos init` inside an initialized project raises an `ask` permission prompt;
-- the broker's own hooks being patched: `telos apply` refuses paths under the provider directories and managed instruction files.
+- Direct writes in the certified worktree (guard denies Edit/Write/apply_patch
+  and non-broker shell); protected paths inside candidates (contract, config,
+  policies, change record, evidence, findings).
+- Silent adoption of out-of-band edits: corruption is terminal for the state;
+  the only exits are salvage (work moves) or restore (human-gated discard).
+- Approvals binding to different bytes than reviewed: the digest is the
+  folded contract tree OID, re-checked by the guard before prompting and by
+  the kernel at approve/ready/promote.
+- Tests written after the fact or weakened to fit: the red witness requires
+  failure on a green baseline, seals exact blob OIDs, and green requires the
+  same bytes; mutation evidence reports tests that cannot tell a mutant from
+  the real program.
+- Stale proofs after a base change: evidence is content-addressed; a changed
+  closure invalidates it, an unknown closure invalidates conservatively.
+- Concurrent promotions: the branch and its certificate move in one ref
+  transaction with a CAS on the base.
+- Project policy weakening kernel invariants: the kernel floor is embedded
+  and unified with project CUE — weakening is a compile-time conflict.
+- Certificate notes copied between commits: the payload names its commit.
 
 ## Not protected against
 
-- a malicious process with the same OS privileges that bypasses hooks and rewrites source, state, and Git history consistently;
-- a test that discriminates for the wrong reason: the witnessed red proves the test distinguishes the pre- and post-implementation trees, not that it asserts the rule's meaning — an over-specified or misdirected assertion passes the cycle and remains the independent verifier's and the PR reviewer's to catch;
-- a flaky or time-dependent suite, which can produce false red and false green witnesses — the reliability of `test_commands` is a human responsibility in `telos.toml`;
-- a compliance annotation on unrelated code that also fools the independent verifier and the human reviewing the spec diff — the file-level guarantee is mechanical, sub-file honesty is audited, not proven;
-- an incorrect but internally consistent product decision approved by the user;
-- compromised dependencies, compilers, test runners, agent providers or release infrastructure;
-- a user who approves harness permission prompts without reading them, or a provider that does not honor `PreToolUse` permission decisions;
-- behavior outside the exercised environment;
-- formal semantic equivalence between prose, scenarios and code.
+- A same-privilege malicious process rewriting source, notes, and history
+  consistently through the Telos binary itself.
+- A test that discriminates for the wrong reason: witnessing proves the test
+  distinguishes the states, not that it means what the requirement says —
+  that is the verifier's audit and the human's review.
+- An incorrect but internally consistent approved product decision.
+- Compromised dependencies, compilers, test runners, providers, or release
+  infrastructure; a user who approves prompts without reading; a provider
+  that does not honor PreToolUse decisions.
+- The web view leaks nothing off-host (loopback-only, GET-only, Host-checked,
+  CSP, no external assets) but any local process can read it, like any local
+  file.
 
 ## Trust anchors
 
-Reviewers trust the Telos binary, the Git history, provider hook installation, the configured test commands, and the independent-verifier process. Local hashes prove byte identity, not who controlled the operating-system account.
-
-Hostile guarantees require a privilege-separated mutation service or external signer whose key is unavailable to coding agents. Signed CI attestations remain the intended next trust layer.
+The Telos binary, Git history, the hook installation, the configured test
+commands, and the human at the prompts. Hashes prove byte identity, not who
+controlled the OS account.

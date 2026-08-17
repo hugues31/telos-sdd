@@ -54,14 +54,16 @@ func main() {
 func validate(root string) []string {
 	var errs []string
 
-	// Parity: adapters must equal a fresh render of roles.go.
+	// Parity: adapters must equal a fresh render of roles.go. Line endings
+	// are normalized first so a CRLF checkout (Windows runners) does not
+	// masquerade as drift.
 	for _, r := range roles {
 		for _, pair := range [][2]string{
 			{filepath.Join(root, "adapters", "claude", "agents", r.Name+".md"), claudeAdapter(r)},
 			{filepath.Join(root, "adapters", "codex", "agents", r.Name+".toml"), codexAdapter(r)},
 		} {
 			data, err := os.ReadFile(pair[0])
-			if err != nil || string(data) != pair[1] {
+			if err != nil || strings.ReplaceAll(string(data), "\r\n", "\n") != pair[1] {
 				errs = append(errs, pair[0]+" drifted from roles.go; run `go generate ./bundle`")
 			}
 		}

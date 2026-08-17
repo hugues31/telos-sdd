@@ -12,6 +12,7 @@ import (
 	"github.com/hugues31/telos-sdd/internal/contract"
 	"github.com/hugues31/telos-sdd/internal/evidence"
 	"github.com/hugues31/telos-sdd/internal/gitx"
+	"github.com/hugues31/telos-sdd/internal/provenance"
 )
 
 // readyState is everything the certification gates computed, reused by
@@ -231,7 +232,7 @@ func readyComputation(wt *gitx.Repo, cfg Config, echo io.Writer) (*readyState, e
 		if oid, err := wt.RevParse("HEAD:" + changeDir(r.Change) + "/evidence/" + evidence.FileName(r.Key())); err == nil {
 			blob = string(oid)
 		}
-		return EvidenceEntry{ID: r.ID, RecordBlob: blob, Reused: false, SourceChange: r.Change}
+		return EvidenceEntry{ID: r.ID, RecordBlob: blob, Reused: r.SurvivedRebase || r.Change != doc.ID, SourceChange: r.Change}
 	}
 	var entries []EvidenceEntry
 	records, err = loadRecordsAt(wt, "HEAD")
@@ -272,6 +273,61 @@ func ReadyChange(wt *gitx.Repo, cfg Config, echo io.Writer) (ReadyReport, error)
 		ID: state.doc.ID, Digest: state.bundle.Digest, Kind: state.bundle.Kind,
 		Evidence: state.entries, Requirements: state.verified, FindingsOpen: state.openIDs,
 	}, nil
+}
+
+// buildProvenance derives the promotion's provenance document from the
+// candidate's diff and its witnessed evidence. Best-effort: a nil return
+// skips the file rather than failing the promotion.
+func buildProvenance(wt *gitx.Repo, doc *ChangeDoc) *provenance.Doc {
+	records, err := loadRecordsAt(wt, "HEAD")
+	if err != nil {
+		return nil
+	}
+	provenReqs := map[string]bool{}
+	verifiedBy := map[string][]string{}
+	evidenceIDs := map[string]string{}
+	for _, r := range records {
+		if r.Change != doc.ID || r.Result.Status != "pass" {
+			continue
+		}
+		if r.Kind == evidence.KindRedGreen || r.Adopted {
+			for _, req := range r.Requirements {
+				provenReqs[req] = true
+				evidenceIDs[req] = r.ID
+				if r.Witness != nil && r.Witness.Red != nil {
+					for _, s := range r.Witness.Red.SealedTests {
+						verifiedBy[req] = append(verifiedBy[req], s.Path)
+					}
+				}
+			}
+		}
+	}
+	if len(provenReqs) == 0 {
+		return nil
+	}
+	var reqs []string
+	for req := range provenReqs {
+		reqs = append(reqs, req)
+	}
+
+	changed, err := wt.DiffNames(doc.Base, "HEAD")
+	if err != nil {
+		return nil
+	}
+	code := map[string]provenance.FileVersions{}
+	for _, p := range changed {
+		if strings.HasPrefix(p, "changes/") || strings.HasPrefix(p, contract.Dir+"/") || p == ConfigFile {
+			continue
+		}
+		head, err := wt.BlobAt("HEAD", p)
+		if err != nil {
+			continue // deleted file
+		}
+		base, _ := wt.BlobAt(doc.Base, p)
+		code[p] = provenance.FileVersions{Base: base, Head: head}
+	}
+	built := provenance.Build(doc.ID, reqs, code, verifiedBy, evidenceIDs)
+	return &built
 }
 
 // PromoteResult is the outcome of an atomic promotion.
@@ -321,6 +377,20 @@ func PromoteChange(wt *gitx.Repo, cfg Config, version string, echo io.Writer) (P
 		}
 		kept = append(kept, gitx.TreeEntry{Mode: "100644", Path: path, OID: blob})
 	}
+	// Record provenance from the verified transition: REQ → symbols/tests,
+	// replacing V1's source annotations (docs/design-v2.md §11).
+	if provDoc := buildProvenance(wt, doc); provDoc != nil {
+		provBytes, err := json.MarshalIndent(provDoc, "", "  ")
+		if err != nil {
+			return result, err
+		}
+		provBlob, err := wt.HashObject(append(provBytes, '\n'))
+		if err != nil {
+			return result, err
+		}
+		kept = append(kept, gitx.TreeEntry{Mode: "100644", Path: changeDir(doc.ID) + "/provenance.json", OID: provBlob})
+	}
+
 	promotedDoc := *doc
 	promotedDoc.Status = ChangePromoted
 	promotedDoc.Review = nil

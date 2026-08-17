@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,8 +177,6 @@ func TestLoopFeature(t *testing.T) {
 // the diff rides the normal loop; restore discards; an out-of-band commit is
 // corruption of the certified chain.
 func TestLoopSalvage(t *testing.T) {
-	t.Skip("V2 acceptance loop 2 — un-skipped at M4 (docs/design-v2.md §0)")
-
 	bin := buildCLI(t)
 	root := setupCertified(t, bin)
 
@@ -237,8 +236,6 @@ func TestLoopSalvage(t *testing.T) {
 // where only evidence whose dependency closure intersects the rebased diff is
 // recomputed — disjoint changes re-certify almost free.
 func TestLoopConcurrent(t *testing.T) {
-	t.Skip("V2 acceptance loop 3 — un-skipped at M4 (docs/design-v2.md §0)")
-
 	bin := buildCLI(t)
 	root := t.TempDir()
 	git(t, root, "init", "--quiet", "-b", "main")
@@ -284,10 +281,19 @@ func TestLoopConcurrent(t *testing.T) {
 
 	// B's base is stale; green(A) and green(B) do not imply green(A+B).
 	expectCode(t, runCLI(t, bin, wtB, "", "change", "ready"), "TELOS_BASE_STALE", "ready B before rebase")
-	expectOK(t, runCLI(t, bin, wtB, "", "change", "rebase"), "rebase B")
+	rebased := expectOK(t, runCLI(t, bin, wtB, "", "change", "rebase"), "rebase B")
 
 	// Selective revalidation: A never touched pkgb's closure, so B's witnessed
-	// red/green survives the rebase; the whole-module suite is recomputed.
+	// red/green survives the rebase. A DID touch spec/ (REQ-101 folded in),
+	// so B's folded-contract digest changed and the approval is re-asked —
+	// approvals bind to exact content, never to intent.
+	if kept, _ := rebased["approvals_kept"].(bool); kept {
+		t.Fatalf("approval must not survive a rebase that changed the contract context: %v", rebased)
+	}
+	if fmt.Sprint(rebased["evidence_kept"]) == "[]" {
+		t.Fatalf("pkgb's witnessed evidence should survive the rebase: %v", rebased)
+	}
+	approveChange(t, bin, wtB)
 	expectOK(t, runCLI(t, bin, wtB, "", "change", "ready"), "ready B")
 	expectOK(t, runCLI(t, bin, wtB, "", "change", "promote"), "promote B")
 	expectOK(t, runCLI(t, bin, root, "", "verify"), "verify (both promoted)")

@@ -89,8 +89,11 @@ type Record struct {
 	Witness      *Witness  `json:"witness,omitempty"`
 	Reusable     bool      `json:"reusable"`
 	Adopted      bool      `json:"adopted,omitempty"`
-	Change       string    `json:"change"`
-	CreatedAt    string    `json:"created_at"`
+	// SurvivedRebase marks a record whose dependency closure was recomputed
+	// unchanged across a base change: the proof was carried, not re-run.
+	SurvivedRebase bool   `json:"survived_rebase,omitempty"`
+	Change         string `json:"change"`
+	CreatedAt      string `json:"created_at"`
 }
 
 // Key is the content address of the record's inputs: two records with the

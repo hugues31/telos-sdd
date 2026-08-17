@@ -246,6 +246,7 @@ type ChangeSummary struct {
 	Status    string `json:"status"`
 	Category  string `json:"category"`
 	Title     string `json:"title"`
+	Base      string `json:"base"`
 	BaseStale bool   `json:"base_stale"`
 	Worktree  string `json:"worktree"`
 }
@@ -275,6 +276,7 @@ func OpenChanges(repo *gitx.Repo) ([]ChangeSummary, error) {
 				summary.Status = doc.Status
 				summary.Category = doc.Category
 				summary.Title = doc.Title
+				summary.Base = doc.Base
 				if tip, err := repo.RevParse(doc.TargetBranch); err == nil {
 					summary.BaseStale = string(tip) != doc.Base
 				}

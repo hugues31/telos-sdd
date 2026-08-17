@@ -3,14 +3,28 @@ package telos
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/hugues31/telos-sdd/internal/coded"
+	"github.com/hugues31/telos-sdd/internal/contract"
+	"github.com/hugues31/telos-sdd/internal/ctxpack"
+	"github.com/hugues31/telos-sdd/internal/gitx"
 	"github.com/hugues31/telos-sdd/internal/graph"
 	"github.com/hugues31/telos-sdd/internal/index"
+	"github.com/hugues31/telos-sdd/internal/kernel"
 )
+
+func osReadFile(root, rel string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+}
+
+func contractReqRefs(data []byte) []string {
+	return contract.ReqRefs(data)
+}
 
 // indexBlock is attached to every knowledge-layer result so agents can see
 // what tree the answer describes.
@@ -192,6 +206,52 @@ func runImpact(root string, args []string) (commandExecution, error) {
 	result := map[string]any{"index": indexBlock(db), "center": id, "impact": grouped, "truncated": sub.Truncated}
 	total := len(sub.Nodes) - 1
 	return commandExecution{Command: "impact", Result: result, Human: fmt.Sprintf("%d node(s) in the impact neighborhood of %s.", total, id)}, nil
+}
+
+func runContext(repo *gitx.Repo, root string, args []string, stderr io.Writer) (commandExecution, error) {
+	f := flags("context", stderr)
+	budget := f.Int("budget", 16000, "token budget for the pack")
+	focus := f.String("focus", "", "comma-separated node ids to seed retrieval")
+	if err := f.Parse(args); err != nil {
+		return commandExecution{}, err
+	}
+	var seeds []graph.NodeID
+	for _, id := range strings.Split(*focus, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			seeds = append(seeds, graph.NodeID(strings.ToUpper(id)))
+		}
+	}
+	intentText := strings.Join(f.Args(), " ")
+
+	// Inside a candidate, the change itself seeds retrieval: its intent text
+	// and the requirement ids its delta declares.
+	if doc, err := kernel.LoadChange(repo); err == nil {
+		if data, rerr := osReadFile(repo.WorkDir, "changes/"+doc.ID+"/intent.md"); rerr == nil {
+			intentText = strings.TrimSpace(intentText + " " + string(data))
+		}
+		if data, rerr := osReadFile(repo.WorkDir, "changes/"+doc.ID+"/contract.delta.md"); rerr == nil {
+			for _, req := range contractReqRefs(data) {
+				seeds = append(seeds, graph.NodeID(req))
+			}
+		}
+	}
+	if len(seeds) == 0 && intentText == "" {
+		return commandExecution{}, coded.New("TELOS_INPUT_REQUIRED", "context needs --focus ids or free text (or a candidate with an intent)")
+	}
+
+	db, err := openIndex(root)
+	if err != nil {
+		return commandExecution{}, err
+	}
+	defer db.Close()
+	pack, err := ctxpack.Compile(db, seeds, intentText, *budget)
+	if err != nil {
+		return commandExecution{}, err
+	}
+	result := map[string]any{"index": indexBlock(db), "pack": pack}
+	human := fmt.Sprintf("Context pack: %d/%d estimated tokens across %d section(s), %d omission(s).",
+		pack.EstimatedTokens, pack.Budget, len(pack.Sections), len(pack.Omitted))
+	return commandExecution{Command: "context", Result: result, Human: human}, nil
 }
 
 func runExplain(root string, args []string) (commandExecution, error) {

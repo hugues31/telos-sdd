@@ -7,6 +7,7 @@ import (
 	"github.com/hugues31/telos-sdd/internal/coded"
 	"github.com/hugues31/telos-sdd/internal/contract"
 	"github.com/hugues31/telos-sdd/internal/gitx"
+	"github.com/hugues31/telos-sdd/internal/policy"
 )
 
 // GenesisOptions parameterizes the one sanctioned adoption of an existing
@@ -41,6 +42,10 @@ func Genesis(repo *gitx.Repo, cfg Config, opts GenesisOptions) (*Certificate, er
 	policyBlob, err := repo.RevParse(string(tree) + ":" + ConfigFile)
 	if err != nil {
 		return nil, coded.New("TELOS_NOT_INITIALIZED", "telos.toml is not part of the genesis tree")
+	}
+	eff, err := policy.Load(repo.WorkDir)
+	if err != nil {
+		return nil, err
 	}
 	specTree, err := repo.SubtreeOf(string(tree), contract.Dir)
 	if err != nil {
@@ -82,7 +87,7 @@ func Genesis(repo *gitx.Repo, cfg Config, opts GenesisOptions) (*Certificate, er
 		ParentCertified: "",
 		Change:          ChangeInfo{ID: "CHG-000", Category: CategoryGenesis, Base: ""},
 		Contract:        ContractInfo{Tree: string(specTree), Requirements: sortedRequirementIDs(parsed), DeltaFrom: ""},
-		Policy:          PolicyInfo{Blob: string(policyBlob), Hash: ""},
+		Policy:          PolicyInfo{Blob: string(policyBlob), Hash: eff.Hash},
 		Approvals:       []Approval{{Kind: "adoption", Digest: string(tree), At: now}},
 		Verification:    Verification{Evidence: []EvidenceEntry{}, RequirementsVerified: []string{}, FindingsOpen: []string{}},
 		Toolchain:       Toolchain{Telos: opts.Version, Go: runtime.Version()},

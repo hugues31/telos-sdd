@@ -40,11 +40,12 @@ Usage:
   telos related <ID> [--depth N] [--all-edges] [--json]
   telos impact <ID> [--json]
   telos explain <symbol> [--json]
+  telos context [--budget N] [--focus IDs] [query...] [--json]
   telos guard
   telos version [--json]
 
-The context compiler, policies, and the web view arrive milestone by
-milestone in the v0.6 rewrite; see docs/design-v2.md.`
+Certification policy lives in policies/*.cue over an embedded kernel floor.
+The web view arrives with M8 of the v0.6 rewrite; see docs/design-v2.md.`
 
 // Run dispatches the CLI. Every command supports the stable JSON envelope
 // {ok, command, result, next_actions, error{code,message,paths}}.
@@ -191,6 +192,9 @@ func Run(args []string, version string, stdin io.Reader, stdout, stderr io.Write
 		return finish(execution, err)
 	case "explain":
 		execution, err := runExplain(root, args[1:])
+		return finish(execution, err)
+	case "context":
+		execution, err := runContext(repo, root, args[1:], stderr)
 		return finish(execution, err)
 	default:
 		return finish(commandExecution{}, coded.New("TELOS_INPUT_INVALID", fmt.Sprintf("unknown command %q; run `telos help`", args[0])))

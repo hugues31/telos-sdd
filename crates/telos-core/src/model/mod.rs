@@ -4,8 +4,14 @@
 //! A `TelosModel` is only ever produced by [`crate::semantic::build_model`],
 //! which is what fills `scenario_owner`, `graph` and `sources` and what
 //! guarantees that every reference inside it resolves.
+//!
+//! [`change::Change`] lives here too but is deliberately *not* a `TelFile`
+//! variant: a change file is its own kind, parsed and stored by its own
+//! store, and is never folded into a `TelosModel` -- it describes a pending
+//! mutation *of* the spec, not a part of it.
 
 pub mod binding;
+pub mod change;
 pub mod constraint;
 pub mod expr;
 pub mod intent;
@@ -13,6 +19,7 @@ pub mod notion;
 pub mod scenario;
 
 pub use binding::{Binding, TestRef};
+pub use change::{Change, ChangeStatus, StagedOp};
 pub use constraint::{Constraint, ConstraintKind, Rule, Scope};
 pub use expr::{AttrRef, CmpOp, Expr, Literal, Operand};
 pub use intent::{Action, Intent, IntentStatus, Statement};

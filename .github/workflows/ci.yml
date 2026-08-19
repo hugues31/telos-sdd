@@ -17,48 +17,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          go-version: stable
-      - run: go test ./...
-      - run: go vet ./...
-      - name: gofmt
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo fmt
         if: runner.os == 'Linux'
-        run: test -z "$(gofmt -l .)"
-      - name: Bundle parity and cross-checks
-        run: go run ./tools/gen-bundle -check
-      - name: Build CLI
-        run: go build ./cmd/telos
-      - name: Confirm generated files are clean
-        if: runner.os == 'Linux'
-        run: |
-          go generate ./bundle
-          git diff --exit-code
-
-  cross-compile:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: stable
-      - name: Cross-compile every release target (CGO-free)
-        run: |
-          set -eu
-          mkdir -p /tmp/xc
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
-            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
-              go build -trimpath -o "/tmp/xc/telos-${target%/*}-${target#*/}" ./cmd/telos
-          done
-      - name: Enforce binary size budget (60 MB)
-        run: |
-          set -eu
-          budget=$((60 * 1024 * 1024))
-          for bin in /tmp/xc/telos-*; do
-            size=$(stat -c%s "$bin")
-            echo "$(basename "$bin"): $((size / 1024 / 1024)) MB"
-            if [ "$size" -gt "$budget" ]; then
-              echo "::error::$(basename "$bin") exceeds the 60 MB budget"
-              exit 1
-            fi
-          done
+        run: cargo fmt --all --check

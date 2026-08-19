@@ -1,6 +1,2 @@
-/telos
-/dist/
-/coverage.out
-*.test
-.DS_Store
-
+/target
+/.superpowers/

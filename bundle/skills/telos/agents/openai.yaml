@@ -1,6 +1,0 @@
-interface:
-  display_name: "Telos"
-  short_description: "Certified-state development: verified transitions from intent to promoted code"
-  default_prompt: "Use $telos to take this repository change from intent through an approved contract delta, witnessed proof, and atomic promotion."
-policy:
-  allow_implicit_invocation: true

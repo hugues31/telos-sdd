@@ -509,7 +509,10 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
+ "serde",
+ "serde_json",
  "telos-core",
+ "tempfile",
 ]
 
 [[package]]

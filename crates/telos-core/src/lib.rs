@@ -1,5 +1,6 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod config;
 pub mod emit;
 pub mod error;
 pub mod graph;
@@ -9,3 +10,4 @@ pub mod semantic;
 pub mod span;
 pub mod suggest;
 pub mod syntax;
+pub mod workspace;

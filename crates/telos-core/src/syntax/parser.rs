@@ -192,10 +192,12 @@ pub fn parse_bindings_file(path: &RepoPath, src: &str) -> Result<Vec<Binding>, V
 /// emitter writes for an entity, nested or not, this reads back.
 ///
 /// Two rules of Annex C live here rather than in the grammar, because they
-/// relate two lines rather than describing one: a `digest` belongs to an
-/// `approved` change and to no other, and it is a `sha256:<64 hex>` (D3).
-/// Everything else about a change -- that its ops are appliable, that no
-/// other change claims the same paths -- is a job for later passes.
+/// relate two lines rather than describing one: a `digest` belongs to a
+/// change that has been approved -- `approved`, or the `implementing` it
+/// moves on to in M3 (D16) -- and to no other, and it is a
+/// `sha256:<64 hex>` (D3). Everything else about a change -- that its ops
+/// are appliable, that no other change claims the same paths -- is a job
+/// for later passes.
 pub fn parse_change_file(path: &RepoPath, src: &str) -> Result<Change, Vec<Diagnostic>> {
     parse_file(path, src, |p: &mut P<'_>| p.change_file())
 }
@@ -1288,13 +1290,18 @@ impl<'a> P<'a> {
         self.end_of_file();
 
         // Status and digest are one statement written on two lines: the
-        // digest *is* the approval (D3), so it is present exactly when the
-        // status is `approved`. Checked only when the status line itself
-        // parsed -- otherwise the complaint would be about a status nobody
-        // wrote.
+        // digest *is* the approval (D3), so it is present exactly on the two
+        // statuses that carry one: `approved`, and the `implementing` an M3
+        // change moves on to -- which is still an approved change, in flight
+        // (D16: reconcile accepts either), and which could never be
+        // reconciled if writing it dropped the digest.
+        //
+        // Checked only when the status line itself parsed -- otherwise the
+        // complaint would be about a status nobody wrote.
         if let Some(status) = status {
-            let approved = status == ChangeStatus::Approved;
-            let diag = match (approved, digest_span) {
+            let carries_digest =
+                matches!(status, ChangeStatus::Approved | ChangeStatus::Implementing);
+            let diag = match (carries_digest, digest_span) {
                 (true, None) => Some(self.diag_at(
                     status_span,
                     "an approved change must carry its digest".to_string(),
@@ -1302,7 +1309,7 @@ impl<'a> P<'a> {
                 )),
                 (false, Some(span)) => Some(self.diag_at(
                     span,
-                    "digest is only valid on an approved change".to_string(),
+                    "digest is only valid on an approved or implementing change".to_string(),
                     None,
                 )),
                 _ => None,
@@ -3072,11 +3079,12 @@ mod tests {
         #[test]
         fn every_status_is_accepted() {
             for (word, status) in CHANGE_STATUSES {
-                let digest = if status == ChangeStatus::Approved {
-                    format!("  digest \"sha256:{}\"\n", "0".repeat(64))
-                } else {
-                    String::new()
-                };
+                let digest =
+                    if matches!(status, ChangeStatus::Approved | ChangeStatus::Implementing) {
+                        format!("  digest \"sha256:{}\"\n", "0".repeat(64))
+                    } else {
+                        String::new()
+                    };
                 let src = format!("change CHG-0001 \"x\" {{\n  status {word}\n{digest}}}\n");
                 assert_eq!(parse(&src).status, status);
             }
@@ -3113,28 +3121,35 @@ mod tests {
         }
 
         #[test]
-        fn the_digest_and_the_status_must_agree() {
-            let approved_no_digest = diags("change CHG-0001 \"x\" {\n  status approved\n}\n");
-            assert_eq!(approved_no_digest.len(), 1);
-            assert_eq!(
-                approved_no_digest[0].message,
-                "an approved change must carry its digest"
-            );
-            // Reported at the `status` line: that is the line the writer
-            // has to look at to decide which of the two to fix.
-            assert_eq!(
-                (approved_no_digest[0].line, approved_no_digest[0].col),
-                (Some(2), Some(3))
-            );
+        fn a_status_that_carries_an_approval_must_carry_its_digest() {
+            // `implementing` is an approved change in flight (D16), so it
+            // owes the same digest -- and one message covers both, since
+            // both are approved changes.
+            for status in ["approved", "implementing"] {
+                let found = diags(&format!(
+                    "change CHG-0001 \"x\" {{\n  status {status}\n}}\n"
+                ));
+                assert_eq!(found.len(), 1, "for `{status}`: {found:#?}");
+                assert_eq!(
+                    found[0].message, "an approved change must carry its digest",
+                    "for `{status}`"
+                );
+                // Reported at the `status` line: that is the line the
+                // writer has to look at to decide which of the two to fix.
+                assert_eq!((found[0].line, found[0].col), (Some(2), Some(3)));
+            }
+        }
 
+        #[test]
+        fn a_status_that_carries_no_approval_may_not_carry_a_digest() {
             let digest = format!("  digest \"sha256:{}\"\n", "0".repeat(64));
-            for status in ["open", "drafted", "implementing", "abandoned"] {
+            for status in ["open", "drafted", "abandoned"] {
                 let src = format!("change CHG-0001 \"x\" {{\n  status {status}\n{digest}}}\n");
                 let found = diags(&src);
-                assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+                assert_eq!(found.len(), 1, "for `{status}`: {found:#?}");
                 assert_eq!(
-                    found[0].message,
-                    "digest is only valid on an approved change"
+                    found[0].message, "digest is only valid on an approved or implementing change",
+                    "for `{status}`"
                 );
                 assert_eq!((found[0].line, found[0].col), (Some(3), Some(3)));
             }

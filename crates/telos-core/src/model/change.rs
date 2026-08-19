@@ -171,9 +171,13 @@ pub struct Change {
     pub id: ChangeId,
     pub motivation: String,
     pub status: ChangeStatus,
-    /// The digest frozen by `approve`. `Some` exactly when the status is
-    /// `Approved` (or, in M3, `Implementing`); comparing it against a fresh
-    /// [`Change::ops_digest`] is what detects a delta edited after review.
+    /// The digest frozen by `approve`. `Some` exactly on the two statuses
+    /// that carry an approval, `Approved` and (in M3) `Implementing` --
+    /// `implementing` is an approved change in flight, and reconcile
+    /// accepts either (D16), so the digest must survive the transition.
+    /// Comparing it against a fresh [`Change::ops_digest`] is what detects
+    /// a delta edited after review; `parse_change_file` enforces the
+    /// correspondence on the way in.
     pub approved_digest: Option<String>,
     /// Staged order, never sorted: the order is part of the transaction.
     pub ops: Vec<StagedOp>,

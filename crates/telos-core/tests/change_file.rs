@@ -133,12 +133,25 @@ const REMOVE_AND_ACCEPT: &str = concat!(
     "}\n",
 );
 
-fn variants() -> [&'static str; 4] {
+/// The M3 status an approved change moves on to (D16). It keeps the digest
+/// its approval froze -- reconcile accepts `approved` *or* `implementing`,
+/// and a change that lost its digest on the way could never be reconciled.
+const IMPLEMENTING_WITH_DIGEST: &str = concat!(
+    "change CHG-0005 \"Settle the ledger\" {\n",
+    "  status implementing\n",
+    "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+    "\n",
+    "  op remove notion Ledger\n",
+    "}\n",
+);
+
+fn variants() -> [&'static str; 5] {
     [
         OPEN_EMPTY,
         DRAFTED_ONE_ADD,
         APPROVED_MULTI,
         REMOVE_AND_ACCEPT,
+        IMPLEMENTING_WITH_DIGEST,
     ]
 }
 
@@ -241,7 +254,7 @@ fn an_unknown_status_names_the_five_it_could_have_been() {
 }
 
 #[test]
-fn a_digest_on_a_change_that_is_not_approved_is_rejected() {
+fn a_digest_on_a_change_that_carries_no_approval_is_rejected() {
     let src = concat!(
         "change CHG-0001 \"x\" {\n",
         "  status drafted\n",
@@ -250,14 +263,26 @@ fn a_digest_on_a_change_that_is_not_approved_is_rejected() {
     );
     assert_reports(
         &parse_err(src),
-        "digest is only valid on an approved change",
+        "digest is only valid on an approved or implementing change",
     );
 }
 
 #[test]
-fn an_approved_change_without_a_digest_is_rejected() {
-    let src = concat!("change CHG-0001 \"x\" {\n", "  status approved\n", "}\n");
-    assert_reports(&parse_err(src), "an approved change must carry its digest");
+fn an_approved_or_implementing_change_without_a_digest_is_rejected() {
+    for status in ["approved", "implementing"] {
+        let src = format!("change CHG-0001 \"x\" {{\n  status {status}\n}}\n");
+        assert_reports(&parse_err(&src), "an approved change must carry its digest");
+    }
+}
+
+#[test]
+fn an_implementing_change_keeps_the_digest_of_its_approval() {
+    let change = parse_ok(IMPLEMENTING_WITH_DIGEST);
+    assert_eq!(change.status, ChangeStatus::Implementing);
+    assert_eq!(
+        change.approved_digest.as_deref(),
+        Some("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+    );
 }
 
 #[test]

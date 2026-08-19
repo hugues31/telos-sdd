@@ -439,6 +439,65 @@ fn show_of_a_change_matches_the_annex_e_shape() {
             "relations": { "out": [], "in": [] }
         })
     );
+    // The same bytes that are on disk -- for a file telos wrote, the
+    // canonical form and the file's text are one and the same (D1).
+    assert_eq!(
+        envelope["result"]["canonical"],
+        json!(fs::read_to_string(tmp.path().join(CHG_0001)).unwrap())
+    );
+}
+
+/// `canonical` is the *file's* text, not a re-emission of the parsed
+/// change: `telos/changes/` is outside the seal, so a hand-edited but
+/// still parseable change file is legal state, and `show` must report what
+/// is really on disk.
+///
+/// The discriminator is a valid file laid out non-canonically -- four
+/// spaces of indentation where the emitter writes two. It parses (the
+/// grammar is not whitespace-sensitive), so `entity` is fully reported,
+/// while `emit_change` would render it back with two spaces: a `show` that
+/// re-emitted would silently answer with bytes that are on nobody's disk.
+#[test]
+fn show_of_a_change_reports_the_file_text_not_a_re_emission() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+
+    let on_disk = "change CHG-0001 \"Invoices can be settled\" {\n    status open\n}\n";
+    assert_ne!(
+        on_disk, CANONICAL_OPEN_CHANGE,
+        "the point of this test is that the two differ"
+    );
+    fs::write(tmp.path().join(CHG_0001), on_disk).unwrap();
+
+    let out = telos(tmp.path(), &["show", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "a non-canonical but valid change file still shows: {:?}",
+        out.status
+    );
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["result"]["canonical"], json!(on_disk));
+    // The entity is still read through the parser, so it is unaffected by
+    // the layout.
+    assert_eq!(
+        envelope["result"]["entity"],
+        json!({
+            "id": "CHG-0001",
+            "status": "open",
+            "motivation": MOTIVATION,
+            "ops": []
+        })
+    );
+
+    // Human mode prints the same file text.
+    let out = telos(tmp.path(), &["show", "CHG-0001"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{on_disk}\nrelations:\n")
+    );
 }
 
 #[test]

@@ -2,9 +2,10 @@
 //! relations, resolving a typed id (`INT-0042`, `SCN-0107`, `CON-0003`) or a
 //! bare notion name (`Invoice`) against the loaded spec.
 //!
-//! The canonical block is never reformatted here -- it is exactly what
-//! [`telos_core::emit`] produces for the entity, reused byte for byte, so
-//! `show` and the emitter can never disagree about what "canonical" means.
+//! A *spec* entity's canonical block is never reformatted here -- it is
+//! exactly what [`telos_core::emit`] produces for it, reused byte for byte,
+//! so `show` and the emitter can never disagree about what "canonical"
+//! means for a sealed file (a change is the exception, see below).
 //! A scenario has no canonical block of its own (a scenario is nested
 //! inside its owning intent's file, not a file in its own right), so
 //! `show SCN-...` prints the *owning intent's* block, headed by a line that
@@ -12,13 +13,18 @@
 //!
 //! `show CHG-...` is the one argument resolved outside the spec model
 //! entirely: a change lives in the change store, not in `spec_files`, so it
-//! is looked up there and reports the empty relations of Annex E -- see
-//! [`show_change`].
+//! is looked up there, reports the empty relations of Annex E, and -- alone
+//! among the entities -- prints the bytes of its file rather than a
+//! re-emission of them, because a change file is not sealed and may legally
+//! differ from what the emitter would write. See [`show_change`].
+
+use std::fs;
 
 use serde_json::{Value, json};
 
 use telos_core::changes::read_change;
-use telos_core::emit::{emit_change, emit_constraint, emit_intent, emit_notion};
+use telos_core::emit::{emit_constraint, emit_intent, emit_notion};
+use telos_core::error::{ErrorCode, TelosError};
 use telos_core::graph::NodeRef;
 use telos_core::ids::{ChangeId, ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
 use telos_core::model::TelosModel;
@@ -55,18 +61,31 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
 }
 
 /// `show CHG-0001`: the change's own fields, its ops as descriptors, and
-/// its canonical text.
+/// the text of its file.
 ///
-/// `canonical` is [`emit_change`]'s output rather than the file's bytes on
-/// disk -- the same policy every other `show` follows (the emitter defines
-/// what canonical means, and D1's round-trip makes the two identical for
-/// any file the tool wrote). `relations` is the empty pair Annex E freezes:
-/// a change is a transaction record, not a node of the spec graph, so it
-/// has no edge to report -- and the key is still present, so a consumer
-/// reads `show` the same way whatever it was pointed at.
+/// `canonical` is the file's actual bytes (Annex E: «le texte du fichier»),
+/// *not* a re-emission of the parsed change -- and that is a deliberate
+/// departure from what `show` does for a notion, an intent or a constraint.
+/// The reason is that a change file is not covered by the seal
+/// (`telos/changes/` is excluded from [`Workspace::spec_files`]), so a
+/// hand-edited but still parseable change file is legal state rather than
+/// drift, and inspecting a transaction record has to show what is really on
+/// disk. For any file telos itself wrote the two are identical anyway, by
+/// D1's round-trip invariant; the distinction only shows up exactly when it
+/// matters.
+///
+/// The parse is still what produces `entity`: [`read_change`] is what turns
+/// an unknown id into the store's «unknown change `CHG-9999`» and a
+/// corrupted one into a parse error, so nothing here reports fields off a
+/// file it did not first validate.
+///
+/// `relations` is the empty pair Annex E freezes: a change is a transaction
+/// record, not a node of the spec graph, so it has no edge to report -- and
+/// the key is still present, so a consumer reads `show` the same way
+/// whatever it was pointed at.
 fn show_change(ws: &Workspace, id: ChangeId) -> CmdResult {
     let change = read_change(ws, id)?;
-    let canonical = emit_change(&change);
+    let canonical = read_change_file(ws, id)?;
 
     Ok(Outcome {
         result: json!({
@@ -81,6 +100,22 @@ fn show_change(ws: &Workspace, id: ChangeId) -> CmdResult {
         }),
         human: format!("{canonical}\nrelations:"),
         next_actions: Vec::new(),
+    })
+}
+
+/// The raw text of `telos/changes/<id>.tel`.
+///
+/// Read *after* [`read_change`] has already succeeded, so the only failure
+/// left here is an I/O one racing the first read (the file deleted in
+/// between, a permission revoked) -- never "unknown change", which
+/// [`read_change`] owns and reports with its nearest-id hint.
+fn read_change_file(ws: &Workspace, id: ChangeId) -> Result<String, TelosError> {
+    let path = ws.telos_dir.join("changes").join(format!("{id}.tel"));
+    fs::read_to_string(&path).map_err(|e| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!("failed to read {}: {e}", path.display()),
+        )
     })
 }
 

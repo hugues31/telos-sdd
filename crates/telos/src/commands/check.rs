@@ -11,12 +11,12 @@
 
 use serde_json::{Value, json};
 
-use telos_core::error::{Diagnostic, ErrorCode, TelosError};
+use telos_core::error::{ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::state::{ProjectStateKind, compute_state, coverage};
 use telos_core::workspace::Workspace;
 
-use crate::commands::{Ctx, require_lock};
+use crate::commands::{Ctx, diagnostics_to_error, require_lock};
 use crate::envelope::{CmdResult, Outcome};
 
 /// The hint on `TELOS_DRIFT_DETECTED` from `check --sealed`. Frozen by
@@ -53,32 +53,4 @@ pub fn run(ctx: &Ctx, sealed: bool) -> CmdResult {
         }
         Err(diagnostics) => Err(diagnostics_to_error(diagnostics)),
     }
-}
-
-/// Collapses a full diagnostics list into the single [`TelosError`] the
-/// envelope carries.
-///
-/// `code` and `hint` are the first diagnostic's -- the frozen error body
-/// has room for exactly one of each, so `check`, which can find several
-/// problems in one pass, surfaces the first (Annex B). The *message*
-/// stays multi-line when there is more than one diagnostic: every
-/// diagnostic gets its own `file: message` line (via the same
-/// `From<Diagnostic>` conversion, applied to each), so a human reading
-/// stderr sees everything `check` found in this run. In `--json` mode this
-/// means `error.message` can itself carry more than one line -- an agent
-/// that only reads the first line still gets the primary diagnosis; this
-/// M1 limitation (no `result.diagnostics` array on failure) is documented
-/// in `docs/contracts.md`.
-fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
-    let mut iter = diagnostics.into_iter();
-    let first = iter
-        .next()
-        .expect("`load_model` reports at least one diagnostic on `Err`");
-    let mut error: TelosError = first.into();
-    for diagnostic in iter {
-        let extra: TelosError = diagnostic.into();
-        error.message.push('\n');
-        error.message.push_str(&extra.message);
-    }
-    error
 }

@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 
 use telos_core::error::{ErrorCode, TelosError};
 
-use crate::commands::{self, Ctx};
+use crate::commands::{self, Ctx, list::EntityType};
 use crate::envelope::CmdResult;
 use crate::render::render;
 
@@ -42,6 +42,17 @@ enum Command {
         #[arg(long)]
         sealed: bool,
     },
+    /// Print one entity's canonical block and its relations.
+    Show {
+        /// A typed id (`INT-0042`, `SCN-0107`, `CON-0003`) or a bare notion
+        /// name (`Invoice`).
+        target: String,
+    },
+    /// List every entity of one kind, sorted by its natural key.
+    List {
+        /// Which kind of entity to list.
+        kind: EntityType,
+    },
 }
 
 impl Command {
@@ -52,6 +63,8 @@ impl Command {
             Command::Init => "init",
             Command::Status => "status",
             Command::Check { .. } => "check",
+            Command::Show { .. } => "show",
+            Command::List { .. } => "list",
         }
     }
 }
@@ -85,6 +98,8 @@ fn execute(command: &Command) -> CmdResult {
         Command::Init => commands::init::run(&ctx()?),
         Command::Status => commands::status::run(&ctx()?),
         Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
+        Command::Show { target } => commands::show::run(&ctx()?, target),
+        Command::List { kind } => commands::list::run(&ctx()?, *kind),
     }
 }
 

@@ -5,13 +5,15 @@
 
 pub mod check;
 pub mod init;
+pub mod list;
+pub mod show;
 pub mod status;
 
 use std::path::PathBuf;
 
 use serde_json::json;
 
-use telos_core::error::{ErrorCode, TelosError};
+use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::lock::Lock;
 use telos_core::workspace::Workspace;
 
@@ -50,4 +52,32 @@ pub fn version() -> CmdResult {
         human: format!("telos {}", telos_core::VERSION),
         next_actions: Vec::new(),
     })
+}
+
+/// Collapses a full diagnostics list into the single [`TelosError`] the
+/// envelope carries.
+///
+/// `code` and `hint` are the first diagnostic's -- the frozen error body
+/// has room for exactly one of each, so a command that can find several
+/// problems in one pass (`check`, but also `show`/`list` loading the same
+/// model) surfaces the first (Annex B). The *message* stays multi-line when
+/// there is more than one diagnostic: every diagnostic gets its own `file:
+/// message` line (via the same `From<Diagnostic>` conversion, applied to
+/// each), so a human reading stderr sees everything the load found in this
+/// run. In `--json` mode this means `error.message` can itself carry more
+/// than one line -- an agent that only reads the first line still gets the
+/// primary diagnosis; this M1 limitation (no `result.diagnostics` array on
+/// failure) is documented in `docs/contracts.md`.
+pub(crate) fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
+    let mut iter = diagnostics.into_iter();
+    let first = iter
+        .next()
+        .expect("`load_model` reports at least one diagnostic on `Err`");
+    let mut error: TelosError = first.into();
+    for diagnostic in iter {
+        let extra: TelosError = diagnostic.into();
+        error.message.push('\n');
+        error.message.push_str(&extra.message);
+    }
+    error
 }

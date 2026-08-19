@@ -10,6 +10,7 @@ pub mod lock;
 pub mod model;
 pub mod semantic;
 pub mod span;
+pub mod state;
 pub mod suggest;
 pub mod syntax;
 pub mod workspace;

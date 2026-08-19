@@ -13,10 +13,9 @@
 //! that than it needs to be.
 //!
 //! `seal()` -- computing a `Lock` from a live `Workspace` / `TelosModel` /
-//! [`crate::git::GitRepo`] -- is Task 11; this module owns only the `Lock`
-//! type and its I/O.
+//! [`crate::git::GitRepo`] -- also lives here (Task 11).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -25,8 +24,10 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::{ErrorCode, TelosError};
-use crate::git::Oid;
+use crate::git::{GitRepo, Oid};
 use crate::ids::{ChangeId, RepoPath};
+use crate::model::TelosModel;
+use crate::workspace::Workspace;
 
 /// A parsed or in-memory `telos.lock`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +151,57 @@ impl Lock {
         }
         format!("sha256:{:x}", hasher.finalize())
     }
+}
+
+/// Computes a fresh [`Lock`] from a live workspace: OIDs of
+/// [`Workspace::spec_files`] as `spec`, and the deduplicated
+/// [`crate::model::Binding::code_path`] of every binding in `model` as
+/// `code`.
+///
+/// A binding that names a code file missing from disk at seal time is
+/// `TelosIntegrityViolation`, naming the path -- a binding cannot be sealed
+/// to a file that does not exist. (A missing *spec* file cannot happen here:
+/// `spec_files()` only ever lists files that already exist on disk.)
+///
+/// Does not write the lock to disk -- the caller does that with
+/// [`Lock::write`].
+pub fn seal(
+    ws: &Workspace,
+    model: &TelosModel,
+    git: &GitRepo,
+    sealed_by: Option<ChangeId>,
+) -> Result<Lock, TelosError> {
+    let spec_paths = ws.spec_files()?;
+    let spec = git.blob_oids(&spec_paths)?;
+
+    let code_paths: Vec<RepoPath> = model
+        .bindings
+        .iter()
+        .map(|b| b.code_path().clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let code = git.blob_oids(&code_paths)?;
+
+    for path in &code_paths {
+        if !code.contains_key(path) {
+            return Err(TelosError::new(
+                ErrorCode::TelosIntegrityViolation,
+                format!("binding references `{path}`, which does not exist"),
+            ));
+        }
+    }
+
+    let spec_digest = Lock::compute_digest(&spec);
+
+    Ok(Lock {
+        version: 1,
+        tool: format!("telos {}", crate::VERSION),
+        sealed_by,
+        spec_digest,
+        spec,
+        code,
+    })
 }
 
 /// Quotes `s` as a TOML basic string: wraps it in `"..."`, escaping the

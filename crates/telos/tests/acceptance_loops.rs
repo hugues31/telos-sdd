@@ -57,11 +57,11 @@ fn json_stdout(out: &std::process::Output) -> Value {
 /// like).
 fn assert_args_never_mention_a_hash(args: &[&str]) {
     for arg in args {
-        debug_assert!(
+        assert!(
             !arg.to_ascii_lowercase().contains("sha"),
             "a loop's CLI arguments must never mention a hash (spec §14 anti-goal): {arg:?}"
         );
-        debug_assert!(
+        assert!(
             !contains_forty_hex_run(arg),
             "a loop's CLI arguments must never mention a hash (spec §14 anti-goal): {arg:?}"
         );

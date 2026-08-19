@@ -9,13 +9,6 @@
 //! first lexical error, `lex` stops and returns the `Diagnostic` --
 //! recovery is the parser's job, not the lexer's.
 
-// `lex`/`Token`/`TokKind`/`Lexer` are `pub(crate)` (Task 4's mandated
-// signature) and, until Task 5 wires the parser on top of this module,
-// their only caller is this file's own `#[cfg(test)]` module -- invisible
-// to a non-test build. Scoped to this file; remove once the parser calls
-// `lex`.
-#![allow(dead_code)]
-
 use std::str::FromStr;
 
 use crate::error::{Diagnostic, ErrorCode};

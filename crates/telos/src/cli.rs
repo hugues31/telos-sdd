@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 
 use telos_core::error::{ErrorCode, TelosError};
 
-use crate::commands::{self, Ctx, list::EntityType, query::QueryCommand};
+use crate::commands::{self, Ctx, change::ChangeCommand, list::EntityType, query::QueryCommand};
 use crate::envelope::CmdResult;
 use crate::render::render;
 
@@ -64,6 +64,11 @@ enum Command {
         /// name (`Invoice`).
         target: String,
     },
+    /// Open, list and abandon changes.
+    Change {
+        #[command(subcommand)]
+        change: ChangeCommand,
+    },
 }
 
 impl Command {
@@ -78,6 +83,10 @@ impl Command {
             Command::List { .. } => "list",
             Command::Query { .. } => "query",
             Command::Impact { .. } => "impact",
+            // One `command` for all three verbs: the envelope names the
+            // command a caller invoked, and `telos change …` is one command
+            // with subcommands, the same way `telos query …` is.
+            Command::Change { .. } => "change",
         }
     }
 }
@@ -115,6 +124,7 @@ fn execute(command: &Command) -> CmdResult {
         Command::List { kind } => commands::list::run(&ctx()?, *kind),
         Command::Query { query } => commands::query::run(&ctx()?, query),
         Command::Impact { target } => commands::impact::run(&ctx()?, target),
+        Command::Change { change } => commands::change::run(&ctx()?, change),
     }
 }
 

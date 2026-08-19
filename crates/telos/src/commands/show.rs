@@ -9,17 +9,23 @@
 //! inside its owning intent's file, not a file in its own right), so
 //! `show SCN-...` prints the *owning intent's* block, headed by a line that
 //! names which scenario is being shown and which intent owns it.
+//!
+//! `show CHG-...` is the one argument resolved outside the spec model
+//! entirely: a change lives in the change store, not in `spec_files`, so it
+//! is looked up there and reports the empty relations of Annex E -- see
+//! [`show_change`].
 
 use serde_json::{Value, json};
 
-use telos_core::emit::{emit_constraint, emit_intent, emit_notion};
-use telos_core::error::{ErrorCode, TelosError};
+use telos_core::changes::read_change;
+use telos_core::emit::{emit_change, emit_constraint, emit_intent, emit_notion};
 use telos_core::graph::NodeRef;
-use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
+use telos_core::ids::{ChangeId, ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
 use telos_core::model::TelosModel;
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
 
+use crate::commands::change::op_descriptors;
 use crate::commands::{Ctx, diagnostics_to_error, nearest_id, unknown, unparsable};
 use crate::envelope::{CmdResult, Outcome};
 
@@ -27,6 +33,15 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
     let entity_ref: EntityRef = target.parse().map_err(|_| unparsable(target))?;
 
     let ws = Workspace::discover(&ctx.cwd)?;
+
+    // A change is not part of the spec model -- `telos/changes/` is excluded
+    // from `spec_files` -- so it is resolved against the change store, and
+    // resolved *before* the model is loaded: showing a change must not
+    // depend on whether the spec around it happens to parse.
+    if let EntityRef::Change(id) = entity_ref {
+        return show_change(&ws, id);
+    }
+
     let model = ws.load_model().map_err(diagnostics_to_error)?;
 
     match entity_ref {
@@ -34,11 +49,39 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
         EntityRef::Intent(id) => show_intent(&model, id),
         EntityRef::Scenario(id) => show_scenario(&model, id),
         EntityRef::Constraint(id) => show_constraint(&model, id),
-        EntityRef::Change(_) => Err(TelosError::new(
-            ErrorCode::TelosReferenceUnknown,
-            "changes are not supported in M1",
-        )),
+        // Handled above, before the model was ever loaded.
+        EntityRef::Change(id) => show_change(&ws, id),
     }
+}
+
+/// `show CHG-0001`: the change's own fields, its ops as descriptors, and
+/// its canonical text.
+///
+/// `canonical` is [`emit_change`]'s output rather than the file's bytes on
+/// disk -- the same policy every other `show` follows (the emitter defines
+/// what canonical means, and D1's round-trip makes the two identical for
+/// any file the tool wrote). `relations` is the empty pair Annex E freezes:
+/// a change is a transaction record, not a node of the spec graph, so it
+/// has no edge to report -- and the key is still present, so a consumer
+/// reads `show` the same way whatever it was pointed at.
+fn show_change(ws: &Workspace, id: ChangeId) -> CmdResult {
+    let change = read_change(ws, id)?;
+    let canonical = emit_change(&change);
+
+    Ok(Outcome {
+        result: json!({
+            "entity": {
+                "id": change.id,
+                "status": change.status.as_str(),
+                "motivation": change.motivation,
+                "ops": op_descriptors(&change),
+            },
+            "canonical": canonical,
+            "relations": { "out": [], "in": [] },
+        }),
+        human: format!("{canonical}\nrelations:"),
+        next_actions: Vec::new(),
+    })
 }
 
 fn show_notion(model: &TelosModel, name: &NotionName) -> CmdResult {

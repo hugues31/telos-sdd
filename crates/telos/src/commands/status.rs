@@ -2,9 +2,11 @@
 //! much of the spec is covered by scenarios and bindings (Annex B's frozen
 //! `status --json` schema).
 //!
-//! Order matters, and is spelled out by the task: [`compute_state`] runs
-//! *first*, and never parses a `.tel` file (spec §6) -- it only compares
-//! git blob OIDs -- so a corrupted spec still gets a state answer. Loading
+//! Order matters, and is spelled out by the task: state ([`project`], which
+//! ends in `compute_state`) is computed *first*, and never parses a `.tel`
+//! spec file (spec §6) -- it only compares git blob OIDs, and reads the open
+//! changes best-effort, so even a corrupted spec *and* a corrupted change
+//! file still get a state answer (D15). Loading
 //! the model for `coverage` is best-effort *after* that: if the spec fails
 //! to parse, `coverage` is reported as all zeros rather than blocking the
 //! command. Annex B's "coverage computed over what parses" is ambiguous
@@ -14,11 +16,9 @@
 
 use serde_json::{Value, json};
 
-use telos_core::git::GitRepo;
-use telos_core::state::{Coverage, ProjectStateKind, StateReport, compute_state, coverage};
-use telos_core::workspace::Workspace;
+use telos_core::state::{Coverage, ProjectStateKind, StateReport, coverage};
 
-use crate::commands::{Ctx, require_lock};
+use crate::commands::{Ctx, project};
 use crate::envelope::{CmdResult, Outcome};
 
 /// A [`Coverage`] with every counter at zero -- what `status` reports when
@@ -35,15 +35,11 @@ const ZERO_COVERAGE: Coverage = Coverage {
 };
 
 pub fn run(ctx: &Ctx) -> CmdResult {
-    let ws = Workspace::discover(&ctx.cwd)?;
-    let lock = require_lock(&ws)?;
-    let git = GitRepo::discover(&ctx.cwd)?;
+    let project = project(ctx)?;
+    let report = project.state;
 
-    // `&[]`: `open_change_infos(ws)` is wired in T5, which also owns the
-    // `status --json` `changes` field this currently-empty slice keeps
-    // frozen at `[]` below.
-    let report = compute_state(&ws, &lock, &git, &[])?;
-    let cov = ws
+    let cov = project
+        .ws
         .load_model()
         .map(|model| coverage(&model))
         .unwrap_or(ZERO_COVERAGE);
@@ -55,15 +51,18 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     } else {
         Value::Null
     };
-    let next_actions = if drifted {
-        vec!["telos adopt".to_string(), "telos revert".to_string()]
-    } else {
-        Vec::new()
+    // One state, one suggestion: drift is the more urgent of the two (D15
+    // ranks it above `changing` for exactly that reason), and a `changing`
+    // project's single next step is to look at what is open.
+    let next_actions = match report.state {
+        ProjectStateKind::Drifted => vec!["telos adopt".to_string(), "telos revert".to_string()],
+        ProjectStateKind::Changing => vec!["telos change list".to_string()],
+        ProjectStateKind::Coherent => Vec::new(),
     };
 
     let result = json!({
         "state": report.state,
-        "changes": Vec::<Value>::new(),
+        "changes": report.open_changes,
         "drift": drift_value,
         "coverage": cov,
     });
@@ -90,6 +89,12 @@ fn human_summary(report: &StateReport, drifted: bool, cov: Coverage) -> String {
         lines.push("drift:".to_string());
         for entry in &report.drift {
             lines.push(format!("  {}", entry.path));
+        }
+    }
+    if !report.open_changes.is_empty() {
+        lines.push("changes:".to_string());
+        for change in &report.open_changes {
+            lines.push(format!("  {} {}", change.id, change.status));
         }
     }
     lines.push(format!(

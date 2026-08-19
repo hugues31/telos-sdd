@@ -3,6 +3,7 @@
 //! [`crate::render`], and having exactly one place that writes to a stream is
 //! what keeps every command's human and JSON output consistent.
 
+pub mod change;
 pub mod check;
 pub mod impact;
 pub mod init;
@@ -15,11 +16,14 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
+use telos_core::changes::open_change_infos;
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
+use telos_core::git::GitRepo;
 use telos_core::graph::NodeRef;
 use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
 use telos_core::lock::Lock;
 use telos_core::model::TelosModel;
+use telos_core::state::{ProjectStateKind, StateReport, compute_state};
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
 
@@ -46,6 +50,90 @@ fn require_lock(ws: &Workspace) -> Result<Lock, TelosError> {
             "the project was never sealed; run `telos init` in a fresh repository or restore telos.lock from git",
         )
     })
+}
+
+// --- the state-aware commands' shared preamble and gates --------------------
+
+/// A discovered, sealed project and the state it is in: what `status`,
+/// `check --sealed` and `change open` (and, from T7 on, every staging
+/// command) all start from, computed once, the same way, in the same order.
+///
+/// Holding the workspace and its [`StateReport`] together is what keeps the
+/// gates below cheap and honest: a command that has a `Project` has already
+/// paid for its state, so asking «may I mutate?» costs nothing more and can
+/// never be answered from a second, independently computed state that has
+/// since moved.
+pub(crate) struct Project {
+    pub ws: Workspace,
+    pub lock: Lock,
+    /// Includes `open_changes`, best-effort per D15 -- an unparseable change
+    /// file is reported there, never an error.
+    pub state: StateReport,
+}
+
+/// Discovers the workspace and the git repository from `ctx.cwd`, requires
+/// a lock, scans the open changes, and computes the project's state.
+///
+/// The order is the one `docs/contracts.md` fixes for `check --sealed` and
+/// is shared by every caller so that the *first* thing to go wrong is
+/// always reported the same way: no `telos/` (`TELOS_NOT_INITIALIZED` from
+/// [`Workspace::discover`]), then no `telos.lock` ([`require_lock`]), then
+/// no git repository, then the state itself.
+pub(crate) fn project(ctx: &Ctx) -> Result<Project, TelosError> {
+    let ws = Workspace::discover(&ctx.cwd)?;
+    let lock = require_lock(&ws)?;
+    let git = GitRepo::discover(&ctx.cwd)?;
+    let open_changes = open_change_infos(&ws)?;
+    let state = compute_state(&ws, &lock, &git, &open_changes)?;
+    Ok(Project { ws, lock, state })
+}
+
+/// The hint on every `TELOS_DRIFT_DETECTED`. Frozen by
+/// `docs/contracts.md` -- an M3 skill matches on this string -- so it is
+/// written once, next to the single gate that raises the code.
+const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
+
+/// D17's gate: refuses to go on while drift nobody claimed is on disk.
+///
+/// "Unclaimed" is the whole subtlety, and it is [`compute_state`] that
+/// resolves it: a path an open change claims is that change in progress,
+/// not damage (D5), so it never reaches `state.drift` and never trips this.
+/// What trips it is a sealed file edited outside the protocol -- staging
+/// more spec on top of that would seal a base nobody reviewed.
+///
+/// Used by `change open` here, and by `add`/`edit`/`remove` (T7),
+/// `change approve` (T8) and `change reconcile` without `--full` (T10).
+/// `change diff|list|abandon`, `status`, `check` and `show` deliberately do
+/// not call it: they read, or they clean up, and a drifted project is
+/// exactly when a caller most needs them.
+pub(crate) fn require_no_unclaimed_drift(project: &Project) -> Result<(), TelosError> {
+    if project.state.state == ProjectStateKind::Drifted {
+        return Err(TelosError::new(
+            ErrorCode::TelosDriftDetected,
+            "the project has drifted from its seal",
+        )
+        .hint(DRIFT_HINT));
+    }
+    Ok(())
+}
+
+/// D15's addition to `check --sealed`: "sealed and unmodified" cannot be
+/// true while a change is still open, so `changing` is refused with its own
+/// code rather than folded into `TELOS_DRIFT_DETECTED` -- the two states
+/// have different remedies, and only one of them is damage.
+///
+/// Called *after* [`require_no_unclaimed_drift`], which mirrors the state
+/// priority of D15: unclaimed drift outranks an open change, so a project
+/// that is both reports the drift.
+pub(crate) fn require_no_open_changes(project: &Project) -> Result<(), TelosError> {
+    if project.state.state == ProjectStateKind::Changing {
+        return Err(TelosError::new(
+            ErrorCode::TelosChangeStateInvalid,
+            "open changes; reconcile or abandon them",
+        )
+        .hint("run `telos change list`"));
+    }
+    Ok(())
 }
 
 /// `telos version` -- the same version `--version` prints, in the envelope.
@@ -172,9 +260,13 @@ pub(crate) fn resolve_or_hint(model: &TelosModel, r: &EntityRef) -> Result<NodeR
             });
             Err(unknown("constraint", id, hint))
         }
+        // A change is a transaction record, not a node of the spec graph:
+        // there is no edge to walk from it, so `impact` -- the one caller
+        // of this helper -- has nothing to answer. `show CHG-…` does
+        // resolve one, against the change store rather than the model.
         EntityRef::Change(_) => Err(TelosError::new(
             ErrorCode::TelosReferenceUnknown,
-            "changes are not supported in M1",
+            "`impact` does not apply to changes",
         )),
     }
 }

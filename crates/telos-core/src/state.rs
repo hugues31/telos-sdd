@@ -1,18 +1,22 @@
 //! Project state (spec §6): comparing a sealed [`Lock`] against the live
 //! working tree, and a coverage summary of the spec itself.
 //!
-//! [`compute_state`] never parses a `.tel` file -- it compares git blob OIDs
-//! only, which is exactly what lets it answer even when the spec on disk is
-//! syntactically broken. A corrupted spec file *is* drift the caller needs
-//! to be told about, not a reason for the check itself to fail.
+//! [`compute_state`] itself never parses a `.tel` file -- it compares git
+//! blob OIDs only, which is exactly what lets it answer even when the spec
+//! on disk is syntactically broken. A corrupted spec file *is* drift the
+//! caller needs to be told about, not a reason for the check itself to
+//! fail. The `open_changes` it is handed, by contrast, already came from a
+//! parse ([`crate::changes::open_change_infos`]) -- `compute_state` only
+//! reads their `claims`, never touches a change file itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use crate::changes::OpenChangeInfo;
 use crate::error::TelosError;
 use crate::git::{GitRepo, Oid};
-use crate::ids::RepoPath;
+use crate::ids::{ChangeId, RepoPath};
 use crate::lock::Lock;
 use crate::model::{Binding, IntentStatus, TelosModel};
 use crate::workspace::Workspace;
@@ -23,11 +27,14 @@ use crate::workspace::Workspace;
 pub enum ProjectStateKind {
     /// Nothing has drifted and no change is open.
     Coherent,
-    /// A change is open. Never produced in M1: `open_changes` is always
-    /// empty until M2 wires up the change flow.
+    /// At least one change is open and every current drift is claimed by
+    /// one of them (D15) -- the paths it owns are expected to differ from
+    /// what was sealed, so that is not drift, it is the change in
+    /// progress.
     Changing,
     /// At least one sealed path was modified or went missing, or a spec
-    /// file exists on disk that was never sealed.
+    /// file exists on disk that was never sealed, and no open change
+    /// claims it.
     Drifted,
 }
 
@@ -50,17 +57,26 @@ pub enum DriftKind {
     Untracked,
 }
 
+/// One open change, as reported in a [`StateReport`] (Annex B).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangeSummary {
+    pub id: ChangeId,
+    pub status: String,
+    pub obligations: Vec<String>,
+}
+
 /// The result of [`compute_state`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StateReport {
     pub state: ProjectStateKind,
-    /// Sorted by path.
+    /// Sorted by path. Never includes a path claimed by an open change
+    /// (D15) -- see [`compute_state`].
     pub drift: Vec<DriftEntry>,
-    /// Always empty in M1; typed `Vec<ChangeSummary>` from M2 onward.
-    pub open_changes: Vec<()>,
+    pub open_changes: Vec<ChangeSummary>,
 }
 
-/// Compares `lock` against the live working tree, by OID only.
+/// Compares `lock` against the live working tree, by OID only, then folds
+/// in `open_changes` per D15's claim rule.
 ///
 /// Re-hashes, in one [`GitRepo::blob_oids`] batch, the union of the
 /// workspace's current [`Workspace::spec_files`] and every path `lock.spec`
@@ -75,19 +91,28 @@ pub struct StateReport {
 ///   M1 -- reconciling it against `telos.toml`'s globs is rule 5, an M2
 ///   reconcile-time concern, not checked here.
 ///
+/// That raw drift is then filtered: a path claimed by *any* entry of
+/// `open_changes` is dropped, because the change owns it (D5) -- what looks
+/// like drift there is really the change in progress, not damage. `state`
+/// follows the priority D15 sets: unclaimed drift still present wins
+/// (`Drifted`), else at least one open change wins (`Changing`), else
+/// `Coherent`.
+///
 /// `ws` and `git` are discovered independently by every caller (`status`,
 /// `check --sealed`) -- both from `cwd`, but by unrelated code paths -- so
-/// this starts with [`GitRepo::ensure_matches_workspace_root`]. Without it,
-/// a nested git repository under an initialized workspace would have
-/// `blob_oids` hash paths against the *nested* repo's blobs while `lock`
-/// was sealed against the outer one, and every sealed path would report as
-/// spuriously `Missing` or `Modified` instead of the real problem.
+/// this starts with [`GitRepo::ensure_matches_workspace_root`], the very
+/// first check, before any of the above. Without it, a nested git
+/// repository under an initialized workspace would have `blob_oids` hash
+/// paths against the *nested* repo's blobs while `lock` was sealed against
+/// the outer one, and every sealed path would report as spuriously
+/// `Missing` or `Modified` instead of the real problem.
 ///
-/// Deliberately does not parse anything -- see the module docs.
+/// Deliberately does not parse anything itself -- see the module docs.
 pub fn compute_state(
     ws: &Workspace,
     lock: &Lock,
     git: &GitRepo,
+    open_changes: &[OpenChangeInfo],
 ) -> Result<StateReport, TelosError> {
     git.ensure_matches_workspace_root(&ws.repo_root)?;
 
@@ -131,10 +156,11 @@ pub fn compute_state(
         }
     }
 
-    drift.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
+    // D5: a path an open change claims is not drift, the change owns it.
+    let claimed: BTreeSet<&RepoPath> = open_changes.iter().flat_map(|c| c.claims.iter()).collect();
+    drift.retain(|entry| !claimed.contains(&entry.path));
 
-    // Always empty in M1: no change flow exists yet to populate it.
-    let open_changes: Vec<()> = Vec::new();
+    drift.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
 
     let state = if !drift.is_empty() {
         ProjectStateKind::Drifted
@@ -143,6 +169,15 @@ pub fn compute_state(
     } else {
         ProjectStateKind::Coherent
     };
+
+    let open_changes = open_changes
+        .iter()
+        .map(|c| ChangeSummary {
+            id: c.id,
+            status: c.status.as_str().to_string(),
+            obligations: c.obligations.clone(),
+        })
+        .collect();
 
     Ok(StateReport {
         state,

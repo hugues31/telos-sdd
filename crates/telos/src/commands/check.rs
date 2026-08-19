@@ -29,7 +29,8 @@ pub fn run(ctx: &Ctx, sealed: bool) -> CmdResult {
     if sealed {
         let lock = require_lock(&ws)?;
         let git = GitRepo::discover(&ctx.cwd)?;
-        let report = compute_state(&ws, &lock, &git)?;
+        // `&[]`: `open_change_infos(ws)` is wired in T5.
+        let report = compute_state(&ws, &lock, &git, &[])?;
         if report.state != ProjectStateKind::Coherent {
             return Err(TelosError::new(
                 ErrorCode::TelosDriftDetected,

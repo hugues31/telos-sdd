@@ -2,7 +2,12 @@
 //! corpus inside a throwaway git repository. `compute_state` compares git
 //! blob OIDs, so a real `git` binary (not an in-memory stand-in) is what
 //! actually exercises it -- see `telos_core::state`'s module docs for why it
-//! never parses a `.tel` file.
+//! never parses a `.tel` file itself.
+//!
+//! The claim-aware section below (D15) drives `compute_state` with real
+//! `OpenChangeInfo`s -- built via `write_change` + `open_change_infos`
+//! rather than constructed by hand -- so the same store `changes_store.rs`
+//! exercises is what state.rs is proved against.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,11 +15,15 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+use telos_core::changes::{open_change_infos, write_change};
 use telos_core::error::ErrorCode;
 use telos_core::git::GitRepo;
-use telos_core::ids::RepoPath;
+use telos_core::ids::{ChangeId, IntentId, NotionName, RepoPath};
 use telos_core::lock::{Lock, seal};
-use telos_core::state::{DriftEntry, DriftKind, ProjectStateKind, compute_state, coverage};
+use telos_core::model::{Change, ChangeStatus, Notion, NotionKind, StagedOp};
+use telos_core::state::{
+    ChangeSummary, DriftEntry, DriftKind, ProjectStateKind, compute_state, coverage,
+};
 use telos_core::workspace::Workspace;
 
 // --- fixture plumbing --------------------------------------------------
@@ -138,7 +147,7 @@ fn compute_state_is_coherent_right_after_seal() {
     let tmp = corpus_repo();
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
-    let report = compute_state(&ws, &lock, &git).unwrap();
+    let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
     assert_eq!(report.state, ProjectStateKind::Coherent);
     assert!(report.drift.is_empty());
@@ -157,7 +166,7 @@ fn compute_state_reports_modified_for_a_one_byte_spec_edit() {
     content.push('\n');
     fs::write(&invoice_path, content).unwrap();
 
-    let report = compute_state(&ws, &lock, &git).unwrap();
+    let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
     assert_eq!(report.state, ProjectStateKind::Drifted);
     assert_eq!(
@@ -176,7 +185,7 @@ fn compute_state_reports_missing_for_a_deleted_spec_file() {
 
     fs::remove_file(tmp.path().join("telos/intents/INT-0017.tel")).unwrap();
 
-    let report = compute_state(&ws, &lock, &git).unwrap();
+    let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
     assert_eq!(report.state, ProjectStateKind::Drifted);
     assert_eq!(
@@ -199,7 +208,7 @@ fn compute_state_reports_untracked_for_a_spec_file_created_outside_the_protocol(
     )
     .unwrap();
 
-    let report = compute_state(&ws, &lock, &git).unwrap();
+    let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
     assert_eq!(report.state, ProjectStateKind::Drifted);
     assert_eq!(
@@ -221,7 +230,7 @@ fn compute_state_reports_modified_for_edited_bound_code() {
     content.push_str("// edited\n");
     fs::write(&invoice_rs, content).unwrap();
 
-    let report = compute_state(&ws, &lock, &git).unwrap();
+    let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
     assert_eq!(report.state, ProjectStateKind::Drifted);
     assert_eq!(
@@ -242,7 +251,7 @@ fn compute_state_ignores_a_new_unbound_code_file() {
     // spec file -- unlinked code is free in M1 (rule 5 is M2 reconcile-time).
     fs::write(tmp.path().join("src/other.rs"), "// unrelated\n").unwrap();
 
-    let report = compute_state(&ws, &lock, &git).unwrap();
+    let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
     assert_eq!(report.state, ProjectStateKind::Coherent);
     assert!(report.drift.is_empty());
@@ -261,7 +270,7 @@ fn compute_state_answers_drifted_on_a_corrupted_spec_file_without_parsing() {
     )
     .unwrap();
 
-    let report = compute_state(&ws, &lock, &git).unwrap();
+    let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
     assert_eq!(report.state, ProjectStateKind::Drifted);
     assert_eq!(
@@ -269,6 +278,154 @@ fn compute_state_answers_drifted_on_a_corrupted_spec_file_without_parsing() {
         vec![DriftEntry {
             path: RepoPath::new("telos/notions/Invoice.tel"),
             kind: DriftKind::Modified,
+        }]
+    );
+}
+
+// --- compute_state: claim-aware (D15) -----------------------------------
+
+/// A minimal notion distinct from anything the corpus already declares.
+fn ledger_notion() -> Notion {
+    Notion {
+        name: NotionName::new("Ledger").unwrap(),
+        kind: NotionKind::Entity,
+        def: "A record of postings.".to_string(),
+        attrs: vec![],
+        rels: vec![],
+    }
+}
+
+/// A notion that claims the same path as the corpus's own `Invoice.tel`
+/// (`StagedOp::target_path` derives the path from the name alone, so its
+/// content need not match the corpus's).
+fn invoice_notion() -> Notion {
+    Notion {
+        name: NotionName::new("Invoice").unwrap(),
+        kind: NotionKind::Entity,
+        def: "A bill.".to_string(),
+        attrs: vec![],
+        rels: vec![],
+    }
+}
+
+fn drafted_change(id: u32, ops: Vec<StagedOp>) -> Change {
+    Change {
+        id: ChangeId(id),
+        motivation: "x".to_string(),
+        status: ChangeStatus::Drafted,
+        approved_digest: None,
+        ops,
+    }
+}
+
+#[test]
+fn compute_state_is_changing_when_an_open_change_has_no_drift() {
+    let tmp = corpus_repo();
+    let (ws, lock, git) = discover_and_seal(tmp.path());
+
+    write_change(
+        &ws,
+        &drafted_change(1, vec![StagedOp::AddNotion(ledger_notion())]),
+    )
+    .unwrap();
+    let open_changes = open_change_infos(&ws).unwrap();
+
+    let report = compute_state(&ws, &lock, &git, &open_changes).unwrap();
+
+    assert_eq!(report.state, ProjectStateKind::Changing);
+    assert!(report.drift.is_empty());
+    assert_eq!(
+        report.open_changes,
+        vec![ChangeSummary {
+            id: ChangeId(1),
+            status: "drafted".to_string(),
+            obligations: vec!["approve".to_string(), "reconcile".to_string()],
+        }]
+    );
+}
+
+#[test]
+fn compute_state_is_changing_not_drifted_when_the_open_change_claims_the_drifted_path() {
+    let tmp = corpus_repo();
+    let (ws, lock, git) = discover_and_seal(tmp.path());
+
+    let invoice_path = tmp.path().join("telos/notions/Invoice.tel");
+    let mut content = fs::read_to_string(&invoice_path).unwrap();
+    content.push('\n');
+    fs::write(&invoice_path, content).unwrap();
+
+    write_change(
+        &ws,
+        &drafted_change(1, vec![StagedOp::AddNotion(invoice_notion())]),
+    )
+    .unwrap();
+    let open_changes = open_change_infos(&ws).unwrap();
+
+    let report = compute_state(&ws, &lock, &git, &open_changes).unwrap();
+
+    assert_eq!(report.state, ProjectStateKind::Changing);
+    assert!(
+        report.drift.is_empty(),
+        "the claimed path must not be reported as drift: {:?}",
+        report.drift
+    );
+}
+
+#[test]
+fn compute_state_is_drifted_listing_only_the_path_no_open_change_claims() {
+    let tmp = corpus_repo();
+    let (ws, lock, git) = discover_and_seal(tmp.path());
+
+    // Two drifted paths: Invoice.tel modified, INT-0017.tel deleted.
+    let invoice_path = tmp.path().join("telos/notions/Invoice.tel");
+    let mut content = fs::read_to_string(&invoice_path).unwrap();
+    content.push('\n');
+    fs::write(&invoice_path, content).unwrap();
+    fs::remove_file(tmp.path().join("telos/intents/INT-0017.tel")).unwrap();
+
+    // The open change claims only INT-0017.tel, not Invoice.tel.
+    write_change(
+        &ws,
+        &drafted_change(1, vec![StagedOp::RemoveIntent(IntentId(17))]),
+    )
+    .unwrap();
+    let open_changes = open_change_infos(&ws).unwrap();
+
+    let report = compute_state(&ws, &lock, &git, &open_changes).unwrap();
+
+    assert_eq!(report.state, ProjectStateKind::Drifted);
+    assert_eq!(
+        report.drift,
+        vec![DriftEntry {
+            path: RepoPath::new("telos/notions/Invoice.tel"),
+            kind: DriftKind::Modified,
+        }]
+    );
+}
+
+#[test]
+fn compute_state_reports_an_unparseable_change_file_as_changing_with_a_repair_obligation() {
+    let tmp = corpus_repo();
+    let (ws, lock, git) = discover_and_seal(tmp.path());
+
+    fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
+    fs::write(
+        tmp.path().join("telos/changes/CHG-0001.tel"),
+        b"\x00not even a change file{{{".as_slice(),
+    )
+    .unwrap();
+    let open_changes = open_change_infos(&ws).unwrap();
+
+    let report = compute_state(&ws, &lock, &git, &open_changes).unwrap();
+
+    assert_eq!(report.state, ProjectStateKind::Changing);
+    assert!(report.drift.is_empty());
+    assert_eq!(
+        report.open_changes,
+        vec![ChangeSummary {
+            id: ChangeId(1),
+            status: "open".to_string(),
+            obligations: vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()],
         }]
     );
 }
@@ -299,7 +456,7 @@ fn compute_state_reports_git_error_for_a_nested_git_repo_under_a_sealed_workspac
     let git_from_nested = GitRepo::discover(&nested).unwrap();
     assert_ne!(git_from_nested.root(), ws_from_nested.repo_root);
 
-    let err = compute_state(&ws_from_nested, &lock, &git_from_nested).unwrap_err();
+    let err = compute_state(&ws_from_nested, &lock, &git_from_nested, &[]).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosGitError);
     assert!(

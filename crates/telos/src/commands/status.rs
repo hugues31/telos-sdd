@@ -39,7 +39,10 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     let lock = require_lock(&ws)?;
     let git = GitRepo::discover(&ctx.cwd)?;
 
-    let report = compute_state(&ws, &lock, &git)?;
+    // `&[]`: `open_change_infos(ws)` is wired in T5, which also owns the
+    // `status --json` `changes` field this currently-empty slice keeps
+    // frozen at `[]` below.
+    let report = compute_state(&ws, &lock, &git, &[])?;
     let cov = ws
         .load_model()
         .map(|model| coverage(&model))

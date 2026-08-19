@@ -75,12 +75,22 @@ pub struct StateReport {
 ///   M1 -- reconciling it against `telos.toml`'s globs is rule 5, an M2
 ///   reconcile-time concern, not checked here.
 ///
+/// `ws` and `git` are discovered independently by every caller (`status`,
+/// `check --sealed`) -- both from `cwd`, but by unrelated code paths -- so
+/// this starts with [`GitRepo::ensure_matches_workspace_root`]. Without it,
+/// a nested git repository under an initialized workspace would have
+/// `blob_oids` hash paths against the *nested* repo's blobs while `lock`
+/// was sealed against the outer one, and every sealed path would report as
+/// spuriously `Missing` or `Modified` instead of the real problem.
+///
 /// Deliberately does not parse anything -- see the module docs.
 pub fn compute_state(
     ws: &Workspace,
     lock: &Lock,
     git: &GitRepo,
 ) -> Result<StateReport, TelosError> {
+    git.ensure_matches_workspace_root(&ws.repo_root)?;
+
     let current_spec_files = ws.spec_files()?;
 
     let mut sealed: BTreeMap<RepoPath, Oid> = lock.spec.clone();

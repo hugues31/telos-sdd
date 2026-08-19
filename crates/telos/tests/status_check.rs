@@ -8,6 +8,7 @@
 mod common;
 
 use std::fs;
+use std::process::Command;
 
 use serde_json::{Value, json};
 
@@ -254,6 +255,37 @@ fn check_sealed_on_a_drifted_fixture_reports_telos_drift_detected() {
     let envelope = json_stdout(&out);
     assert_eq!(envelope["error"]["code"], json!("TELOS_DRIFT_DETECTED"));
     assert_eq!(envelope["error"]["hint"], json!(DRIFT_HINT));
+}
+
+// --- workspace/git root guard ---------------------------------------------
+
+/// `telos status --json` run from inside a nested git repository under a
+/// sealed workspace: `Workspace::discover` walks up from `cwd` and still
+/// finds the outer `telos/telos.toml`, but `GitRepo::discover` stops at the
+/// *nested* `.git` -- exactly the workspace/git root mismatch
+/// `compute_state`'s guard exists to catch, rather than silently hashing
+/// blobs from the wrong repository and reporting bogus total drift.
+#[test]
+fn status_from_inside_a_nested_git_repo_reports_telos_git_error() {
+    let tmp = with_fixture();
+    let nested = tmp.path().join("vendor/nested-repo");
+    fs::create_dir_all(&nested).unwrap();
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&nested)
+        .status()
+        .expect("failed to run git init");
+    assert!(status.success(), "git init failed in {}", nested.display());
+
+    let out = telos(&nested, &["status", "--json"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["ok"], json!(false));
+    assert_eq!(envelope["command"], json!("status"));
+    assert_eq!(envelope["result"], Value::Null);
+    assert_eq!(envelope["error"]["code"], json!("TELOS_GIT_ERROR"));
+    assert_eq!(envelope["next_actions"], json!([]));
 }
 
 /// A corrupted, unparseable spec file is drift *first*: `--sealed` checks

@@ -163,6 +163,11 @@ impl Lock {
 /// to a file that does not exist. (A missing *spec* file cannot happen here:
 /// `spec_files()` only ever lists files that already exist on disk.)
 ///
+/// `ws` and `git` are discovered independently by every caller, so the
+/// first thing this does is [`GitRepo::ensure_matches_workspace_root`] --
+/// sealing paths relative to a git root that isn't actually `ws.repo_root`
+/// would silently hash the wrong tree.
+///
 /// Does not write the lock to disk -- the caller does that with
 /// [`Lock::write`].
 pub fn seal(
@@ -171,6 +176,8 @@ pub fn seal(
     git: &GitRepo,
     sealed_by: Option<ChangeId>,
 ) -> Result<Lock, TelosError> {
+    git.ensure_matches_workspace_root(&ws.repo_root)?;
+
     let spec_paths = ws.spec_files()?;
     let spec = git.blob_oids(&spec_paths)?;
 

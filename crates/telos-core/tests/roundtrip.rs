@@ -20,11 +20,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use telos_core::emit::{emit_bindings, emit_expr, emit_file, emit_intent, emit_literal};
-use telos_core::ids::{FieldName, IntentId, NotionName, RepoPath, ScenarioId};
+use telos_core::emit::{
+    emit_bindings, emit_constraint, emit_expr, emit_file, emit_intent, emit_literal,
+};
+use telos_core::ids::{ConstraintId, FieldName, IntentId, NotionName, RepoPath, ScenarioId};
 use telos_core::model::{
-    Action, AttrRef, Binding, CmpOp, Expr, InstanceStep, Intent, IntentStatus, Literal, Operand,
-    Scenario, Statement, TelFile, TestRef,
+    Action, AttrRef, Binding, CmpOp, Constraint, ConstraintKind, Expr, InstanceStep, Intent,
+    IntentStatus, Literal, Operand, Rule, Scenario, Scope, Statement, TelFile, TestRef,
 };
 use telos_core::span::{Sp, Span};
 use telos_core::syntax::{
@@ -545,6 +547,36 @@ fn a_proves_binding_without_a_test_name_emits_the_bare_path() {
     assert_eq!(
         emit_bindings(&[proves("tests/billing.rs", 107)]),
         "proves     \"tests/billing.rs\" -> SCN-0107\n"
+    );
+}
+
+fn unsorted_constraint() -> Constraint {
+    Constraint {
+        id: ConstraintId(1),
+        kind: ConstraintKind::Quality,
+        title: "Balances stay positive".to_string(),
+        rule: Rule::Text("Invoices never go negative.".to_string()),
+        scope: Scope::Intents(vec![intent_id(42), intent_id(17)]),
+        check: None,
+    }
+}
+
+#[test]
+fn constraint_scope_intents_are_sorted_ascending_on_emit() {
+    // C.4.3: `scope`'s intent list is sorted, not echoed in model order.
+    let emitted = emit_constraint(&unsorted_constraint());
+    assert!(emitted.contains("\n  scope INT-0017, INT-0042\n"));
+}
+
+#[test]
+fn constraint_with_unsorted_scope_survives_emit_parse_emit() {
+    let emitted = emit_file(&TelFile::Constraint(unsorted_constraint()));
+    let reparsed = parse_constraint_file(&RepoPath::new("telos/constraints/X.tel"), &emitted)
+        .unwrap_or_else(|d| panic!("must parse:\n{emitted}\n({} diagnostics)", d.len()));
+    assert_eq!(
+        emit_file(&TelFile::Constraint(reparsed)),
+        emitted,
+        "emit -> parse -> emit must be a fixed point"
     );
 }
 

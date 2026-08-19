@@ -311,7 +311,11 @@ pub fn emit_constraint(c: &Constraint) -> String {
     match &c.scope {
         Scope::Global => out.push_str("global\n"),
         Scope::Intents(ids) => {
-            let list: Vec<String> = ids.iter().map(|id| id.node.to_string()).collect();
+            // Sorted ascending by id regardless of model order (C.4.3):
+            // this is a canonicalization, not an echo of source order.
+            let mut ids: Vec<IntentId> = ids.iter().map(|id| id.node).collect();
+            ids.sort();
+            let list: Vec<String> = ids.iter().map(IntentId::to_string).collect();
             w!(out, "{}\n", list.join(", "));
         }
     }

@@ -273,6 +273,52 @@ fn compute_state_answers_drifted_on_a_corrupted_spec_file_without_parsing() {
     );
 }
 
+// --- workspace/git root guard -------------------------------------------
+
+#[test]
+fn compute_state_reports_git_error_for_a_nested_git_repo_under_a_sealed_workspace() {
+    let tmp = corpus_repo();
+    let (ws, lock, _git) = discover_and_seal(tmp.path());
+
+    // A second, independent git repository nested a couple of levels below
+    // the sealed workspace's root -- e.g. a vendored dependency or an
+    // accidentally-`git init`ed scratch directory.
+    let nested = tmp.path().join("src/vendor/nested-repo");
+    fs::create_dir_all(&nested).unwrap();
+    run_git(&nested, &["init", "--quiet"]);
+
+    // `Workspace::discover` walks up from `nested` and still finds the
+    // outer `telos/telos.toml` -- `ws.repo_root` is the *outer* root.
+    let ws_from_nested = Workspace::discover(&nested).unwrap();
+    assert_eq!(ws_from_nested.repo_root, ws.repo_root);
+
+    // `GitRepo::discover` walks up from `nested` too, but stops at the
+    // *first* `.git` it finds -- the nested repo, not the outer one. This
+    // is exactly the mismatch `status`/`check --sealed` can hit when they
+    // discover a `Workspace` and a `GitRepo` independently from `cwd`.
+    let git_from_nested = GitRepo::discover(&nested).unwrap();
+    assert_ne!(git_from_nested.root(), ws_from_nested.repo_root);
+
+    let err = compute_state(&ws_from_nested, &lock, &git_from_nested).unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::TelosGitError);
+    assert!(
+        err.message
+            .contains(&ws_from_nested.repo_root.display().to_string())
+            && err
+                .message
+                .contains(&git_from_nested.root().display().to_string()),
+        "expected the message to name both roots, got: {}",
+        err.message
+    );
+    assert_eq!(
+        err.hint.as_deref(),
+        Some(
+            "the telos workspace and the git repository must share the same root; run telos from the repository that contains telos/"
+        )
+    );
+}
+
 // --- coverage --------------------------------------------------------------
 
 #[test]

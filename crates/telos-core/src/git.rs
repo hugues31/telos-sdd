@@ -9,9 +9,19 @@
 //! file out with which line endings, which is what makes a lock file
 //! sealed on Linux verifiable, byte for byte, on Windows.
 //!
-//! Checking that a [`crate::workspace::Workspace`]'s `repo_root` matches a
-//! [`GitRepo`]'s `root` is left to the caller (Task 11's `seal`); this
-//! module only discovers the repository and hashes paths in it.
+//! [`GitRepo::ensure_matches_workspace_root`] verifies that a
+//! [`crate::workspace::Workspace`]'s `repo_root` and this [`GitRepo`]'s
+//! `root` name the same directory (canonicalized on both sides, so a
+//! symlinked route to the same place -- e.g. macOS's `/tmp` -- still
+//! compares equal). The check itself lives here, but the *calling* is done
+//! by [`crate::lock::seal`] and [`crate::state::compute_state`] -- every
+//! command built on either (`init`, `status`, `check --sealed`, and, from
+//! M2, the rest) inherits it from there rather than needing to remember to
+//! call it itself. Without it, a `Workspace` and a `GitRepo` discovered
+//! independently from `cwd` (as `status` and `check --sealed` do) can
+//! silently name two different repositories -- a nested git repo under an
+//! initialized workspace, say -- and `compute_state` would then hash blobs
+//! from the wrong tree and report bogus drift.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -85,6 +95,38 @@ impl GitRepo {
     /// --show-toplevel`.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Verifies that `ws_root` (a [`crate::workspace::Workspace`]'s
+    /// `repo_root`) and `self.root` name the same directory.
+    ///
+    /// Both sides are canonicalized (`std::fs::canonicalize`, resolving
+    /// symlinks and `.`/`..`) before comparing, so two paths that reach the
+    /// same directory by different routes -- notably a symlinked `/tmp` on
+    /// macOS -- still compare equal instead of false-positiving a mismatch.
+    ///
+    /// A canonicalization I/O failure (either root vanished, or isn't
+    /// readable) and a genuine mismatch are both reported as
+    /// `TelosGitError`; a real mismatch also carries a hint. See the module
+    /// docs for why this lives here but is called from `seal` and
+    /// `compute_state`, not from here.
+    pub fn ensure_matches_workspace_root(&self, ws_root: &Path) -> Result<(), TelosError> {
+        let git_canon = canonicalize(&self.root)?;
+        let ws_canon = canonicalize(ws_root)?;
+        if git_canon != ws_canon {
+            return Err(TelosError::new(
+                ErrorCode::TelosGitError,
+                format!(
+                    "the telos workspace root (`{}`) and the git repository root (`{}`) do not match",
+                    ws_root.display(),
+                    self.root.display(),
+                ),
+            )
+            .hint(
+                "the telos workspace and the git repository must share the same root; run telos from the repository that contains telos/",
+            ));
+        }
+        Ok(())
     }
 
     /// Hashes `paths` as git blobs, filters applied, in exactly one child
@@ -205,4 +247,16 @@ impl GitRepo {
         }
         path
     }
+}
+
+/// `std::fs::canonicalize`, with I/O failure reported as `TelosGitError`
+/// naming the offending path -- the only failure mode
+/// [`GitRepo::ensure_matches_workspace_root`] has to translate.
+fn canonicalize(path: &Path) -> Result<PathBuf, TelosError> {
+    std::fs::canonicalize(path).map_err(|e| {
+        TelosError::new(
+            ErrorCode::TelosGitError,
+            format!("failed to resolve `{}`: {e}", path.display()),
+        )
+    })
 }

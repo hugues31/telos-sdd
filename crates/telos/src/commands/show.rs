@@ -20,7 +20,7 @@ use telos_core::model::TelosModel;
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
 
-use crate::commands::{Ctx, diagnostics_to_error};
+use crate::commands::{Ctx, diagnostics_to_error, nearest_id, unknown, unparsable};
 use crate::envelope::{CmdResult, Outcome};
 
 pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
@@ -39,52 +39,6 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
             "changes are not supported in M1",
         )),
     }
-}
-
-/// «cannot parse `foo-bar` as an id or notion name» -- `show`'s own
-/// diagnosis for an argument `EntityRef::from_str` rejects. It replaces
-/// whatever error the fallback `NotionName::new` produced (a parse error
-/// about a notion name specifically, since a bare word is the fallback
-/// every unprefixed argument takes) with one that names what `show` -- not
-/// the notion grammar -- actually expected.
-fn unparsable(target: &str) -> TelosError {
-    TelosError::new(
-        ErrorCode::TelosReferenceUnknown,
-        format!("cannot parse `{target}` as an id or notion name"),
-    )
-}
-
-/// «unknown intent `INT-9999`» and friends, with `hint` attached only when
-/// one was found.
-fn unknown(noun: &str, id: impl std::fmt::Display, hint: Option<String>) -> TelosError {
-    let error = TelosError::new(
-        ErrorCode::TelosReferenceUnknown,
-        format!("unknown {noun} `{id}`"),
-    );
-    match hint {
-        Some(hint) => error.hint(hint),
-        None => error,
-    }
-}
-
-/// The nearest existing id to `target` by numeric distance, rendered and
-/// wrapped as a hint.
-///
-/// This is `show`'s own suggestion algorithm for a typed id that resolves
-/// to nothing, distinct from the edit-distance `suggest::closest` the
-/// parser and semantic checker use on notion names and on ids compared as
-/// strings: two ids that look nothing alike as text (`INT-0042` vs
-/// `INT-9999`) can still be numerically close, which is the more useful
-/// suggestion once the argument's prefix has already picked the entity's
-/// type.
-fn nearest_id(
-    target: u32,
-    existing: impl Iterator<Item = u32>,
-    render: impl Fn(u32) -> String,
-) -> Option<String> {
-    existing
-        .min_by_key(|&n| target.abs_diff(n))
-        .map(|n| format!("closest is {}", render(n)))
 }
 
 fn show_notion(model: &TelosModel, name: &NotionName) -> CmdResult {

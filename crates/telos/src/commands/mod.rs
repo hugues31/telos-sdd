@@ -4,8 +4,10 @@
 //! what keeps every command's human and JSON output consistent.
 
 pub mod check;
+pub mod impact;
 pub mod init;
 pub mod list;
+pub mod query;
 pub mod show;
 pub mod status;
 
@@ -14,7 +16,11 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
+use telos_core::graph::NodeRef;
+use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
 use telos_core::lock::Lock;
+use telos_core::model::TelosModel;
+use telos_core::suggest;
 use telos_core::workspace::Workspace;
 
 use crate::envelope::{CmdResult, Outcome};
@@ -80,4 +86,95 @@ pub(crate) fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
         error.message.push_str(&extra.message);
     }
     error
+}
+
+// --- shared `show`/`query`/`impact` suggestion helpers ----------------------
+//
+// A typed id (`INT-9999`) and a bare notion name (`Rogue`) that resolve to
+// nothing get different -- and deliberately different -- suggestion
+// algorithms: numeric distance for an id (two ids that look nothing alike as
+// text can still be numerically close, once the argument's prefix has
+// already picked the entity's type), edit distance for a name (`suggest::
+// closest`, the same one the parser and semantic checker use). `show` is
+// where both were first written; `query`'s `--using`/`--triggered-by` and
+// `impact`'s argument resolution reuse them rather than reimplementing
+// either.
+
+/// «cannot parse `foo-bar` as an id or notion name» -- the diagnosis for an
+/// argument `EntityRef::from_str` rejects outright, replacing whatever error
+/// the fallback `NotionName::new` produced (a parse error about a notion
+/// name specifically, since a bare word is the fallback every unprefixed
+/// argument takes) with one that names what the command -- not the notion
+/// grammar -- actually expected.
+pub(crate) fn unparsable(target: &str) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosReferenceUnknown,
+        format!("cannot parse `{target}` as an id or notion name"),
+    )
+}
+
+/// «unknown intent `INT-9999`» and friends, with `hint` attached only when
+/// one was found.
+pub(crate) fn unknown(noun: &str, id: impl std::fmt::Display, hint: Option<String>) -> TelosError {
+    let error = TelosError::new(
+        ErrorCode::TelosReferenceUnknown,
+        format!("unknown {noun} `{id}`"),
+    );
+    match hint {
+        Some(hint) => error.hint(hint),
+        None => error,
+    }
+}
+
+/// The nearest existing id to `target` by numeric distance, rendered and
+/// wrapped as a hint.
+pub(crate) fn nearest_id(
+    target: u32,
+    existing: impl Iterator<Item = u32>,
+    render: impl Fn(u32) -> String,
+) -> Option<String> {
+    existing
+        .min_by_key(|&n| target.abs_diff(n))
+        .map(|n| format!("closest is {}", render(n)))
+}
+
+/// Turns a `show`/`impact` argument into the graph node it names, or the
+/// same «unknown ...» error (with the appropriate suggestion) `show` reports
+/// for the same argument -- `impact` needs only the node, not the entity's
+/// full data `show` also prints, so it resolves through this rather than
+/// through `show`'s own per-type lookups.
+pub(crate) fn resolve_or_hint(model: &TelosModel, r: &EntityRef) -> Result<NodeRef, TelosError> {
+    if let Some(node) = model.resolve(r) {
+        return Ok(node);
+    }
+    match r {
+        EntityRef::Notion(name) => {
+            let known: Vec<&str> = model.notions.keys().map(NotionName::as_str).collect();
+            let hint = suggest::closest(name.as_str(), known.iter().copied())
+                .map(|c| format!("closest is `{c}`"));
+            Err(unknown("notion", name, hint))
+        }
+        EntityRef::Intent(id) => {
+            let hint = nearest_id(id.0, model.intents.keys().map(|i| i.0), |n| {
+                IntentId(n).to_string()
+            });
+            Err(unknown("intent", id, hint))
+        }
+        EntityRef::Scenario(id) => {
+            let hint = nearest_id(id.0, model.scenario_owner.keys().map(|s| s.0), |n| {
+                ScenarioId(n).to_string()
+            });
+            Err(unknown("scenario", id, hint))
+        }
+        EntityRef::Constraint(id) => {
+            let hint = nearest_id(id.0, model.constraints.keys().map(|c| c.0), |n| {
+                ConstraintId(n).to_string()
+            });
+            Err(unknown("constraint", id, hint))
+        }
+        EntityRef::Change(_) => Err(TelosError::new(
+            ErrorCode::TelosReferenceUnknown,
+            "changes are not supported in M1",
+        )),
+    }
 }

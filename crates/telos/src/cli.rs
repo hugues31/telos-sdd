@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 
 use telos_core::error::{ErrorCode, TelosError};
 
-use crate::commands::{self, Ctx, list::EntityType};
+use crate::commands::{self, Ctx, list::EntityType, query::QueryCommand};
 use crate::envelope::CmdResult;
 use crate::render::render;
 
@@ -53,6 +53,17 @@ enum Command {
         /// Which kind of entity to list.
         kind: EntityType,
     },
+    /// Answer with entities of one kind, filtered.
+    Query {
+        #[command(subcommand)]
+        query: QueryCommand,
+    },
+    /// Report everything a change to one entity would ripple into.
+    Impact {
+        /// A typed id (`INT-0042`, `SCN-0107`, `CON-0003`) or a bare notion
+        /// name (`Invoice`).
+        target: String,
+    },
 }
 
 impl Command {
@@ -65,6 +76,8 @@ impl Command {
             Command::Check { .. } => "check",
             Command::Show { .. } => "show",
             Command::List { .. } => "list",
+            Command::Query { .. } => "query",
+            Command::Impact { .. } => "impact",
         }
     }
 }
@@ -100,6 +113,8 @@ fn execute(command: &Command) -> CmdResult {
         Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
         Command::Show { target } => commands::show::run(&ctx()?, target),
         Command::List { kind } => commands::list::run(&ctx()?, *kind),
+        Command::Query { query } => commands::query::run(&ctx()?, query),
+        Command::Impact { target } => commands::impact::run(&ctx()?, target),
     }
 }
 

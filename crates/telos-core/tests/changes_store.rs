@@ -230,6 +230,34 @@ fn open_change_infos_treats_an_unparseable_file_as_a_best_effort_open_change() {
 }
 
 #[test]
+fn open_change_infos_treats_invalid_utf8_bytes_as_a_best_effort_open_change() {
+    // Distinct from the "syntactically wrong but valid UTF-8" case above:
+    // `parse_change_file` takes `&str`, so bytes like these can never even
+    // reach it -- `open_change_infos` must still degrade rather than
+    // error (the bug this test guards against: `fs::read_to_string`
+    // erroring before the best-effort arm ever runs).
+    let tmp = copied_corpus();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
+    fs::write(
+        tmp.path().join("telos/changes/CHG-0001.tel"),
+        b"\xff\xfe garbage".as_slice(),
+    )
+    .unwrap();
+
+    let infos = open_change_infos(&ws).unwrap();
+
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].id, ChangeId(1));
+    assert_eq!(infos[0].status, ChangeStatus::Open);
+    assert!(infos[0].claims.is_empty());
+    assert_eq!(
+        infos[0].obligations,
+        vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()]
+    );
+}
+
+#[test]
 fn open_change_infos_is_empty_when_no_change_is_open() {
     let tmp = copied_corpus();
     let ws = Workspace::discover(tmp.path()).unwrap();

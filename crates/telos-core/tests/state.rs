@@ -430,6 +430,39 @@ fn compute_state_reports_an_unparseable_change_file_as_changing_with_a_repair_ob
     );
 }
 
+/// Same shape as the test above, but the file is not even valid UTF-8 --
+/// bytes `parse_change_file` (`&str`-only) can never be offered. This must
+/// still reach `compute_state` as a `Changing` report with the repair
+/// obligation, never as an `Err`: `open_change_infos` is best-effort per
+/// D15, and a truncated write or binary corruption is exactly the on-disk
+/// damage that guarantee exists to survive.
+#[test]
+fn compute_state_reports_invalid_utf8_change_bytes_as_changing_never_an_error() {
+    let tmp = corpus_repo();
+    let (ws, lock, git) = discover_and_seal(tmp.path());
+
+    fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
+    fs::write(
+        tmp.path().join("telos/changes/CHG-0001.tel"),
+        b"\xff\xfe garbage".as_slice(),
+    )
+    .unwrap();
+    let open_changes = open_change_infos(&ws).unwrap();
+
+    let report = compute_state(&ws, &lock, &git, &open_changes).unwrap();
+
+    assert_eq!(report.state, ProjectStateKind::Changing);
+    assert!(report.drift.is_empty());
+    assert_eq!(
+        report.open_changes,
+        vec![ChangeSummary {
+            id: ChangeId(1),
+            status: "open".to_string(),
+            obligations: vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()],
+        }]
+    );
+}
+
 // --- workspace/git root guard -------------------------------------------
 
 #[test]

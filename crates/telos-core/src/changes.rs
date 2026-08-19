@@ -124,29 +124,70 @@ pub fn delete_change(ws: &Workspace, id: ChangeId) -> Result<(), TelosError> {
 /// that needs to know what is open. `id` in that case comes from the file
 /// name [`list_change_ids`] already validated, not from the unreadable
 /// content.
+///
+/// "Fails to parse" is read broadly here, on purpose: bytes that are not
+/// valid UTF-8 (a truncated write, binary corruption) can never reach
+/// [`parse_change_file`] (it takes `&str`) and are exactly the kind of
+/// on-disk damage D15 exists to survive, so they get the same repair
+/// obligation as a syntax error rather than aborting the whole scan -- the
+/// same is true of any other I/O failure reading an individual file (a
+/// permission error, say) once its id has already been confirmed present
+/// by [`list_change_ids`]. The one exception is the file having vanished
+/// (`NotFound`) between that listing and this read: there is nothing left
+/// to repair, so that id is silently skipped rather than reported, on the
+/// same "list, then read" TOCTOU basis [`Workspace::load_model`] accepts
+/// elsewhere in this crate. [`read_change`] is the strict counterpart that
+/// still errors loudly on all of this -- only this best-effort enumeration
+/// degrades.
 pub fn open_change_infos(ws: &Workspace) -> Result<Vec<OpenChangeInfo>, TelosError> {
     let ids = list_change_ids(ws)?;
-    let mut infos = Vec::with_capacity(ids.len());
-    for id in ids {
-        let path = change_path(ws, id);
-        let src = fs::read_to_string(&path).map_err(|e| io_err(&path, e))?;
-        let info = match parse_change_file(&repo_path_for(id), &src) {
-            Ok(change) => OpenChangeInfo {
+    Ok(ids
+        .into_iter()
+        .filter_map(|id| read_open_change_info(ws, id))
+        .collect())
+}
+
+/// Reads and (best-effort) reports one change file for [`open_change_infos`].
+///
+/// `None` only for the file having vanished since [`list_change_ids`] saw it
+/// -- the "list, then read" TOCTOU every id here is already exposed to --
+/// there is nothing left to repair, so that id is dropped rather than
+/// reported. Every other outcome is `Some`: a clean parse, a syntax error, a
+/// file that is not valid UTF-8 at all (`parse_change_file` takes `&str`,
+/// so it can never even be offered such bytes), or any other per-file I/O
+/// failure (a permission error, say) all fold into the same best-effort
+/// [`unparseable_info`] -- see [`open_change_infos`]'s doc comment for why.
+fn read_open_change_info(ws: &Workspace, id: ChangeId) -> Option<OpenChangeInfo> {
+    let path = change_path(ws, id);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(unparseable_info(id)),
+    };
+    match String::from_utf8(bytes) {
+        Ok(src) => match parse_change_file(&repo_path_for(id), &src) {
+            Ok(change) => Some(OpenChangeInfo {
                 id: change.id,
                 status: change.status,
                 claims: change.claims(),
                 obligations: change.obligations(),
-            },
-            Err(_diagnostics) => OpenChangeInfo {
-                id,
-                status: ChangeStatus::Open,
-                claims: BTreeSet::new(),
-                obligations: vec![format!("repair telos/changes/{id}.tel (unparseable)")],
-            },
-        };
-        infos.push(info);
+            }),
+            Err(_diagnostics) => Some(unparseable_info(id)),
+        },
+        Err(_not_utf8) => Some(unparseable_info(id)),
     }
-    Ok(infos)
+}
+
+/// The best-effort [`OpenChangeInfo`] for a change file that could not be
+/// read as canonical `.tel` source at all -- invalid UTF-8, a parse
+/// failure, or any other per-file I/O error -- per D15.
+fn unparseable_info(id: ChangeId) -> OpenChangeInfo {
+    OpenChangeInfo {
+        id,
+        status: ChangeStatus::Open,
+        claims: BTreeSet::new(),
+        obligations: vec![format!("repair telos/changes/{id}.tel (unparseable)")],
+    }
 }
 
 // --- shared helpers ----------------------------------------------------
@@ -211,4 +252,58 @@ fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
         error.message.push_str(&extra.message);
     }
     error
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// A `Workspace` built directly rather than through `discover` -- no
+    /// `telos/telos.toml` needs to exist on disk for these unit-level
+    /// tests, which exercise `read_open_change_info` on its own, one
+    /// filesystem outcome at a time.
+    fn workspace(root: &std::path::Path) -> Workspace {
+        Workspace {
+            repo_root: root.to_path_buf(),
+            telos_dir: root.join("telos"),
+            config: Config::default(),
+        }
+    }
+
+    /// The TOCTOU case black-box tests cannot force deterministically: a
+    /// file `list_change_ids` never even listed (the same observable state
+    /// as one that vanished right after being listed) is skipped, not
+    /// reported.
+    #[test]
+    fn read_open_change_info_skips_a_file_that_is_not_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = workspace(tmp.path());
+
+        assert_eq!(read_open_change_info(&ws, ChangeId(1)), None);
+    }
+
+    #[test]
+    fn read_open_change_info_is_best_effort_on_invalid_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = workspace(tmp.path());
+        fs::create_dir_all(changes_dir(&ws)).unwrap();
+        fs::write(
+            change_path(&ws, ChangeId(1)),
+            b"\xff\xfe garbage".as_slice(),
+        )
+        .unwrap();
+
+        let info = read_open_change_info(&ws, ChangeId(1)).unwrap();
+
+        assert_eq!(
+            info,
+            OpenChangeInfo {
+                id: ChangeId(1),
+                status: ChangeStatus::Open,
+                claims: BTreeSet::new(),
+                obligations: vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()],
+            }
+        );
+    }
 }

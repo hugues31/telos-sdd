@@ -1,13 +1,14 @@
-//! Typed identifiers shared across the engine.
-//!
-//! Only `RepoPath` is defined here for now, because `error::Diagnostic`
-//! needs it. The rest of this module (`IntentId`, `ScenarioId`,
-//! `ConstraintId`, `ChangeId`, `NotionName`, `FieldName`, `EntityRef`, ...)
-//! is Task 3's responsibility, per Annex B's `ids.rs` section.
+//! Typed identifiers shared across the engine: numeric entity ids
+//! (`IntentId`, `ScenarioId`, `ConstraintId`, `ChangeId`), validated names
+//! (`NotionName`, `FieldName`), a repo-relative path (`RepoPath`), a
+//! `show`/`impact` argument (`EntityRef`), and a test locator (`TestRef`).
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::Serialize;
+
+use crate::error::{ErrorCode, TelosError};
 
 /// Repo-relative path. The separator is always `/`; conversion to/from the
 /// host OS path representation happens only at I/O boundaries.
@@ -33,6 +34,204 @@ impl fmt::Display for RepoPath {
     }
 }
 
+/// Defines a numeric, prefixed entity id (`IntentId`, `ScenarioId`,
+/// `ConstraintId`, `ChangeId`).
+///
+/// - `Display` renders `<PREFIX>-NNNN`, zero-padded to a minimum of 4
+///   digits (growing beyond 4 digits for larger numbers, never truncating).
+/// - `FromStr` is strict: the prefix must match exactly (including case),
+///   followed by `-`, followed by at least 4 ASCII digits and nothing else.
+/// - `Serialize` is implemented by hand rather than derived with
+///   `#[serde(transparent)]`: on a `u32` newtype, `transparent` would
+///   serialize the raw number (`42`), not the `<PREFIX>-NNNN` string this
+///   type is meant to round-trip as (`"INT-0042"`).
+macro_rules! entity_id {
+    ($name:ident, $prefix:literal) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(pub u32);
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, concat!($prefix, "-{:04}"), self.0)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = TelosError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                const PREFIX: &str = concat!($prefix, "-");
+                let invalid = || {
+                    TelosError::new(
+                        ErrorCode::TelosParseError,
+                        format!(
+                            "expected an id of the form `{PREFIX}NNNN` (at least 4 digits): `{s}`"
+                        ),
+                    )
+                };
+                let digits = s.strip_prefix(PREFIX).ok_or_else(invalid)?;
+                if digits.len() < 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(invalid());
+                }
+                let n: u32 = digits.parse().map_err(|_| invalid())?;
+                Ok(Self(n))
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.collect_str(self)
+            }
+        }
+    };
+}
+
+entity_id!(IntentId, "INT");
+entity_id!(ScenarioId, "SCN");
+entity_id!(ConstraintId, "CON");
+entity_id!(ChangeId, "CHG");
+
+/// A notion's name: PascalCase, `^[A-Z][A-Za-z0-9]*$`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct NotionName(String);
+
+impl NotionName {
+    /// Validates and builds a `NotionName`. Rejects anything that isn't
+    /// PascalCase (`^[A-Z][A-Za-z0-9]*$`).
+    pub fn new(s: impl Into<String>) -> Result<Self, TelosError> {
+        let s = s.into();
+        if !is_pascal_case(&s) {
+            return Err(TelosError::new(
+                ErrorCode::TelosParseError,
+                format!("notion name must be PascalCase: `{s}`"),
+            ));
+        }
+        Ok(Self(s))
+    }
+
+    /// Borrows the underlying name as a `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for NotionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn is_pascal_case(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => chars.all(|c| c.is_ascii_alphanumeric()),
+        _ => false,
+    }
+}
+
+/// A notion attribute or relation's field name: lower-kebab-case,
+/// `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct FieldName(String);
+
+impl FieldName {
+    /// Validates and builds a `FieldName`. Rejects anything that isn't
+    /// lower-kebab-case (`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`).
+    pub fn new(s: impl Into<String>) -> Result<Self, TelosError> {
+        let s = s.into();
+        if !is_lower_kebab(&s) {
+            return Err(TelosError::new(
+                ErrorCode::TelosParseError,
+                format!("field name must be lower-kebab-case: `{s}`"),
+            ));
+        }
+        Ok(Self(s))
+    }
+
+    /// Borrows the underlying name as a `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for FieldName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn is_lower_kebab(s: &str) -> bool {
+    let mut segments = s.split('-');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    let mut first_chars = first.chars();
+    match first_chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    if !first_chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        return false;
+    }
+    segments.all(|seg| {
+        !seg.is_empty()
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    })
+}
+
+/// Argument of `show`/`impact`: either a typed entity id or a bare notion
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum EntityRef {
+    Notion(NotionName),
+    Intent(IntentId),
+    Scenario(ScenarioId),
+    Constraint(ConstraintId),
+    Change(ChangeId),
+}
+
+impl FromStr for EntityRef {
+    type Err = TelosError;
+
+    /// Dispatches on the `INT-`/`SCN-`/`CON-`/`CHG-` prefix, delegating to
+    /// the corresponding typed `FromStr`; anything else must be a valid
+    /// PascalCase notion name.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with("INT-") {
+            return s.parse::<IntentId>().map(EntityRef::Intent);
+        }
+        if s.starts_with("SCN-") {
+            return s.parse::<ScenarioId>().map(EntityRef::Scenario);
+        }
+        if s.starts_with("CON-") {
+            return s.parse::<ConstraintId>().map(EntityRef::Constraint);
+        }
+        if s.starts_with("CHG-") {
+            return s.parse::<ChangeId>().map(EntityRef::Change);
+        }
+        NotionName::new(s).map(EntityRef::Notion)
+    }
+}
+
+impl fmt::Display for EntityRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EntityRef::Notion(n) => n.fmt(f),
+            EntityRef::Intent(i) => i.fmt(f),
+            EntityRef::Scenario(s) => s.fmt(f),
+            EntityRef::Constraint(c) => c.fmt(f),
+            EntityRef::Change(c) => c.fmt(f),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +254,161 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&path).unwrap(),
             "\"telos/telos.toml\""
+        );
+    }
+
+    // --- IntentId / ScenarioId / ConstraintId / ChangeId (entity_id!) ---
+
+    #[test]
+    fn intent_id_parses_from_its_display_form() {
+        // `Result<_, TelosError>` isn't `PartialEq` (`TelosError` deliberately
+        // has no `PartialEq`, per Task 2's frozen `error.rs` derive list), so
+        // the `Ok` side is compared directly rather than the whole `Result`.
+        assert_eq!("INT-0042".parse::<IntentId>().unwrap(), IntentId(42));
+    }
+
+    #[test]
+    fn intent_id_displays_zero_padded_to_four_digits() {
+        assert_eq!(IntentId(42).to_string(), "INT-0042");
+    }
+
+    #[test]
+    fn intent_id_display_does_not_truncate_beyond_four_digits() {
+        assert_eq!(IntentId(12345).to_string(), "INT-12345");
+    }
+
+    #[test]
+    fn intent_id_parse_rejects_under_padded_input() {
+        assert!("INT-42".parse::<IntentId>().is_err());
+    }
+
+    #[test]
+    fn intent_id_parse_rejects_lowercase_prefix() {
+        assert!("int-0042".parse::<IntentId>().is_err());
+    }
+
+    #[test]
+    fn intent_id_parse_rejects_wrong_prefix() {
+        assert!("SCN-0042".parse::<IntentId>().is_err());
+    }
+
+    #[test]
+    fn intent_id_parse_rejects_non_digit_suffix() {
+        assert!("INT-004x".parse::<IntentId>().is_err());
+    }
+
+    #[test]
+    fn intent_id_serializes_as_its_display_string() {
+        assert_eq!(
+            serde_json::to_string(&IntentId(42)).unwrap(),
+            "\"INT-0042\""
+        );
+    }
+
+    #[test]
+    fn scenario_id_round_trips_through_display_and_from_str() {
+        assert_eq!("SCN-0107".parse::<ScenarioId>().unwrap(), ScenarioId(107));
+        assert_eq!(ScenarioId(107).to_string(), "SCN-0107");
+        assert_eq!(
+            serde_json::to_string(&ScenarioId(107)).unwrap(),
+            "\"SCN-0107\""
+        );
+    }
+
+    #[test]
+    fn constraint_id_round_trips_through_display_and_from_str() {
+        assert_eq!("CON-0003".parse::<ConstraintId>().unwrap(), ConstraintId(3));
+        assert_eq!(ConstraintId(3).to_string(), "CON-0003");
+        assert_eq!(
+            serde_json::to_string(&ConstraintId(3)).unwrap(),
+            "\"CON-0003\""
+        );
+    }
+
+    #[test]
+    fn change_id_round_trips_through_display_and_from_str() {
+        assert_eq!("CHG-0007".parse::<ChangeId>().unwrap(), ChangeId(7));
+        assert_eq!(ChangeId(7).to_string(), "CHG-0007");
+        assert_eq!(serde_json::to_string(&ChangeId(7)).unwrap(), "\"CHG-0007\"");
+    }
+
+    // --- NotionName ---
+
+    #[test]
+    fn notion_name_rejects_lowercase_leading_char() {
+        assert!(NotionName::new("invoice").is_err());
+    }
+
+    #[test]
+    fn notion_name_accepts_pascal_case() {
+        assert!(NotionName::new("Invoice").is_ok());
+    }
+
+    // --- FieldName ---
+
+    #[test]
+    fn field_name_accepts_lower_kebab_case() {
+        assert!(FieldName::new("issued-to").is_ok());
+    }
+
+    #[test]
+    fn field_name_rejects_pascal_case() {
+        assert!(FieldName::new("IssuedTo").is_err());
+    }
+
+    // --- EntityRef ---
+
+    #[test]
+    fn entity_ref_parses_scenario_prefix() {
+        assert_eq!(
+            "SCN-0107".parse::<EntityRef>().unwrap(),
+            EntityRef::Scenario(ScenarioId(107))
+        );
+    }
+
+    #[test]
+    fn entity_ref_parses_bare_pascal_case_as_notion() {
+        assert_eq!(
+            "Invoice".parse::<EntityRef>().unwrap(),
+            EntityRef::Notion(NotionName::new("Invoice").unwrap())
+        );
+    }
+
+    #[test]
+    fn entity_ref_parses_all_id_prefixes() {
+        assert_eq!(
+            "INT-0001".parse::<EntityRef>().unwrap(),
+            EntityRef::Intent(IntentId(1))
+        );
+        assert_eq!(
+            "CON-0001".parse::<EntityRef>().unwrap(),
+            EntityRef::Constraint(ConstraintId(1))
+        );
+        assert_eq!(
+            "CHG-0001".parse::<EntityRef>().unwrap(),
+            EntityRef::Change(ChangeId(1))
+        );
+    }
+
+    #[test]
+    fn entity_ref_rejects_neither_id_nor_pascal_case() {
+        assert!("not-a-valid-ref".parse::<EntityRef>().is_err());
+    }
+
+    #[test]
+    fn entity_ref_display_delegates_to_inner_display() {
+        assert_eq!(EntityRef::Scenario(ScenarioId(107)).to_string(), "SCN-0107");
+        assert_eq!(
+            EntityRef::Notion(NotionName::new("Invoice").unwrap()).to_string(),
+            "Invoice"
+        );
+    }
+
+    #[test]
+    fn entity_ref_serializes_externally_tagged_by_variant() {
+        assert_eq!(
+            serde_json::to_string(&EntityRef::Scenario(ScenarioId(107))).unwrap(),
+            "{\"Scenario\":\"SCN-0107\"}"
         );
     }
 }

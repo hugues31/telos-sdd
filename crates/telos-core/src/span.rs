@@ -1,6 +1,8 @@
 //! Byte-offset source spans, used to attach positions to referential leaves
 //! of the parsed AST (identifiers referencing notions, fields, ids...).
 
+use serde::{Serialize, Serializer};
+
 /// A byte-offset range `[start, end)` into a source file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Span {
@@ -13,6 +15,19 @@ pub struct Span {
 pub struct Sp<T> {
     pub node: T,
     pub span: Span,
+}
+
+impl<T: Serialize> Serialize for Sp<T> {
+    /// Serializes as the bare `node`, dropping `span`: a `Span` is parse-time
+    /// position metadata for diagnostics, not part of a node's semantic
+    /// (JSON) shape. This lets model types (Annex B `model/*.rs`) that wrap
+    /// referential leaves in `Sp<T>` derive `Serialize` in turn.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.node.serialize(serializer)
+    }
 }
 
 /// Converts a byte `offset` into `src` to a 1-indexed `(line, col)` pair.
@@ -70,5 +85,14 @@ mod tests {
         };
         assert_eq!(sp.node, "Invoice");
         assert_eq!(sp.span, Span { start: 5, end: 12 });
+    }
+
+    #[test]
+    fn sp_serializes_as_the_bare_node_dropping_span() {
+        let sp = Sp {
+            node: "Invoice",
+            span: Span { start: 5, end: 12 },
+        };
+        assert_eq!(serde_json::to_string(&sp).unwrap(), "\"Invoice\"");
     }
 }

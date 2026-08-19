@@ -1,10 +1,9 @@
 //! The in-memory data model: one parsed `.tel` file (`TelFile`), and the
 //! whole-spec aggregate built from all of them (`TelosModel`).
 //!
-//! `TelosModel` is partial here: `graph` (the relation graph), `sources`
-//! (file -> entity map), and the `resolve()` method are added in Task 8,
-//! once `graph.rs` exists. Only `notions`, `intents`, `constraints`,
-//! `bindings`, `scenario_owner`, and `scenario()` are implemented now.
+//! A `TelosModel` is only ever produced by [`crate::semantic::build_model`],
+//! which is what fills `scenario_owner`, `graph` and `sources` and what
+//! guarantees that every reference inside it resolves.
 
 pub mod binding;
 pub mod constraint;
@@ -24,7 +23,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::ids::{ConstraintId, IntentId, NotionName, ScenarioId};
+use crate::graph::{Graph, NodeRef};
+use crate::ids::{ConstraintId, EntityRef, IntentId, NotionName, RepoPath, ScenarioId};
 
 /// One parsed `.tel` file's content, before it is folded into a
 /// `TelosModel` by the semantic pass.
@@ -36,9 +36,21 @@ pub enum TelFile {
     Bindings(Vec<Binding>),
 }
 
-/// The whole spec, aggregated from every `.tel` file in the workspace.
+/// Which entity a spec file declared.
 ///
-/// Partial for now -- see the module doc comment.
+/// One file declares exactly one entity (Annex C.4.2), `bindings.tel`
+/// excepted -- it declares a list, so it names no entity. Recorded per file
+/// so that diagnostics can point at the file a duplicate came from, and so
+/// that the seal knows what each sealed path stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceKind {
+    Notion(NotionName),
+    Intent(IntentId),
+    Constraint(ConstraintId),
+    Bindings,
+}
+
+/// The whole spec, aggregated from every `.tel` file in the workspace.
 #[derive(Debug, Default)]
 pub struct TelosModel {
     pub notions: BTreeMap<NotionName, Notion>,
@@ -47,6 +59,10 @@ pub struct TelosModel {
     pub bindings: Vec<Binding>,
     /// The structural `verifies` relation: which intent owns which scenario.
     pub scenario_owner: BTreeMap<ScenarioId, IntentId>,
+    /// Every relation between two entities, declared or derived.
+    pub graph: Graph,
+    /// Which file declared which entity.
+    pub sources: BTreeMap<RepoPath, SourceKind>,
 }
 
 impl TelosModel {
@@ -56,6 +72,33 @@ impl TelosModel {
         let intent = self.intents.get(intent_id)?;
         let scenario = intent.scenarios.iter().find(|s| s.id == id)?;
         Some((intent, scenario))
+    }
+
+    /// Turns a `show`/`impact` argument into the graph node it names, or
+    /// `None` when the spec holds no such entity.
+    ///
+    /// `EntityRef::Change` always resolves to `None` in M1: changes are not
+    /// part of the model yet, and `NodeRef` has no variant for them.
+    pub fn resolve(&self, r: &EntityRef) -> Option<NodeRef> {
+        match r {
+            EntityRef::Notion(name) => self
+                .notions
+                .contains_key(name)
+                .then(|| NodeRef::Notion(name.clone())),
+            EntityRef::Intent(id) => self
+                .intents
+                .contains_key(id)
+                .then_some(NodeRef::Intent(*id)),
+            EntityRef::Scenario(id) => self
+                .scenario(*id)
+                .is_some()
+                .then_some(NodeRef::Scenario(*id)),
+            EntityRef::Constraint(id) => self
+                .constraints
+                .contains_key(id)
+                .then_some(NodeRef::Constraint(*id)),
+            EntityRef::Change(_) => None,
+        }
     }
 }
 
@@ -123,6 +166,89 @@ mod tests {
         let mut model = TelosModel::default();
         model.scenario_owner.insert(ScenarioId(1), IntentId(1));
         assert_eq!(model.scenario(ScenarioId(1)), None);
+    }
+
+    // --- resolve ---------------------------------------------------------
+
+    fn model_with_one_of_each() -> TelosModel {
+        let mut model = TelosModel::default();
+        model.notions.insert(
+            NotionName::new("Invoice").unwrap(),
+            Notion {
+                name: NotionName::new("Invoice").unwrap(),
+                kind: NotionKind::Entity,
+                def: "A bill.".to_string(),
+                attrs: vec![],
+                rels: vec![],
+            },
+        );
+        model
+            .intents
+            .insert(IntentId(42), sample_intent(42, vec![sample_scenario(107)]));
+        model.scenario_owner.insert(ScenarioId(107), IntentId(42));
+        model.constraints.insert(
+            ConstraintId(3),
+            Constraint {
+                id: ConstraintId(3),
+                kind: ConstraintKind::Architecture,
+                title: "Boundaries".to_string(),
+                rule: Rule::Text("Keep them.".to_string()),
+                scope: Scope::Global,
+                check: None,
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn resolve_maps_every_entity_kind_to_its_node() {
+        let model = model_with_one_of_each();
+        let invoice = NotionName::new("Invoice").unwrap();
+        assert_eq!(
+            model.resolve(&EntityRef::Notion(invoice.clone())),
+            Some(NodeRef::Notion(invoice))
+        );
+        assert_eq!(
+            model.resolve(&EntityRef::Intent(IntentId(42))),
+            Some(NodeRef::Intent(IntentId(42)))
+        );
+        assert_eq!(
+            model.resolve(&EntityRef::Scenario(ScenarioId(107))),
+            Some(NodeRef::Scenario(ScenarioId(107)))
+        );
+        assert_eq!(
+            model.resolve(&EntityRef::Constraint(ConstraintId(3))),
+            Some(NodeRef::Constraint(ConstraintId(3)))
+        );
+    }
+
+    #[test]
+    fn resolve_returns_none_for_an_entity_the_spec_does_not_hold() {
+        let model = model_with_one_of_each();
+        assert_eq!(
+            model.resolve(&EntityRef::Notion(NotionName::new("Rogue").unwrap())),
+            None
+        );
+        assert_eq!(model.resolve(&EntityRef::Intent(IntentId(1))), None);
+        assert_eq!(model.resolve(&EntityRef::Scenario(ScenarioId(1))), None);
+        assert_eq!(model.resolve(&EntityRef::Constraint(ConstraintId(1))), None);
+    }
+
+    #[test]
+    fn resolve_never_resolves_a_change_in_m1() {
+        // `NodeRef` has no change variant: changes join the graph in M2.
+        let model = model_with_one_of_each();
+        assert_eq!(
+            model.resolve(&EntityRef::Change(crate::ids::ChangeId(7))),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_ignores_a_scenario_whose_owner_is_missing() {
+        let mut model = TelosModel::default();
+        model.scenario_owner.insert(ScenarioId(1), IntentId(1));
+        assert_eq!(model.resolve(&EntityRef::Scenario(ScenarioId(1))), None);
     }
 
     #[test]

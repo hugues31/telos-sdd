@@ -925,9 +925,11 @@ impl<'a> P<'a> {
         let mut given = Vec::new();
         let mut when: Option<InstanceStep> = None;
         let mut then = Vec::new();
-        // Set as soon as a `given` line is *attempted*: a `when` that
-        // follows a faulty `given` is in its rightful place, and must not
-        // be reported a second time.
+        // Set as soon as the `given` steps are behind us -- because one was
+        // *attempted* (a `when` after a faulty `given` is in its rightful
+        // place), or because their absence was already reported once. Either
+        // way the steps that follow are judged against `when`/`then`, so a
+        // single missing keyword costs a single diagnostic.
         let mut seen_given = false;
 
         loop {
@@ -959,7 +961,15 @@ impl<'a> P<'a> {
                 }
                 continue;
             }
-            if when.is_none() && seen_given && self.at_kw("when") {
+            if when.is_none() && self.at_kw("when") {
+                if !seen_given {
+                    // The mandatory `given` steps are missing: report that
+                    // once, then take the `when` step anyway so the rest of
+                    // the block is still checked against its own rules.
+                    let diag = self.expected_one_of(&options);
+                    self.diags.push(diag);
+                    seen_given = true;
+                }
                 // Fatal, unlike the other steps: a scenario has no shape
                 // without the event that triggers it.
                 when = Some(self.instance_step("when")?);
@@ -2149,6 +2159,7 @@ mod tests {
     fn an_unknown_statement_template_suggests_the_closest_one() {
         let src = intent_with_statement("event-drive", "    when   Paid\n    system shall \"x\"");
         let diags = parse_intent_file(&intent_path(), &src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(
             diags[0].message,
             "unknown statement template `event-drive`; closest is `event-driven`"
@@ -2289,6 +2300,7 @@ mod tests {
     fn an_intent_header_rejects_a_constraint_id() {
         let src = "intent CON-0001 \"t\" {\n";
         let diags = parse_intent_file(&intent_path(), src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected an intent id, found `CON-0001`");
     }
 
@@ -2330,7 +2342,11 @@ mod tests {
             "    then  Invoice.state == settled",
         ));
         let diags = parse_intent_file(&intent_path(), &src).unwrap_err();
+        // Exactly one: the `when` step is consumed despite the missing
+        // `given`, so the `then` line and both `}` are not re-reported.
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected `given`, found `when`");
+        assert_eq!((diags[0].line, diags[0].col), (Some(9), Some(5)));
     }
 
     #[test]
@@ -2340,6 +2356,7 @@ mod tests {
             "    when  PaymentReceived {}",
         ));
         let diags = parse_intent_file(&intent_path(), &src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected `then`, found `}`");
     }
 
@@ -2398,6 +2415,7 @@ mod tests {
             "    then  Invoice.state == settled",
         ));
         let diags = parse_intent_file(&intent_path(), &src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(
             diags[0].message,
             "expected `,` or `}` in instance body, found `balance`"
@@ -2409,6 +2427,7 @@ mod tests {
         let src = intent_with_scenario("    given Invoice {}");
         let src = src.replace("SCN-0107", "INT-0107");
         let diags = parse_intent_file(&intent_path(), &src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected a scenario id, found `INT-0107`");
     }
 
@@ -2489,6 +2508,7 @@ mod tests {
     fn an_unknown_constraint_kind_suggests_the_closest_one() {
         let src = "constraint CON-0003 quallity \"t\" {\n  rule  \"r\"\n  scope global\n}\n";
         let diags = parse_constraint_file(&constraint_path(), src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(
             diags[0].message,
             "unknown constraint kind `quallity`; closest is `quality`"
@@ -2507,6 +2527,7 @@ mod tests {
     fn a_scope_that_is_neither_global_nor_an_intent_id_is_a_syntax_error() {
         let src = constraint_with("  rule  \"r\"\n  scope everything");
         let diags = parse_constraint_file(&constraint_path(), &src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(
             diags[0].message,
             "expected `global` or an intent id, found `everything`"
@@ -2517,6 +2538,7 @@ mod tests {
     fn a_field_after_the_check_line_is_a_syntax_error() {
         let src = constraint_with("  rule  \"r\"\n  scope global\n  check \"c\"\n  rule  \"r2\"");
         let diags = parse_constraint_file(&constraint_path(), &src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected `}`, found `rule`");
     }
 
@@ -2592,6 +2614,7 @@ mod tests {
     fn a_proves_binding_rejects_an_empty_path() {
         let src = "proves     \"::scn_0107\" -> SCN-0107\n";
         let diags = parse_bindings_file(&bindings_path(), src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(
             diags[0].message,
             "test reference is missing a path: `::scn_0107`"
@@ -2603,6 +2626,7 @@ mod tests {
     fn an_implements_binding_rejects_a_scenario_id() {
         let src = "implements \"src/billing/invoice.rs\" -> SCN-0107\n";
         let diags = parse_bindings_file(&bindings_path(), src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected an intent id, found `SCN-0107`");
     }
 
@@ -2610,6 +2634,7 @@ mod tests {
     fn a_proves_binding_rejects_an_intent_id() {
         let src = "proves     \"tests/billing.rs\" -> INT-0042\n";
         let diags = parse_bindings_file(&bindings_path(), src).unwrap_err();
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected a scenario id, found `INT-0042`");
     }
 

@@ -112,6 +112,37 @@ fn init_creates_the_whole_telos_tree() {
     );
 }
 
+/// D4: `init` seeds `telos/changes/counters.toml` at zero, and -- because
+/// `changes/` is excluded from `Workspace::spec_files`, this seed never
+/// enters the seal.
+#[test]
+fn init_seeds_a_zeroed_counters_file() {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("telos/changes/counters.toml")).unwrap(),
+        "intent = 0\nscenario = 0\nconstraint = 0\nchange = 0\n"
+    );
+}
+
+#[test]
+fn init_seals_without_the_lock_mentioning_counters_toml() {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+
+    let lock = Lock::read(&tmp.path().join("telos/telos.lock"))
+        .expect("the lock parses")
+        .expect("the lock exists");
+    assert!(
+        !lock
+            .spec
+            .contains_key(&RepoPath::new("telos/changes/counters.toml")),
+        "the seal must not mention telos/changes/counters.toml: {:?}",
+        lock.spec.keys().collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn init_json_envelope_is_exact() {
     let tmp = repo();

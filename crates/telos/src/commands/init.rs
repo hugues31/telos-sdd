@@ -15,6 +15,7 @@ use std::path::Path;
 
 use serde_json::json;
 
+use telos_core::counters::{Counters, write_counters};
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::lock::seal;
@@ -72,6 +73,9 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     ensure_gitattributes(&root)?;
 
     let ws = Workspace::discover(&root)?;
+    // Seeded before sealing (D4): `telos/changes/` is excluded from
+    // `Workspace::spec_files`, so this write never enters the seal.
+    write_counters(&ws, &Counters::default())?;
     let model = ws.load_model().map_err(first_error)?;
     let lock = seal(&ws, &model, &git, None)?;
     lock.write(&ws.lock_path())?;

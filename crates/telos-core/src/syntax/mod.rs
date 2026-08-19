@@ -4,4 +4,6 @@
 pub(crate) mod lexer;
 mod parser;
 
-pub use parser::{parse_expr, parse_notion_file};
+pub use parser::{
+    parse_bindings_file, parse_constraint_file, parse_expr, parse_intent_file, parse_notion_file,
+};

@@ -5,3 +5,4 @@ pub mod ids;
 pub mod model;
 pub mod span;
 pub mod suggest;
+pub mod syntax;

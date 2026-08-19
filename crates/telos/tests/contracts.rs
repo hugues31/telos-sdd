@@ -6,9 +6,11 @@
 
 mod common;
 
+use std::fs;
+
 use serde_json::{Value, json};
 
-use common::{repo, telos};
+use common::{repo, telos, with_fixture};
 
 /// The five envelope keys, in the order Annex B freezes them.
 const ENVELOPE_KEYS: [&str; 5] = ["ok", "command", "result", "error", "next_actions"];
@@ -94,4 +96,58 @@ fn the_error_body_always_carries_code_message_and_hint() {
     }
     assert!(error["code"].is_string());
     assert!(error["message"].is_string());
+}
+
+/// `status` and `check` have richer `result` shapes than `version` or
+/// `init` (a nested `coverage` object, a `diagnostics` array) -- the
+/// generic envelope contract holds for them too: still exactly the five
+/// keys, still a null `error` on success.
+#[test]
+fn status_and_check_success_envelopes_still_carry_exactly_the_five_keys() {
+    let tmp = with_fixture();
+
+    for args in [
+        ["status", "--json"].as_slice(),
+        ["check", "--json"].as_slice(),
+    ] {
+        let out = telos(tmp.path(), args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "`telos {}`: expected exit 0, got {:?}",
+            args.join(" "),
+            out.status
+        );
+        let map = envelope(&out);
+        assert_exactly_the_five_keys(&map);
+        assert_eq!(map["ok"], json!(true));
+        assert_eq!(map["error"], Value::Null);
+    }
+}
+
+/// `check`'s failure can collapse several diagnostics into one error body
+/// (Annex B: the envelope carries one error, `check` can find several) --
+/// even then, the error body stays the frozen `{code, message, hint}`
+/// triple, never growing a fourth key to hold the rest.
+#[test]
+fn checks_error_body_stays_the_frozen_triple_even_with_several_diagnostics() {
+    let tmp = with_fixture();
+    let int_0042 = tmp.path().join("telos/intents/INT-0042.tel");
+    let content = fs::read_to_string(&int_0042).unwrap();
+    fs::write(&int_0042, content.replace("on Invoice", "on Invoce")).unwrap();
+
+    let out = telos(tmp.path(), &["check", "--json"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
+    let map = envelope(&out);
+    assert_exactly_the_five_keys(&map);
+    let error = match &map["error"] {
+        Value::Object(error) => error,
+        other => panic!("expected an error object, got {other}"),
+    };
+    assert_eq!(
+        error.len(),
+        3,
+        "the error body carries exactly three keys, got {:?}",
+        error.keys().collect::<Vec<_>>()
+    );
 }

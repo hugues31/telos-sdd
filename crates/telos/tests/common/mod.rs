@@ -52,6 +52,17 @@ pub fn with_fixture() -> TempDir {
     tmp
 }
 
+/// A [`repo`] holding a copy of the `billing` corpus, *without* sealing it:
+/// `telos/telos.toml` and every `.tel` file are on disk, but there is no
+/// `telos.lock` -- the abnormal state a project ends up in if its lock is
+/// deleted or never committed. Distinct from an uninitialized repository
+/// (no `telos/` at all), which `Workspace::discover` itself rejects.
+pub fn unsealed_fixture() -> TempDir {
+    let tmp = repo();
+    copy_dir(&corpus_root(), tmp.path());
+    tmp
+}
+
 /// The `telos` binary under test, ready to run in `dir`.
 pub fn telos(dir: &Path, args: &[&str]) -> assert_cmd::Command {
     let mut cmd =

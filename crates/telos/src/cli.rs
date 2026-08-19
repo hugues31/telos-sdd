@@ -34,6 +34,14 @@ enum Command {
     Version,
     /// Create `telos/` in this git repository and seal it.
     Init,
+    /// Report the project's state against its seal and its spec coverage.
+    Status,
+    /// Parse the spec and check its integrity.
+    Check {
+        /// Also require the project to be sealed and unmodified.
+        #[arg(long)]
+        sealed: bool,
+    },
 }
 
 impl Command {
@@ -42,6 +50,8 @@ impl Command {
         match self {
             Command::Version => "version",
             Command::Init => "init",
+            Command::Status => "status",
+            Command::Check { .. } => "check",
         }
     }
 }
@@ -73,6 +83,8 @@ fn execute(command: &Command) -> CmdResult {
     match command {
         Command::Version => commands::version(),
         Command::Init => commands::init::run(&ctx()?),
+        Command::Status => commands::status::run(&ctx()?),
+        Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
     }
 }
 

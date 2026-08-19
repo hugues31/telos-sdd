@@ -72,7 +72,7 @@ routes on.
 
 | Code | When | Hint |
 |---|---|---|
-| `TELOS_DRIFT_DETECTED` | The project is not `coherent`: a sealed path was modified or went missing, or an unsealed spec file exists on disk. Emitted by `check --sealed` in M1; from M2 on, also gates `open`/`approve`/`reconcile`/`rebuild`/`view --export`. | `run \`telos status\` to see drifted paths; capture with \`telos adopt\` or restore with \`telos revert\`` |
+| `TELOS_DRIFT_DETECTED` | The project is not `coherent`: a sealed path was modified or went missing, or an unsealed spec file exists on disk. Emitted by `check --sealed` in M1; from M2 on, also gates `open`/`approve`/`reconcile`/`rebuild`/`view --export`. | `` run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert` `` |
 | `TELOS_APPROVAL_STALE` | (M2) A change's approval no longer matches its delta digest — the delta was edited after `telos change approve`. | Re-run `telos change diff` to review the new delta, then `telos change approve` again. |
 | `TELOS_REFERENCE_UNKNOWN` | A reference in the spec — a notion, an attribute, an enum symbol, an intent/scenario/constraint id — does not resolve. Emitted today by the semantic pass on `load_model` (rule §3.3 №1); from M2 on, also rejected at write time. | None. The engine folds its best guess directly into `message` (`` ; closest is `Invoice` ``) when one is close enough; there is nothing to add. |
 | `TELOS_SCENARIO_RED_EXPECTED` | (M2) `reconcile` under `policy.tdd = "strict"` requires an intact sealed red witness for a scenario before its green run; none exists. | Run `telos test SCN-…` to record a red witness before implementing. |
@@ -81,13 +81,13 @@ routes on.
 | `TELOS_CONSTRAINT_FAILED` | (M2) A constraint's `check` shell command exited non-zero during `reconcile`. | Run the constraint's `check` command directly to see its output. |
 | `TELOS_CHANGE_STATE_INVALID` | (M2) An operation was attempted on a change from a state that doesn't allow it (the state machine is `open → drafted → approved → implementing → reconciled`, or `abandoned` at any point). | Inspect the change with `telos change list` and drive it through its states in order. |
 | `TELOS_FILE_CLAIMED` | (M2) A file targeted by a change is already claimed by a different, concurrently open change. | Resolve or abandon the other change first — a file can only be claimed by one open change at a time. |
-| `TELOS_NOT_INITIALIZED` | No `telos/telos.toml` found walking up from the current directory. | `run \`telos init\` at the repository root` |
-| `TELOS_NOT_INITIALIZED` | `telos/telos.toml` exists, but `telos.lock` is missing (`status`, `check --sealed`). `telos init` always seals, so this is not "unsealed" — it's abnormal. | `the project was never sealed; run \`telos init\` in a fresh repository or restore telos.lock from git` |
-| `TELOS_ALREADY_INITIALIZED` | `telos init` run on a project that already has `telos/telos.toml`. | `project already initialized; see \`telos status\`` |
+| `TELOS_NOT_INITIALIZED` | No `telos/telos.toml` found walking up from the current directory. | `` run `telos init` at the repository root `` |
+| `TELOS_NOT_INITIALIZED` | `telos/telos.toml` exists, but `telos.lock` is missing (`status`, `check --sealed`). `telos init` always seals, so this is not "unsealed" — it's abnormal. | `` the project was never sealed; run `telos init` in a fresh repository or restore telos.lock from git `` |
+| `TELOS_ALREADY_INITIALIZED` | `telos init` run on a project that already has `telos/telos.toml`. | `` project already initialized; see `telos status` `` |
 | `TELOS_PARSE_ERROR` | A `.tel` file (or `telos.lock`, or `telos.toml`) is syntactically invalid. | None today — `message` names the offending file and, when the parser can determine it, the line and column. |
 | `TELOS_INTEGRITY_VIOLATION` | A rule §3.3 violation other than an unknown reference or a cycle — e.g. `seal` finding a binding to a code file that doesn't exist on disk, or (M2) a delete of a still-referenced entity. | None today — `message` names the offending path or entity. |
 | `TELOS_CYCLE_DETECTED` | A cycle exists on `requires` or `refines`. | None today — `message` renders the cycle's path (`` INT-0001 → INT-0002 → INT-0001 ``). |
-| `TELOS_GIT_ERROR` | `git rev-parse --show-toplevel` failed (most commonly: not inside a git repository). | `not a git repository; run \`git init\`` |
+| `TELOS_GIT_ERROR` | `git rev-parse --show-toplevel` failed (most commonly: not inside a git repository). | `` not a git repository; run `git init` `` |
 | `TELOS_GIT_ERROR` | The `git` binary itself could not be spawned (missing from `PATH`). | None — `message` names the underlying I/O error. |
 | `TELOS_INTERNAL` | An internal invariant broke — a bug, not a spec or usage problem. | None. |
 

@@ -11,7 +11,7 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-use common::{telos, unsealed_fixture, with_fixture};
+use common::{break_int_0042_in_two_ways, telos, unsealed_fixture, with_fixture};
 
 /// Parses a command's stdout as a JSON envelope.
 fn json_stdout(out: &std::process::Output) -> Value {
@@ -208,6 +208,32 @@ fn check_json_on_an_unresolvable_reference_reports_telos_reference_unknown() {
     // The suggestion lives in the message, not the hint: semantic reference
     // diagnostics never attach one.
     assert_eq!(envelope["error"]["hint"], Value::Null);
+}
+
+/// Human mode is where the M1 limitation documented in `docs/contracts.md`
+/// actually pays off: with two independent diagnostics in the same run
+/// ([`break_int_0042_in_two_ways`]), stderr lists both, one per line, not
+/// just the first one `error.code`/`error.hint` describe. Nothing reaches
+/// stdout -- human-mode errors are stderr-only, success stays on stdout.
+#[test]
+fn check_human_mode_lists_every_diagnostic_on_its_own_line_in_stderr() {
+    let tmp = with_fixture();
+    break_int_0042_in_two_ways(tmp.path());
+
+    let out = telos(tmp.path(), &["check"]).output().unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
+    assert!(
+        out.stdout.is_empty(),
+        "human-mode errors go to stderr only, got stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr,
+        "error[TELOS_REFERENCE_UNKNOWN]: telos/intents/INT-0042.tel: unknown notion `Invoce`; closest is `Invoice`\n\
+         telos/intents/INT-0042.tel: unknown intent `INT-9999`\n"
+    );
 }
 
 // --- check --sealed: the drift gate ---------------------------------------

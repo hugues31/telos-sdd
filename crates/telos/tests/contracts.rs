@@ -6,11 +6,9 @@
 
 mod common;
 
-use std::fs;
-
 use serde_json::{Value, json};
 
-use common::{repo, telos, with_fixture};
+use common::{break_int_0042_in_two_ways, repo, telos, with_fixture};
 
 /// The five envelope keys, in the order Annex B freezes them.
 const ENVELOPE_KEYS: [&str; 5] = ["ok", "command", "result", "error", "next_actions"];
@@ -127,13 +125,18 @@ fn status_and_check_success_envelopes_still_carry_exactly_the_five_keys() {
 /// `check`'s failure can collapse several diagnostics into one error body
 /// (Annex B: the envelope carries one error, `check` can find several) --
 /// even then, the error body stays the frozen `{code, message, hint}`
-/// triple, never growing a fourth key to hold the rest.
+/// triple, never growing a fourth key to hold the rest. The fixture here
+/// breaks the spec in two independent, unrelated ways
+/// ([`break_int_0042_in_two_ways`]) specifically so this exercises the
+/// multi-diagnostic path in `diagnostics_to_error`, not just the
+/// single-diagnostic case: `code`/`hint` must come from the *first*
+/// diagnostic only, while `message` carries both, newline-joined, so a
+/// consumer that inspects it (or a human reading stderr, see
+/// `status_check.rs`) still sees everything `check` found.
 #[test]
 fn checks_error_body_stays_the_frozen_triple_even_with_several_diagnostics() {
     let tmp = with_fixture();
-    let int_0042 = tmp.path().join("telos/intents/INT-0042.tel");
-    let content = fs::read_to_string(&int_0042).unwrap();
-    fs::write(&int_0042, content.replace("on Invoice", "on Invoce")).unwrap();
+    break_int_0042_in_two_ways(tmp.path());
 
     let out = telos(tmp.path(), &["check", "--json"]).output().unwrap();
 
@@ -149,5 +152,22 @@ fn checks_error_body_stays_the_frozen_triple_even_with_several_diagnostics() {
         3,
         "the error body carries exactly three keys, got {:?}",
         error.keys().collect::<Vec<_>>()
+    );
+
+    // `code` and `hint` are the first diagnostic's alone -- the unknown-
+    // notion one (the statement is checked before `requires`), which never
+    // attaches a hint.
+    assert_eq!(error["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert_eq!(error["hint"], Value::Null);
+
+    // `message` is both diagnostics, newline-joined, first diagnostic
+    // first -- proving neither is silently dropped to fit the frozen
+    // triple.
+    assert_eq!(
+        error["message"],
+        json!(
+            "telos/intents/INT-0042.tel: unknown notion `Invoce`; closest is `Invoice`\n\
+             telos/intents/INT-0042.tel: unknown intent `INT-9999`"
+        )
     );
 }

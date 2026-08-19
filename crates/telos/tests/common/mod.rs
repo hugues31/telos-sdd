@@ -63,6 +63,36 @@ pub fn unsealed_fixture() -> TempDir {
     tmp
 }
 
+/// Breaks `telos/intents/INT-0042.tel` in two independent, unrelated ways:
+/// its `on Invoice` clause becomes an unresolvable `on Invoce`, and its
+/// `requires INT-0017` becomes an unresolvable `requires INT-9999`.
+///
+/// `telos_core::semantic::build_model` collects diagnostics for the whole
+/// spec in one pass and, within one intent, checks its statement before its
+/// `refines`/`requires`/`excludes` relations (`Checker::check_intent`) --
+/// so this reliably produces exactly two diagnostics, in this order: the
+/// unknown-notion one from the statement's `on` clause, then the
+/// unknown-intent one from `requires`. Used by tests that need to prove
+/// `check` handles more than one diagnostic correctly, not just the
+/// single-diagnostic case a single edit produces.
+pub fn break_int_0042_in_two_ways(root: &Path) {
+    let path = root.join("telos/intents/INT-0042.tel");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert!(
+        content.contains("on Invoice"),
+        "fixture no longer contains the expected `on Invoice` clause"
+    );
+    assert!(
+        content.contains("requires INT-0017"),
+        "fixture no longer contains the expected `requires INT-0017` clause"
+    );
+    let content = content
+        .replace("on Invoice", "on Invoce")
+        .replace("requires INT-0017", "requires INT-9999");
+    fs::write(&path, content).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+}
+
 /// The `telos` binary under test, ready to run in `dir`.
 pub fn telos(dir: &Path, args: &[&str]) -> assert_cmd::Command {
     let mut cmd =

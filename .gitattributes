@@ -1,0 +1,5 @@
+# The `.tel` canonical form is byte-exact: LF endings, exactly one trailing
+# newline, no trailing spaces. Never let a checkout rewrite them -- the
+# round-trip tests compare bytes, on Windows CI too.
+*.tel text eol=lf
+crates/telos-core/tests/corpus/** text eol=lf

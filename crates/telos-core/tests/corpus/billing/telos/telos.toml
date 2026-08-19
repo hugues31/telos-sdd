@@ -1,0 +1,11 @@
+[code]
+globs = ["src/**/*.rs"]
+
+[tests]
+globs = ["tests/**/*.rs"]
+
+[test]
+cmd = "cargo test {filter}"
+
+[policy]
+tdd = "strict"

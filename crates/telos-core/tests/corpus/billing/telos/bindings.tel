@@ -1,0 +1,2 @@
+implements "src/billing/invoice.rs" -> INT-0042
+proves     "tests/billing.rs::scn_0107_full_payment_settles_the_invoice" -> SCN-0107

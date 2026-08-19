@@ -3,7 +3,10 @@
 //!
 //! Covers every rule of Annex C.2 (`notion-file`, `intent-file` with its
 //! EARS `statement-block` and its `scenario-decl`s, `constraint-file`,
-//! `bindings-file`) and Annex C.3's expression mini-language.
+//! `bindings-file`), Annex C.3's expression mini-language, and Annex C's
+//! `change-file` -- whose `op add|edit` nests the C.2 block rules verbatim
+//! rather than restating them (D2), which is what makes a change file's
+//! round-trip byte-exact for free.
 //!
 //! Diagnostics all share one shape (« expected X, found `Y` »), and every
 //! file rule recovers from a field-level error by skipping the rest of the
@@ -14,11 +17,14 @@
 use std::str::FromStr;
 
 use crate::error::{Diagnostic, ErrorCode};
-use crate::ids::{ConstraintId, EntityRef, FieldName, IntentId, NotionName, RepoPath, ScenarioId};
+use crate::git::Oid;
+use crate::ids::{
+    ChangeId, ConstraintId, EntityRef, FieldName, IntentId, NotionName, RepoPath, ScenarioId,
+};
 use crate::model::{
-    Action, Attr, AttrRef, AttrType, Binding, CmpOp, Constraint, ConstraintKind, Expr,
-    InstanceStep, Intent, IntentStatus, Literal, Notion, NotionKind, Operand, Rel, Rule, Scenario,
-    Scope, Statement, TestRef,
+    Action, Attr, AttrRef, AttrType, Binding, Change, ChangeStatus, CmpOp, Constraint,
+    ConstraintKind, Expr, InstanceStep, Intent, IntentStatus, Literal, Notion, NotionKind, Operand,
+    Rel, Rule, Scenario, Scope, StagedOp, Statement, TestRef,
 };
 use crate::span::{Sp, Span, line_col};
 use crate::suggest::closest;
@@ -64,6 +70,21 @@ const CONSTRAINT_KINDS: [(&str, ConstraintKind); 5] = [
     ("convention", ConstraintKind::Convention),
 ];
 
+/// The five `status-field` words of a change file (Annex C, D16), in
+/// lifecycle order.
+const CHANGE_STATUSES: [(&str, ChangeStatus); 5] = [
+    ("open", ChangeStatus::Open),
+    ("drafted", ChangeStatus::Drafted),
+    ("approved", ChangeStatus::Approved),
+    ("implementing", ChangeStatus::Implementing),
+    ("abandoned", ChangeStatus::Abandoned),
+];
+
+/// How an unknown change status is named back: the whole closed set, in the
+/// `expected ..., found ...` shape every other diagnostic uses.
+const CHANGE_STATUS_WORDS: &str =
+    "one of `open`, `drafted`, `approved`, `implementing`, `abandoned`";
+
 /// The tail keywords of an `intent-file` block (Annex C.2), in grammar
 /// order: each may appear zero or more times, but never before the
 /// previous one.
@@ -107,6 +128,24 @@ enum Template {
     Optional,
 }
 
+/// Which of the two entity-carrying verbs an `op` announced -- the only
+/// thing the shared `entity-decl` rule needs to know to build its
+/// [`StagedOp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Add,
+    Edit,
+}
+
+/// Whether `s` is the canonical digest form of D3: `sha256:` then exactly
+/// 64 lower-case hex digits.
+fn is_canonical_digest(s: &str) -> bool {
+    let Some(hex) = s.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// How a bracketed comma-separated list ends: the closing token, how to
 /// render it, and how to name the list in the separator error message.
 struct ListClose {
@@ -143,6 +182,22 @@ pub fn parse_constraint_file(path: &RepoPath, src: &str) -> Result<Constraint, V
 /// An empty file is valid and yields no binding.
 pub fn parse_bindings_file(path: &RepoPath, src: &str) -> Result<Vec<Binding>, Vec<Diagnostic>> {
     parse_file(path, src, |p: &mut P<'_>| p.bindings_file())
+}
+
+/// Parses a whole `changes/CHG-NNNN.tel` file (Annex C, D1).
+///
+/// The nested `entity-decl` of an `op add|edit` is parsed by the very rules
+/// [`parse_notion_file`], [`parse_intent_file`] and [`parse_constraint_file`]
+/// use (D2), which is what makes the round-trip byte-exact: whatever the
+/// emitter writes for an entity, nested or not, this reads back.
+///
+/// Two rules of Annex C live here rather than in the grammar, because they
+/// relate two lines rather than describing one: a `digest` belongs to an
+/// `approved` change and to no other, and it is a `sha256:<64 hex>` (D3).
+/// Everything else about a change -- that its ops are appliable, that no
+/// other change claims the same paths -- is a job for later passes.
+pub fn parse_change_file(path: &RepoPath, src: &str) -> Result<Change, Vec<Diagnostic>> {
+    parse_file(path, src, |p: &mut P<'_>| p.change_file())
 }
 
 /// Runs one file-level rule over `src`: lexes, parses, and returns either
@@ -539,6 +594,18 @@ impl<'a> P<'a> {
     // --- notion files (Annex C.2) ----------------------------------------
 
     fn notion_file(&mut self) -> Result<Notion, Diagnostic> {
+        let notion = self.notion_decl()?;
+        self.end_of_file();
+        Ok(notion)
+    }
+
+    /// The `notion-file` rule proper, stopping on its own closing `}`.
+    ///
+    /// Split from [`P::notion_file`] so an `op add|edit` of a change file
+    /// can reuse it verbatim for its nested `entity-decl` (D2): a notion
+    /// nested in an op differs from one in a file of its own only in what
+    /// may follow the block, which is the caller's business.
+    fn notion_decl(&mut self) -> Result<Notion, Diagnostic> {
         self.skip_newlines();
         self.expect_lower_kw("notion")?;
         let name = self.expect_notion_name()?;
@@ -586,8 +653,6 @@ impl<'a> P<'a> {
             self.diags.push(diag);
             self.recover_to_newline(home);
         }
-
-        self.end_of_file();
 
         Ok(Notion {
             name: name.node,
@@ -693,6 +758,15 @@ impl<'a> P<'a> {
     // --- intent files (Annex C.2) ----------------------------------------
 
     fn intent_file(&mut self) -> Result<Intent, Diagnostic> {
+        let intent = self.intent_decl()?;
+        self.end_of_file();
+        Ok(intent)
+    }
+
+    /// The `intent-file` rule proper, stopping on its own closing `}` --
+    /// nested by an `op add|edit` of a change file (D2), exactly as
+    /// [`P::notion_decl`] is.
+    fn intent_decl(&mut self) -> Result<Intent, Diagnostic> {
         self.skip_newlines();
         self.expect_lower_kw("intent")?;
         let id = self.expect_intent_id()?.node;
@@ -761,8 +835,6 @@ impl<'a> P<'a> {
                 }
             }
         }
-
-        self.end_of_file();
 
         Ok(Intent {
             id,
@@ -1029,6 +1101,14 @@ impl<'a> P<'a> {
     // --- constraint files (Annex C.2) ------------------------------------
 
     fn constraint_file(&mut self) -> Result<Constraint, Diagnostic> {
+        let constraint = self.constraint_decl()?;
+        self.end_of_file();
+        Ok(constraint)
+    }
+
+    /// The `constraint-file` rule proper, stopping on its own closing `}`
+    /// -- nested by an `op add|edit` of a change file (D2).
+    fn constraint_decl(&mut self) -> Result<Constraint, Diagnostic> {
         self.skip_newlines();
         self.expect_lower_kw("constraint")?;
         let id = self.expect_constraint_id()?.node;
@@ -1062,7 +1142,6 @@ impl<'a> P<'a> {
             return Err(self.expected_one_of(&options));
         }
         self.advance();
-        self.end_of_file();
 
         Ok(Constraint {
             id,
@@ -1150,6 +1229,240 @@ impl<'a> P<'a> {
             return Ok(Binding::Proves { test, scenario });
         }
         Err(self.expected("`implements` or `proves`"))
+    }
+
+    // --- change files (Annex C) ------------------------------------------
+
+    /// `change-file = "change" , change-id , string-lit , "{" ,
+    ///  status-field , [ digest-field ] , { op-decl } , "}"`.
+    ///
+    /// The header string is the motivation. The two field lines are
+    /// recovered from like any others, and every op is recovered from
+    /// independently, so a file with three broken ops reports three
+    /// diagnostics.
+    fn change_file(&mut self) -> Result<Change, Diagnostic> {
+        self.skip_newlines();
+        self.expect_lower_kw("change")?;
+        let id = self.expect_change_id()?.node;
+        let motivation = self.expect_str("a motivation string")?.node;
+        self.expect(&TokKind::LBrace, "`{`")?;
+        let home = self.depth;
+
+        self.skip_newlines();
+        let status_span = self.peek().span;
+        let status = self.recovered(home, |p| p.change_status_field());
+        self.skip_newlines();
+
+        // `digest_span` records that the *keyword* was written, whether or
+        // not its argument parsed: the coherence checks below are about the
+        // line being there, not about it being well-formed.
+        let mut digest = None;
+        let mut digest_span = None;
+        if self.at_kw("digest") {
+            digest_span = Some(self.peek().span);
+            digest = self.recovered(home, |p| p.digest_field());
+            self.skip_newlines();
+        }
+
+        let mut ops = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.at(&TokKind::RBrace) {
+                self.advance();
+                break;
+            }
+            if self.at_eof() {
+                return Err(self.expected("`op` or `}`"));
+            }
+            if self.at_kw("op") {
+                if let Some(op) = self.recovered(home, |p| p.op_decl()) {
+                    ops.push(op);
+                }
+                continue;
+            }
+            let diag = self.expected("`op` or `}`");
+            self.diags.push(diag);
+            self.recover_to_newline(home);
+        }
+
+        self.end_of_file();
+
+        // Status and digest are one statement written on two lines: the
+        // digest *is* the approval (D3), so it is present exactly when the
+        // status is `approved`. Checked only when the status line itself
+        // parsed -- otherwise the complaint would be about a status nobody
+        // wrote.
+        if let Some(status) = status {
+            let approved = status == ChangeStatus::Approved;
+            let diag = match (approved, digest_span) {
+                (true, None) => Some(self.diag_at(
+                    status_span,
+                    "an approved change must carry its digest".to_string(),
+                    None,
+                )),
+                (false, Some(span)) => Some(self.diag_at(
+                    span,
+                    "digest is only valid on an approved change".to_string(),
+                    None,
+                )),
+                _ => None,
+            };
+            if let Some(diag) = diag {
+                self.diags.push(diag);
+            }
+        }
+
+        Ok(Change {
+            id,
+            motivation,
+            status: status.unwrap_or(ChangeStatus::Open),
+            approved_digest: digest,
+            ops,
+        })
+    }
+
+    /// The `CHG-NNNN` form of an `id-lit` (Annex C.1).
+    fn expect_change_id(&mut self) -> Result<Sp<ChangeId>, Diagnostic> {
+        let TokKind::IdLit(EntityRef::Change(id)) = &self.peek().kind else {
+            return Err(self.expected("a change id"));
+        };
+        let node = *id;
+        let span = self.peek().span;
+        self.advance();
+        Ok(Sp { node, span })
+    }
+
+    fn change_status_field(&mut self) -> Result<ChangeStatus, Diagnostic> {
+        self.expect_lower_kw("status")?;
+        let status = self.change_status()?;
+        self.end_of_field()?;
+        Ok(status)
+    }
+
+    /// The five statuses of D16.
+    ///
+    /// Unlike the other closed sets (which go through
+    /// [`P::word_from_set`]), an unknown status is reported by *listing*
+    /// them: a change's lifecycle is the one vocabulary an agent has no
+    /// other way to discover, and the whole list costs one line. The
+    /// closest-word suggestion is still offered, as a hint.
+    fn change_status(&mut self) -> Result<ChangeStatus, Diagnostic> {
+        let TokKind::LowerIdent(word) = &self.peek().kind else {
+            return Err(self.expected(CHANGE_STATUS_WORDS));
+        };
+        let span = self.peek().span;
+        if let Some(entry) = CHANGE_STATUSES
+            .iter()
+            .find(|entry| entry.0 == word.as_str())
+        {
+            let status = entry.1;
+            self.advance();
+            return Ok(status);
+        }
+        let hint = closest(word, CHANGE_STATUSES.iter().map(|entry| entry.0))
+            .map(|known| format!("closest is `{known}`"));
+        let message = format!("expected {CHANGE_STATUS_WORDS}, found `{word}`");
+        Err(self.diag_at(span, message, hint))
+    }
+
+    /// `digest-field = "digest" , string-lit`, the string being the
+    /// canonical `"sha256:<64 hex>"` of D3 -- checked here, where the span
+    /// of the offending string is still at hand.
+    fn digest_field(&mut self) -> Result<String, Diagnostic> {
+        self.expect_lower_kw("digest")?;
+        let text = self.expect_str("a digest string")?;
+        if !is_canonical_digest(&text.node) {
+            return Err(self.diag_at(
+                text.span,
+                "malformed digest; expected sha256:<64 hex>".to_string(),
+                None,
+            ));
+        }
+        self.end_of_field()?;
+        Ok(text.node)
+    }
+
+    /// `op-decl`: one staged operation (Annex C).
+    fn op_decl(&mut self) -> Result<StagedOp, Diagnostic> {
+        self.expect_lower_kw("op")?;
+        if self.at_kw("add") {
+            self.advance();
+            return self.entity_decl(Verb::Add);
+        }
+        if self.at_kw("edit") {
+            self.advance();
+            return self.entity_decl(Verb::Edit);
+        }
+        if self.at_kw("remove") {
+            self.advance();
+            return self.remove_op();
+        }
+        if self.at_kw("accept") {
+            self.advance();
+            return self.accept_op();
+        }
+        Err(self.expected("`add`, `edit`, `remove` or `accept`"))
+    }
+
+    /// `entity-decl = notion-file | intent-file | constraint-file`, nested
+    /// (D2): the entity keyword picks the M1 rule, which parses the block
+    /// exactly as it would at the top of a file of its own.
+    fn entity_decl(&mut self, verb: Verb) -> Result<StagedOp, Diagnostic> {
+        let op = if self.at_kw("notion") {
+            let notion = self.notion_decl()?;
+            match verb {
+                Verb::Add => StagedOp::AddNotion(notion),
+                Verb::Edit => StagedOp::EditNotion(notion),
+            }
+        } else if self.at_kw("intent") {
+            let intent = self.intent_decl()?;
+            match verb {
+                Verb::Add => StagedOp::AddIntent(intent),
+                Verb::Edit => StagedOp::EditIntent(intent),
+            }
+        } else if self.at_kw("constraint") {
+            let constraint = self.constraint_decl()?;
+            match verb {
+                Verb::Add => StagedOp::AddConstraint(constraint),
+                Verb::Edit => StagedOp::EditConstraint(constraint),
+            }
+        } else {
+            return Err(self.expected("`notion`, `intent` or `constraint`"));
+        };
+        self.end_of_field()?;
+        Ok(op)
+    }
+
+    /// `"remove" , ( "notion" , upper-ident | "intent" , intent-id
+    ///             | "constraint" , constraint-id )`: one line, and the
+    /// entity keyword decides which id form is expected after it.
+    fn remove_op(&mut self) -> Result<StagedOp, Diagnostic> {
+        let op = if self.at_kw("notion") {
+            self.advance();
+            StagedOp::RemoveNotion(self.expect_notion_name()?.node)
+        } else if self.at_kw("intent") {
+            self.advance();
+            StagedOp::RemoveIntent(self.expect_intent_id()?.node)
+        } else if self.at_kw("constraint") {
+            self.advance();
+            StagedOp::RemoveConstraint(self.expect_constraint_id()?.node)
+        } else {
+            return Err(self.expected("`notion`, `intent` or `constraint`"));
+        };
+        self.end_of_field()?;
+        Ok(op)
+    }
+
+    /// `"accept" , string-lit , string-lit`: the path, then the blob oid it
+    /// is being sealed at.
+    fn accept_op(&mut self) -> Result<StagedOp, Diagnostic> {
+        let path = self.expect_str("a repository path")?;
+        let oid = self.expect_str("the blob oid string after the path")?;
+        self.end_of_field()?;
+        Ok(StagedOp::Accept {
+            path: RepoPath::new(path.node),
+            oid: Oid(oid.node),
+        })
     }
 
     // --- expressions (Annex C.3) -----------------------------------------
@@ -2672,5 +2985,389 @@ mod tests {
         let diags = parse_bindings_file(&bindings_path(), src).unwrap_err();
         assert_eq!(diags.len(), 1, "diagnostics: {diags:#?}");
         assert_eq!(diags[0].message, "expected `->`, found `INT-0001`");
+    }
+
+    // --- change files ----------------------------------------------------
+
+    mod changes {
+        use super::*;
+        use crate::emit::{emit_change, emit_op};
+        use crate::ids::ChangeId;
+        use crate::model::change::fixtures::{ANNEX_C_EXAMPLE, annex_c_change, annex_c_ops};
+
+        fn change_path() -> RepoPath {
+            RepoPath::new("telos/changes/CHG-0007.tel")
+        }
+
+        fn parse(src: &str) -> Change {
+            parse_change_file(&change_path(), src)
+                .unwrap_or_else(|d| panic!("must parse:\n{src}\n{d:#?}"))
+        }
+
+        fn diags(src: &str) -> Vec<Diagnostic> {
+            parse_change_file(&change_path(), src).expect_err("must not parse")
+        }
+
+        #[test]
+        fn parses_the_annex_c_example_into_the_expected_change() {
+            let change = parse(ANNEX_C_EXAMPLE);
+            let expected = annex_c_change();
+
+            assert_eq!(change.id, ChangeId(7));
+            assert_eq!(change.motivation, expected.motivation);
+            assert_eq!(change.status, ChangeStatus::Approved);
+            assert_eq!(change.approved_digest, expected.approved_digest);
+
+            // Three of the four ops carry no `Sp` at all, so they compare
+            // to the in-code fixture as they are...
+            let ops = annex_c_ops();
+            assert_eq!(change.ops.len(), ops.len());
+            assert_eq!(change.ops[0], ops[0]);
+            assert_eq!(change.ops[2], ops[2]);
+            assert_eq!(change.ops[3], ops[3]);
+            // ...while the intent's references were parsed from real
+            // positions, which the fixture (built in code) has no way to
+            // predict. Their canonical bytes are the span-free identity,
+            // and `ops_digest` is that identity for the whole delta (D3).
+            let StagedOp::EditIntent(intent) = &change.ops[1] else {
+                panic!("the second op edits an intent");
+            };
+            assert_eq!(intent.id, IntentId(17));
+            assert_eq!(intent.title, "Issuing an invoice opens it");
+            assert_eq!(intent.status, IntentStatus::Active);
+            assert_eq!(intent.scenarios.len(), 1);
+            assert_eq!(emit_op(&change.ops[1]), emit_op(&ops[1]));
+            assert_eq!(change.ops_digest(), expected.ops_digest());
+            assert_eq!(change.claims(), expected.claims());
+        }
+
+        #[test]
+        fn the_annex_c_example_round_trips_byte_exact() {
+            // D1: the emitter defines the canonical form, so the golden it
+            // is pinned against must survive a parse untouched.
+            assert_eq!(emit_change(&parse(ANNEX_C_EXAMPLE)), ANNEX_C_EXAMPLE);
+        }
+
+        #[test]
+        fn the_parsed_spans_point_into_the_change_file() {
+            // The nested block is parsed in place, so its diagnostics point
+            // at the change file's own offsets -- not at offsets in some
+            // extracted substring.
+            let StagedOp::EditIntent(intent) = &parse(ANNEX_C_EXAMPLE).ops[1] else {
+                panic!("the second op edits an intent");
+            };
+            let Statement::EventDriven { event, .. } = &intent.statement else {
+                panic!("an event-driven statement");
+            };
+            let at = ANNEX_C_EXAMPLE.find("when   InvoiceIssued").unwrap() + "when   ".len();
+            assert_eq!(
+                event.span,
+                Span {
+                    start: at as u32,
+                    end: (at + "InvoiceIssued".len()) as u32,
+                }
+            );
+        }
+
+        #[test]
+        fn every_status_is_accepted() {
+            for (word, status) in CHANGE_STATUSES {
+                let digest = if status == ChangeStatus::Approved {
+                    format!("  digest \"sha256:{}\"\n", "0".repeat(64))
+                } else {
+                    String::new()
+                };
+                let src = format!("change CHG-0001 \"x\" {{\n  status {word}\n{digest}}}\n");
+                assert_eq!(parse(&src).status, status);
+            }
+        }
+
+        #[test]
+        fn an_unknown_status_lists_the_five_and_suggests_the_closest() {
+            let found = diags("change CHG-0001 \"x\" {\n  status aproved\n}\n");
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(
+                found[0].message,
+                "expected one of `open`, `drafted`, `approved`, `implementing`, \
+                 `abandoned`, found `aproved`"
+            );
+            assert_eq!(found[0].hint.as_deref(), Some("closest is `approved`"));
+            assert_eq!(found[0].code, ErrorCode::TelosParseError);
+            assert_eq!((found[0].line, found[0].col), (Some(2), Some(10)));
+        }
+
+        #[test]
+        fn a_missing_status_line_is_reported_once() {
+            // `status` has a stand-in (`open`), so the ops after it are
+            // still parsed rather than abandoned.
+            let src = "change CHG-0001 \"x\" {\n  op remove notion Ledger\n}\n";
+            let found = diags(src);
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(found[0].message, "expected `status`, found `op`");
+        }
+
+        #[test]
+        fn a_header_without_a_change_id_says_so() {
+            let found = diags("change INT-0007 \"x\" {\n  status open\n}\n");
+            assert_eq!(found[0].message, "expected a change id, found `INT-0007`");
+        }
+
+        #[test]
+        fn the_digest_and_the_status_must_agree() {
+            let approved_no_digest = diags("change CHG-0001 \"x\" {\n  status approved\n}\n");
+            assert_eq!(approved_no_digest.len(), 1);
+            assert_eq!(
+                approved_no_digest[0].message,
+                "an approved change must carry its digest"
+            );
+            // Reported at the `status` line: that is the line the writer
+            // has to look at to decide which of the two to fix.
+            assert_eq!(
+                (approved_no_digest[0].line, approved_no_digest[0].col),
+                (Some(2), Some(3))
+            );
+
+            let digest = format!("  digest \"sha256:{}\"\n", "0".repeat(64));
+            for status in ["open", "drafted", "implementing", "abandoned"] {
+                let src = format!("change CHG-0001 \"x\" {{\n  status {status}\n{digest}}}\n");
+                let found = diags(&src);
+                assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+                assert_eq!(
+                    found[0].message,
+                    "digest is only valid on an approved change"
+                );
+                assert_eq!((found[0].line, found[0].col), (Some(3), Some(3)));
+            }
+        }
+
+        #[test]
+        fn a_malformed_digest_is_reported_where_it_stands() {
+            let src = "change CHG-0001 \"x\" {\n  status approved\n  digest \"sha256:beef\"\n}\n";
+            let found = diags(src);
+            // The digest line was written, so the coherence check stays
+            // quiet: one fault, one diagnostic.
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(
+                found[0].message,
+                "malformed digest; expected sha256:<64 hex>"
+            );
+            assert_eq!((found[0].line, found[0].col), (Some(3), Some(10)));
+        }
+
+        #[test]
+        fn is_canonical_digest_accepts_exactly_the_d3_form() {
+            let hex = "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
+            assert!(is_canonical_digest(&format!("sha256:{hex}")));
+            assert!(!is_canonical_digest(hex));
+            assert!(!is_canonical_digest(&format!("sha256:{}", &hex[..63])));
+            assert!(!is_canonical_digest(&format!("sha256:{hex}0")));
+            assert!(!is_canonical_digest(&format!(
+                "sha256:{}",
+                hex.to_uppercase()
+            )));
+            assert!(!is_canonical_digest(&format!("SHA256:{hex}")));
+            assert!(!is_canonical_digest(""));
+        }
+
+        #[test]
+        fn every_op_shape_parses() {
+            let src = concat!(
+                "change CHG-0001 \"x\" {\n",
+                "  status drafted\n",
+                "\n",
+                "  op add notion A entity {\n",
+                "    def  \"a\"\n",
+                "  }\n",
+                "\n",
+                "  op edit notion B value {\n",
+                "    def  \"b\"\n",
+                "  }\n",
+                "\n",
+                "  op remove notion C\n",
+                "\n",
+                "  op add constraint CON-0001 stack \"s\" {\n",
+                "    rule  \"r\"\n",
+                "    scope global\n",
+                "  }\n",
+                "\n",
+                "  op edit constraint CON-0002 quality \"q\" {\n",
+                "    rule  \"r\"\n",
+                "    scope global\n",
+                "  }\n",
+                "\n",
+                "  op remove constraint CON-0003\n",
+                "\n",
+                "  op remove intent INT-0004\n",
+                "\n",
+                "  op accept \"telos/telos.toml\" \"e69de29\"\n",
+                "}\n",
+            );
+            let verbs: Vec<(&str, &str)> = parse(src)
+                .ops
+                .iter()
+                .map(|op| (op.verb(), op.entity()))
+                .collect();
+            assert_eq!(
+                verbs,
+                vec![
+                    ("add", "notion"),
+                    ("edit", "notion"),
+                    ("remove", "notion"),
+                    ("add", "constraint"),
+                    ("edit", "constraint"),
+                    ("remove", "constraint"),
+                    ("remove", "intent"),
+                    ("accept", "file"),
+                ]
+            );
+        }
+
+        #[test]
+        fn an_accept_op_takes_exactly_two_strings() {
+            let base = "change CHG-0001 \"x\" {\n  status drafted\n\n  op accept";
+            let cases = [
+                ("", "expected a repository path, found end of line"),
+                (
+                    " \"telos/telos.toml\"",
+                    "expected the blob oid string after the path, found end of line",
+                ),
+                (
+                    " \"telos/telos.toml\" \"e69de29\" \"extra\"",
+                    "expected end of line, found `\"extra\"`",
+                ),
+            ];
+            for (tail, expected) in cases {
+                let found = diags(&format!("{base}{tail}\n}}\n"));
+                assert_eq!(found.len(), 1, "for `{tail}`: {found:#?}");
+                assert_eq!(found[0].message, expected, "for `{tail}`");
+            }
+        }
+
+        #[test]
+        fn a_remove_op_wants_the_id_form_its_keyword_announced() {
+            let cases = [
+                (
+                    "notion INT-0001",
+                    "expected a notion name, found `INT-0001`",
+                ),
+                ("intent Ledger", "expected an intent id, found `Ledger`"),
+                ("intent CON-0003", "expected an intent id, found `CON-0003`"),
+                (
+                    "constraint INT-0001",
+                    "expected a constraint id, found `INT-0001`",
+                ),
+                (
+                    "binding \"a.rs\"",
+                    "expected `notion`, `intent` or `constraint`, found `binding`",
+                ),
+            ];
+            for (tail, expected) in cases {
+                let src = format!(
+                    "change CHG-0001 \"x\" {{\n  status drafted\n\n  op remove {tail}\n}}\n"
+                );
+                let found = diags(&src);
+                assert_eq!(found.len(), 1, "for `{tail}`: {found:#?}");
+                assert_eq!(found[0].message, expected, "for `{tail}`");
+            }
+        }
+
+        #[test]
+        fn an_unknown_verb_or_entity_names_what_was_expected() {
+            let src = "change CHG-0001 \"x\" {\n  status drafted\n\n  op stage notion A\n}\n";
+            assert_eq!(
+                diags(src)[0].message,
+                "expected `add`, `edit`, `remove` or `accept`, found `stage`"
+            );
+            let src =
+                "change CHG-0001 \"x\" {\n  status drafted\n\n  op add scenario SCN-0001\n}\n";
+            assert_eq!(
+                diags(src)[0].message,
+                "expected `notion`, `intent` or `constraint`, found `scenario`"
+            );
+        }
+
+        #[test]
+        fn a_line_that_is_not_an_op_is_reported_and_skipped() {
+            let src = concat!(
+                "change CHG-0001 \"x\" {\n",
+                "  status drafted\n",
+                "\n",
+                "  run \"cargo test\"\n",
+                "\n",
+                "  op remove notion A\n",
+                "}\n",
+            );
+            let found = diags(src);
+            // `run` lines are reserved for M3 (D1): in M2 they are simply
+            // not part of the grammar, and the op after one still parses.
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(found[0].message, "expected `op` or `}`, found `run`");
+        }
+
+        #[test]
+        fn a_broken_nested_block_is_recovered_at_the_change_level() {
+            // The fatal error is inside a nested intent (no `statement`),
+            // two brace levels down. Recovery must climb back out to the
+            // change's own body and keep going, or the ops below would
+            // vanish silently.
+            let src = concat!(
+                "change CHG-0001 \"x\" {\n",
+                "  status drafted\n",
+                "\n",
+                "  op add intent INT-0001 \"t\" {\n",
+                "    status draft\n",
+                "    telos  \"why\"\n",
+                "  }\n",
+                "\n",
+                "  op remove notion Ledger\n",
+                "\n",
+                "  op remove intent Ledger\n",
+                "}\n",
+            );
+            let found = diags(src);
+            assert_eq!(found.len(), 2, "diagnostics: {found:#?}");
+            assert_eq!(found[0].message, "expected `statement`, found `}`");
+            assert_eq!(found[1].message, "expected an intent id, found `Ledger`");
+        }
+
+        #[test]
+        fn an_unclosed_change_block_is_fatal() {
+            let src = "change CHG-0001 \"x\" {\n  status drafted\n";
+            let found = diags(src);
+            assert_eq!(found[0].message, "expected `op` or `}`, found end of input");
+        }
+
+        #[test]
+        fn nothing_may_follow_the_closing_brace() {
+            let src = "change CHG-0001 \"x\" {\n  status open\n}\nchange CHG-0002 \"y\" {\n}\n";
+            assert_eq!(
+                diags(src)[0].message,
+                "expected end of input, found `change`"
+            );
+        }
+
+        #[test]
+        fn blank_lines_between_ops_are_layout_only() {
+            // The emitter writes exactly one blank line before each op; the
+            // parser accepts none, one or many, and emitting normalizes.
+            let dense = concat!(
+                "change CHG-0001 \"x\" {\n",
+                "  status drafted\n",
+                "  op remove notion A\n",
+                "  op remove notion B\n",
+                "}\n",
+            );
+            let canonical = concat!(
+                "change CHG-0001 \"x\" {\n",
+                "  status drafted\n",
+                "\n",
+                "  op remove notion A\n",
+                "\n",
+                "  op remove notion B\n",
+                "}\n",
+            );
+            assert_eq!(emit_change(&parse(dense)), canonical);
+            assert_eq!(emit_change(&parse(canonical)), canonical);
+        }
     }
 }

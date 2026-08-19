@@ -238,12 +238,13 @@ impl Change {
     }
 }
 
-/// The Annex C canonical example, built as a model.
+/// The Annex C canonical example, as a model *and* as its canonical bytes.
 ///
-/// It lives outside `mod tests` so that `emit.rs`'s tests can reach it too:
-/// the byte-exact golden belongs with the emitter, the `claims`/digest
-/// assertions belong here, and both must be talking about the same change
-/// or neither proves anything about the other.
+/// It lives outside `mod tests` so that the rest of the crate's tests can
+/// reach it: the byte-exact golden is what `emit.rs` must produce and what
+/// `syntax/parser.rs` must read back, the `claims`/digest assertions belong
+/// here, and all three must be talking about the same change or none of
+/// them proves anything about the others. Hence one copy of each, here.
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
@@ -371,6 +372,50 @@ pub(crate) mod fixtures {
             ops: annex_c_ops(),
         }
     }
+
+    /// The canonical example of Annex C, byte for byte: what
+    /// `emit_change(&annex_c_change())` writes, and what
+    /// `parse_change_file` reads back into `annex_c_change()`.
+    ///
+    /// It differs from the example as printed in the annex in exactly two
+    /// tokens, both of which the annex' sketch dropped and neither of which
+    /// the emitter may: the notion's kind (`entity`) and the intent's
+    /// title. `entity-decl` is the M1 `notion-file` / `intent-file` grammar
+    /// nested verbatim (Annex C), and both tokens are mandatory there -- an
+    /// `op add notion Invoice {` carries no kind, so replaying it could not
+    /// write a valid notion file, and D1's byte-level round-trip could not
+    /// hold. The values used here are the corpus' own:
+    /// `crates/telos-core/tests/corpus/billing`, which is visibly where the
+    /// annex drew the example from.
+    pub(crate) const ANNEX_C_EXAMPLE: &str = r#"change CHG-0007 "Invoices can be settled" {
+  status approved
+  digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
+
+  op add notion Invoice entity {
+    def  "A bill issued to a Customer for delivered work."
+    attr state enum(open, settled)
+  }
+
+  op edit intent INT-0017 "Issuing an invoice opens it" {
+    status active
+    telos  "An invoice must start its life open and unpaid -- reworded."
+    statement event-driven {
+      when   InvoiceIssued on Invoice
+      system shall set Invoice.state = open
+    }
+
+    scenario SCN-0091 "a newly issued invoice is open" {
+      given Customer { name: "ACME" }
+      when  InvoiceIssued {}
+      then  Invoice.state == open
+    }
+  }
+
+  op remove constraint CON-0003
+
+  op accept "telos/telos.toml" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+}
+"#;
 
     /// A change with no op: the state `telos change open` leaves behind.
     pub(crate) fn empty_change() -> Change {

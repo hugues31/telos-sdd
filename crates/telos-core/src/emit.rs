@@ -719,51 +719,8 @@ mod tests {
         use crate::ids::ChangeId;
         use crate::model::ChangeStatus;
         use crate::model::change::fixtures::{
-            annex_c_change, con_0003, empty_change, int_0017, invoice, notion_name,
+            ANNEX_C_EXAMPLE, annex_c_change, con_0003, empty_change, int_0017, invoice, notion_name,
         };
-
-        /// The canonical example of Annex C, byte for byte.
-        ///
-        /// It differs from the example as printed in the annex in exactly
-        /// two tokens, both of which the annex' sketch dropped and neither
-        /// of which the emitter may: the notion's kind (`entity`) and the
-        /// intent's title. `entity-decl` is the M1 `notion-file` /
-        /// `intent-file` grammar nested verbatim (Annex C), and both tokens
-        /// are mandatory there -- an `op add notion Invoice {` carries no
-        /// kind, so replaying it could not write a valid notion file, and
-        /// D1's byte-level round-trip (T2 re-parses this with the M1 block
-        /// parsers) could not hold. The values used here are the corpus'
-        /// own: `crates/telos-core/tests/corpus/billing`, which is visibly
-        /// where the annex drew the example from.
-        const ANNEX_C_EXAMPLE: &str = r#"change CHG-0007 "Invoices can be settled" {
-  status approved
-  digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
-
-  op add notion Invoice entity {
-    def  "A bill issued to a Customer for delivered work."
-    attr state enum(open, settled)
-  }
-
-  op edit intent INT-0017 "Issuing an invoice opens it" {
-    status active
-    telos  "An invoice must start its life open and unpaid -- reworded."
-    statement event-driven {
-      when   InvoiceIssued on Invoice
-      system shall set Invoice.state = open
-    }
-
-    scenario SCN-0091 "a newly issued invoice is open" {
-      given Customer { name: "ACME" }
-      when  InvoiceIssued {}
-      then  Invoice.state == open
-    }
-  }
-
-  op remove constraint CON-0003
-
-  op accept "telos/telos.toml" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
-}
-"#;
 
         #[test]
         fn emit_change_reproduces_the_annex_c_example_byte_for_byte() {

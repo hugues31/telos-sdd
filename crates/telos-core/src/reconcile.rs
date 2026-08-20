@@ -1017,7 +1017,7 @@ fn run_tests(
     impacted: &BTreeSet<NodeRef>,
 ) -> Result<u32, TelosError> {
     let cmd = &ws.config.test.cmd;
-    if cmd.is_empty() {
+    if cmd.trim().is_empty() {
         return Ok(0);
     }
 
@@ -1060,7 +1060,7 @@ fn run_tests(
 /// the gate and reports zero runs, exactly as in the per-change path.
 fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
     let cmd = &ws.config.test.cmd;
-    if cmd.is_empty() {
+    if cmd.trim().is_empty() {
         return Ok(0);
     }
 

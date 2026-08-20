@@ -1049,6 +1049,21 @@ fn full_reconcile_without_active_intents_needs_no_runner_or_test_run() {
     assert_eq!(result["tests_run"], json!(0));
 }
 
+#[test]
+fn full_reconcile_treats_a_whitespace_runner_as_absent_for_draft_only_intents() {
+    let tmp = unsealed_fixture();
+    for intent in ["INT-0017", "INT-0042"] {
+        let path = tmp.path().join(format!("telos/intents/{intent}.tel"));
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(path, source.replace("status active", "status draft")).unwrap();
+    }
+    set_test_cmd_to(tmp.path(), " \t ");
+
+    let result = reconcile_full_ok(tmp.path());
+
+    assert_eq!(result["tests_run"], json!(0));
+}
+
 /// D10's `--full` half: one invocation of `[test] cmd` with `{filter}`
 /// substituted by nothing -- the whole suite, once -- however many scenarios
 /// the spec proves.
@@ -1761,26 +1776,53 @@ fn config_edit_revalidates_scoped_constraints_before_writing() {
 }
 
 #[test]
-fn config_edit_runs_every_distinct_proof_with_the_staged_runner_before_writing() {
-    let tmp = with_fixture();
+fn config_edit_runs_each_distinct_proof_once_with_the_staged_runner() {
+    const RUN_LOG: &str = ".config-proof-runs";
+    const JOURNAL_RUNNER: &str =
+        "git config --file .config-proof-runs --add runs.filter proof-{filter}";
+
+    let tmp = with_fixture_mut(|root| {
+        set_test_cmd_to(root, JOURNAL_RUNNER);
+        let path = root.join(BINDINGS);
+        let mut source = fs::read_to_string(&path).unwrap();
+        source.push_str("proves     \"tests/billing.rs\" -> SCN-0107\n");
+        fs::write(path, source).unwrap();
+    });
+    fs::remove_file(tmp.path().join(RUN_LOG)).unwrap();
     open_change(tmp.path());
-    stage_corpus_config(tmp.path(), "git hash-object .missing-{filter}");
+    stage_corpus_config(tmp.path(), JOURNAL_RUNNER);
     approve(tmp.path());
-    let config_before = read(tmp.path(), "telos/telos.toml");
-    let lock_before = read(tmp.path(), LOCK);
 
-    let error = reconcile_err(tmp.path());
+    let result = reconcile_ok(tmp.path());
 
-    assert_eq!(error["code"], json!("TELOS_INTEGRITY_VIOLATION"));
     assert_eq!(
-        error["message"],
-        json!(
-            "the test run for `tests/billing.rs` failed: `git hash-object .missing-tests/billing.rs`"
-        )
+        result["tests_run"],
+        json!(2),
+        "three bindings collapse to two distinct proof targets"
     );
-    assert_eq!(read(tmp.path(), "telos/telos.toml"), config_before);
-    assert_eq!(read(tmp.path(), LOCK), lock_before);
-    assert!(tmp.path().join(CHG_0001).exists());
+    assert_eq!(
+        read(tmp.path(), RUN_LOG),
+        "[runs]\n\tfilter = proof-tests/billing.rs\n\tfilter = proof-scn_0107_full_payment_settles_the_invoice\n"
+    );
+}
+
+#[test]
+fn config_edit_treats_a_whitespace_runner_as_absent_for_draft_only_intents() {
+    let tmp = with_fixture_mut(|root| {
+        for intent in ["INT-0017", "INT-0042"] {
+            let path = root.join(format!("telos/intents/{intent}.tel"));
+            let source = fs::read_to_string(&path).unwrap();
+            fs::write(path, source.replace("status active", "status draft")).unwrap();
+        }
+        set_test_cmd_to(root, " \t ");
+    });
+    open_change(tmp.path());
+    stage_corpus_config(tmp.path(), " \t ");
+    approve(tmp.path());
+
+    let result = reconcile_ok(tmp.path());
+
+    assert_eq!(result["tests_run"], json!(0));
 }
 
 #[test]

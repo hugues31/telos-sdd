@@ -54,8 +54,17 @@ La fixture scellée commune est désormais réellement scellable : deux scénari
 
 Adaptations directement induites : couverture status/change-flow à 2/2, graphe impact incluant la preuve canonique de SCN-0091, cas remove/context isolés avec INT-0017 draft, diagnostic `telos test` sans runner exercé via un lock legacy produit au bas niveau, et intent éphémère draft pour le test d’ownership/remove.
 
+## Round post-review 1
+
+- Cause : la garde de structure utilisait `cmd.trim().is_empty()`, tandis que `run_tests` et `run_full_tests` utilisaient `cmd.is_empty()`. Une commande uniquement composée d’espaces franchissait donc l’exécution shell et incrémentait mensongèrement `tests_run`.
+- Deux RED distincts, full et ordinary/EditConfig sur intents uniquement drafts, ont chacun observé `tests_run: 1` au lieu de `0`.
+- Le correctif minimal applique la même sémantique `trim().is_empty()` aux deux exécuteurs; les deux régressions sont GREEN et n’invoquent plus le shell.
+- Le test global EditConfig utilise désormais un runner qui journalise les filtres réellement substitués. Trois bindings, dont une cible partagée par deux scénarios, produisent exactement deux lignes distinctes et `tests_run: 2`.
+- Aucun test « propriétaires config multiples » n’a été ajouté : l’API CLI naturelle interdit déjà le second claim. Construire ce cas exige de forger manuellement deux CHG et testerait principalement le contournement du format, alors que la branche défensive reste déterministe dans `approved_config_workspace`.
+
 ## Vérification fraîche
 
+- Round post-review 1 : `rtk cargo test -p telos --test reconcile` : 48/48; clippy ciblé `telos-core --all-targets` et `telos --test reconcile` avec `-D warnings` : aucune alerte.
 - `rtk cargo test -p telos-core` : 648 tests, 13 suites, tous verts.
 - Suites spécialisées reconcile/config/rebuild/status_check/view_export : 95 tests, 5 suites, tous verts.
 - Ensemble des autres suites CLI propres hors Task8/Task9 : 313 tests, tous verts.

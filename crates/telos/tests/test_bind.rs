@@ -714,11 +714,11 @@ fn new_intent_payload() -> String {
     .to_string()
 }
 
-/// Stages `add intent` into `CHG-0001` and returns the id the allocator
+/// Stages `add intent` into `change` and returns the id the allocator
 /// minted -- an intent the sealed spec has never heard of, which is the
 /// whole point of the overlay-only test.
-fn stage_new_intent(dir: &Path) -> String {
-    let out = telos(dir, &["add", "intent", "--change", "CHG-0001", "--json"])
+fn stage_new_intent(dir: &Path, change: &str) -> String {
+    let out = telos(dir, &["add", "intent", "--change", change, "--json"])
         .write_stdin(new_intent_payload())
         .output()
         .unwrap();
@@ -727,6 +727,70 @@ fn stage_new_intent(dir: &Path) -> String {
         .as_str()
         .expect("`add intent` reports the allocated id")
         .to_string()
+}
+
+/// `telos change open`, not asserting which id comes back -- unlike
+/// [`open_change`], usable once `CHG-0001` is no longer guaranteed to be
+/// the next one (a fixture that already reconciled and closed an earlier
+/// change).
+fn open_change_any(dir: &Path, motivation: &str) -> String {
+    let out = telos(dir, &["change", "open", motivation, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    json_stdout(&out)["result"]["id"]
+        .as_str()
+        .expect("`change open` reports the allocated id")
+        .to_string()
+}
+
+/// `telos change approve <id>`, for a change id other than `CHG-0001`.
+fn approve_id(dir: &Path, id: &str) {
+    let out = telos(dir, &["change", "approve", id, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+/// A project with a second, approved change whose **only** op is `remove
+/// intent <id>` -- and returns that id.
+///
+/// The intent itself comes from a first change (`add intent`) that was
+/// reconciled and sealed before the removal is even staged, so by
+/// construction the removal shares its change with no companion `add`/
+/// `edit` op for the same id: exactly the shape the `owner_of` regression
+/// needs, and not reachable by editing one of the corpus' own intents (both
+/// are cross-referenced -- `INT-0042` `requires INT-0017` and is itself
+/// `implements`-bound -- so removing either one outright is refused by the
+/// overlay's own referential-integrity check, several steps before
+/// `telos bind` is ever reached).
+fn approved_removal_of_a_fresh_intent(dir: &Path) -> String {
+    let adding = open_change_any(dir, "a short-lived intent");
+    let new_intent = stage_new_intent(dir, &adding);
+    approve_id(dir, &adding);
+    let out = telos(dir, &["change", "reconcile", &adding, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let removing = open_change_any(dir, "removing it again");
+    let out = telos(
+        dir,
+        &[
+            "remove",
+            "intent",
+            &new_intent,
+            "--change",
+            &removing,
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    approve_id(dir, &removing);
+
+    new_intent
 }
 
 /// Appends a comment to the corpus' already-bound, sealed code file --
@@ -994,7 +1058,12 @@ fn bind_of_a_path_under_telos_is_refused() {
         error["message"],
         json!("a journal line cannot name a path under telos/")
     );
-    assert_eq!(error["hint"], Value::Null);
+    assert_eq!(
+        error["hint"],
+        json!(
+            "journal lines name code and test files; the spec tree is written by ops and by reconcile"
+        )
+    );
 }
 
 /// The carve-out is exactly one path wide (D6): drift anywhere else is
@@ -1034,7 +1103,7 @@ fn bind_refuses_unclaimed_drift_elsewhere() {
 fn bind_on_an_intent_only_the_open_change_knows_about() {
     let tmp = with_fixture();
     open_change(tmp.path());
-    let new_intent = stage_new_intent(tmp.path());
+    let new_intent = stage_new_intent(tmp.path(), "CHG-0001");
     approve(tmp.path());
     fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
 
@@ -1051,4 +1120,38 @@ fn bind_on_an_intent_only_the_open_change_knows_about() {
             "intent": new_intent,
         })
     );
+}
+
+// --- an intent a change only *removes* is never its owner --------------------
+
+/// The review's regression, pinned at the CLI layer: a change whose only op
+/// on an intent *removes* it must never be treated as that intent's owner.
+///
+/// Today the failure mode this guards is masked one layer up -- once the
+/// removal is staged, `require_known`'s fold withdraws the id from the
+/// known set the same way it withdraws any removed id, so `telos bind`
+/// answers `TELOS_REFERENCE_UNKNOWN` before ownership is even consulted.
+/// That is asserted here, as the current, observable behaviour; the
+/// ownership predicate itself is pinned directly, independent of
+/// `require_known`, by `owner_of_never_selects_a_change_that_only_removes_
+/// the_intent` in `bind.rs`'s own unit tests -- the pin that survives a
+/// future `require_known` that stops withdrawing removed ids for some
+/// unrelated reason.
+#[test]
+fn bind_to_an_intent_a_change_only_removes_is_unknown_not_owned() {
+    let tmp = with_fixture();
+    let removed_intent = approved_removal_of_a_fresh_intent(tmp.path());
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+
+    let error = error_of(
+        tmp.path(),
+        &["bind", NEW_CODE_FILE, &removed_intent, "--json"],
+    );
+
+    assert_eq!(error["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert_eq!(
+        error["message"],
+        json!(format!("unknown intent `{removed_intent}`"))
+    );
+    assert_eq!(error["hint"], json!("closest is INT-0042"));
 }

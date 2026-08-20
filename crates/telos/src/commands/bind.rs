@@ -11,9 +11,10 @@
 //!    spec or any open change declares;
 //! 3. the path argument, parsed as a repo-relative path that does not name
 //!    anything under `telos/`;
-//! 4. the **owner** (D5): the open change whose overlay claims the intent --
-//!    a binding belongs to the transaction that introduced what it
-//!    implements, never to the project at large;
+//! 4. the **owner** (D5): the open change whose delta adds or edits the
+//!    intent -- a binding belongs to the transaction that introduced what
+//!    it implements, never to the project at large, and never to a
+//!    transaction that is *removing* it (see [`owner_of`]);
 //! 5. that owner's status: `approved` or `implementing`, never a delta
 //!    nobody has reviewed;
 //! 6. the bound path must exist, at the bytes the working tree holds right
@@ -48,7 +49,7 @@ use serde_json::{Value, json};
 use telos_core::changes::write_change;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::ids::{ChangeId, IntentId, RepoPath};
-use telos_core::model::{Change, ChangeStatus, JournalEntry, StagedOp, TelFile, intent_path};
+use telos_core::model::{Change, ChangeStatus, JournalEntry, StagedOp, TelFile};
 use telos_core::overlay::parse_base;
 
 use crate::commands::{
@@ -65,7 +66,7 @@ pub fn run(ctx: &Ctx, path: &str, intent: &str) -> CmdResult {
     require_known(&project, intent)?;
     let path = parse_repo_path(path)?;
 
-    let owner = owner_of(&project, intent).ok_or_else(|| no_owner(intent))?;
+    let owner = owner_of(&project.parsed, intent).ok_or_else(|| no_owner(intent))?;
     require_approved(owner)?;
 
     require_exists(&project, &path)?;
@@ -158,12 +159,15 @@ fn parse_repo_path(arg: &str) -> Result<RepoPath, TelosError> {
     }
     if arg.starts_with("telos/") {
         // The grammar refuses this too, and for the same reason (D2, D3,
-        // D9) -- see the module doc's second ruling. Same message, whether
-        // it is this check or `parse_change_file` reading the line back
-        // afterwards that catches it.
+        // D9) -- see the module doc's second ruling. Same message and same
+        // hint, whether it is this check or `parse_change_file` reading the
+        // line back afterwards that catches it.
         return Err(TelosError::new(
             ErrorCode::TelosReferenceUnknown,
             "a journal line cannot name a path under telos/",
+        )
+        .hint(
+            "journal lines name code and test files; the spec tree is written by ops and by reconcile",
         ));
     }
     Ok(RepoPath::new(arg))
@@ -185,22 +189,29 @@ fn is_repo_relative(arg: &str) -> bool {
         .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
-/// D5's ownership rule: the open change whose overlay claims the intent.
+/// D5's ownership rule: the open change whose delta adds or edits the
+/// intent -- the same predicate `telos test`'s `owner_of` applies to a
+/// scenario, one level up. Only `AddIntent`/`EditIntent` can make a change
+/// the intent's *implementer*: `Change::claims()` maps `target_path` over
+/// every op including `RemoveIntent` (and `intent_path(id)` is that op's
+/// target path too), so testing `claims()` instead would hand ownership of
+/// an intent to the one change that is *deleting* it -- exactly backwards.
 ///
-/// An `add`/`edit intent` op's target path is `intent_path(id)` (Annex C),
-/// and that path is exactly what becomes a claim of the change that stages
-/// it (`Change::claims`) -- so "the change whose ops add or edit this
-/// intent" and "the change whose claims contain `intent_path(intent)`" are
-/// one and the same set, and testing the claim is enough. `Project::parsed`
-/// is ascending by id, so two changes that somehow both claimed the same
-/// intent (impossible in practice: staging's one-file-one-change gate would
-/// have refused the second) resolve to the lower one, deterministically.
-fn owner_of(project: &Project, intent: IntentId) -> Option<&Change> {
-    let path = intent_path(intent);
-    project
-        .parsed
-        .iter()
-        .find(|change| change.claims().contains(&path))
+/// Takes the parsed changes directly, rather than a whole [`Project`], so it
+/// is a pure function of the data it actually reads -- and so the
+/// `RemoveIntent` regression below can construct a `Vec<Change>` and call it
+/// without also having to fabricate a workspace, a lock and a git
+/// repository. Ascending by id (the order [`Project::parsed`] is already
+/// in), so two changes that somehow both staged the same intent (impossible
+/// in practice: staging's one-file-one-change gate would have refused the
+/// second) resolve to the lower one, deterministically.
+fn owner_of(changes: &[Change], intent: IntentId) -> Option<&Change> {
+    changes.iter().find(|change| {
+        change.ops.iter().any(|op| match op {
+            StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => i.id == intent,
+            _ => false,
+        })
+    })
 }
 
 /// The frozen wording for an intent no open change claims (Annex F, the
@@ -306,4 +317,44 @@ fn human_line(report: &BindReport) -> String {
         "{} implements {} (recorded in {})",
         report.path, report.intent, report.change
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change_with(ops: Vec<StagedOp>) -> Change {
+        Change {
+            id: ChangeId(1),
+            motivation: "x".to_string(),
+            status: ChangeStatus::Approved,
+            approved_digest: None,
+            ops,
+            journal: Vec::new(),
+        }
+    }
+
+    /// The regression the review caught: `Change::claims()` maps
+    /// `target_path` over *every* op, `RemoveIntent` included, so an
+    /// ownership check built on `claims()` would treat the one change
+    /// *deleting* an intent as the change *implementing* it. This asserts
+    /// the fix directly against `owner_of`, independent of `require_known`
+    /// (which happens to withdraw a removed id from the known set today,
+    /// but is a separate gate that could change without this one noticing
+    /// -- see `bind_to_an_intent_a_change_only_removes_is_unknown_not_owned`
+    /// in `tests/test_bind.rs` for that layer, documented as the current,
+    /// coincidental one).
+    ///
+    /// A second, unrelated `RemoveIntent` shares the change too, so the
+    /// assertion cannot pass by accident of the change having only one op.
+    #[test]
+    fn owner_of_never_selects_a_change_that_only_removes_the_intent() {
+        let intent = IntentId(17);
+        let changes = vec![change_with(vec![
+            StagedOp::RemoveIntent(intent),
+            StagedOp::RemoveIntent(IntentId(42)),
+        ])];
+
+        assert!(owner_of(&changes, intent).is_none());
+    }
 }

@@ -51,6 +51,13 @@ pub enum InvoiceState {
     Settled,
 }
 
+pub mod adapters_v2 {
+    pub struct LedgerAdapterV2;
+}
+
+// Documentation only: `use crate::adapters::LedgerAdapter;` is forbidden.
+const FORBIDDEN_IMPORT_EXAMPLE: &str = "use crate::adapters::LedgerAdapter;";
+
 pub struct Invoice {
     customer: String,
     balance_cents: u64,
@@ -76,6 +83,13 @@ impl Invoice {
 
     pub fn balance_cents(&self) -> u64 {
         self.balance_cents
+    }
+
+    pub fn harmless_adapter_references(&self) -> (&'static str, &'static str) {
+        (
+            FORBIDDEN_IMPORT_EXAMPLE,
+            std::any::type_name::<adapters_v2::LedgerAdapterV2>(),
+        )
     }
 }
 "#;
@@ -124,9 +138,11 @@ impl Invoice {
 
 const CONSTRAINT_VIOLATING_IMPLEMENTATION: &str = r#"pub mod adapters {
     pub struct LedgerAdapter;
+    pub struct MailAdapter;
 }
 
-use crate::adapters::LedgerAdapter;
+use crate :: adapters::LedgerAdapter;
+use crate::{adapters::MailAdapter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvoiceState {
@@ -168,8 +184,11 @@ impl Invoice {
         self.balance_cents
     }
 
-    pub fn adapter_type_name(&self) -> &'static str {
-        std::any::type_name::<LedgerAdapter>()
+    pub fn adapter_type_names(&self) -> (&'static str, &'static str) {
+        (
+            std::any::type_name::<LedgerAdapter>(),
+            std::any::type_name::<MailAdapter>(),
+        )
     }
 }
 "#;
@@ -241,6 +260,7 @@ fn execute(
 ) -> (std::process::ExitStatus, Value, String) {
     let mut command = telos(root, args);
     command.env("CARGO_TARGET_DIR", target_dir);
+    command.env("CARGO_NET_OFFLINE", "true");
     if let Some(stdin) = stdin {
         command.write_stdin(stdin.to_owned());
     }

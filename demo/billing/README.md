@@ -28,6 +28,9 @@ cat > architecture/hexagonal.rs <<'TELOS_EOF'
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use syn::visit::Visit;
+use syn::{ItemUse, UseTree};
+
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -42,6 +45,55 @@ fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+fn is_adapter_path(path: &[String]) -> bool {
+    path.first().is_some_and(|segment| segment == "adapters")
+        || path.windows(2).any(|segments| {
+            matches!(segments[0].as_str(), "crate" | "self" | "super")
+                && segments[1] == "adapters"
+        })
+}
+
+fn imports_adapters(tree: &UseTree, path: &mut Vec<String>) -> bool {
+    match tree {
+        UseTree::Path(node) => {
+            path.push(node.ident.to_string());
+            let forbidden = is_adapter_path(path) || imports_adapters(&node.tree, path);
+            path.pop();
+            forbidden
+        }
+        UseTree::Name(node) => {
+            path.push(node.ident.to_string());
+            let forbidden = is_adapter_path(path);
+            path.pop();
+            forbidden
+        }
+        UseTree::Rename(node) => {
+            path.push(node.ident.to_string());
+            let forbidden = is_adapter_path(path);
+            path.pop();
+            forbidden
+        }
+        UseTree::Glob(_) => is_adapter_path(path),
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|tree| imports_adapters(tree, path)),
+    }
+}
+
+#[derive(Default)]
+struct LayerVisitor {
+    adapter_imports: usize,
+}
+
+impl<'ast> Visit<'ast> for LayerVisitor {
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        if imports_adapters(&item.tree, &mut Vec::new()) {
+            self.adapter_imports += 1;
+        }
+    }
+}
+
 #[test]
 fn domain_does_not_import_adapter_modules() {
     let mut files = Vec::new();
@@ -49,17 +101,15 @@ fn domain_does_not_import_adapter_modules() {
     files.sort();
     for path in files {
         let source = fs::read_to_string(&path).expect("read domain source");
-        for forbidden in [
-            "use crate::adapters",
-            "use self::adapters",
-            "use super::adapters",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{} imports the adapters layer through `{forbidden}`",
-                path.display()
-            );
-        }
+        let syntax = syn::parse_file(&source).expect("parse domain source");
+        let mut visitor = LayerVisitor::default();
+        visitor.visit_file(&syntax);
+        assert_eq!(
+            visitor.adapter_imports,
+            0,
+            "{} imports the adapters layer",
+            path.display()
+        );
     }
 }
 TELOS_EOF
@@ -89,6 +139,9 @@ required-features = ["application"]
 [[test]]
 name = "architecture"
 path = "architecture/hexagonal.rs"
+
+[dev-dependencies]
+syn = { version = "=3.0.3", features = ["full", "visit"] }
 TELOS_EOF
 ```
 <!-- bootstrap-manifest:end -->
@@ -132,6 +185,9 @@ path = "src/lib.rs"
 [[test]]
 name = "architecture"
 path = "architecture/hexagonal.rs"
+
+[dev-dependencies]
+syn = { version = "=3.0.3", features = ["full", "visit"] }
 TELOS_EOF
 ```
 <!-- application-manifest:end -->

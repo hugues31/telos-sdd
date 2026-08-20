@@ -309,11 +309,11 @@ fn init_and_init_agents_keep_the_same_exact_envelope() {
 /// codes; this table is the machine-readable enumeration an agent routes on.
 fn published_error_codes(contracts: &str) -> Vec<&str> {
     let canonical = contracts
-        .split_once("### Canonical error-code set\n")
+        .split_once("### Canonical error-code set")
         .expect("docs/contracts.md has a canonical Error codes table")
         .1;
     let table = canonical
-        .split_once("\n### Detailed emission cases")
+        .split_once("### Detailed emission cases")
         .expect("canonical Error codes table ends before detailed cases")
         .0;
 
@@ -377,6 +377,15 @@ fn published_error_code_table_is_exact_and_unique() {
         documented_set, live,
         "published codes differ from ErrorCode"
     );
+}
+
+#[test]
+fn published_error_code_parser_accepts_crlf_contracts() {
+    let contracts = include_str!("../../../docs/contracts.md").replace('\n', "\r\n");
+    let documented = published_error_codes(&contracts);
+
+    assert_eq!(documented.len(), 17);
+    assert!(documented.contains(&"TELOS_TEST_NOT_FOUND"));
 }
 
 /// M3 extends the public surface with bounded context, red/green witnesses,

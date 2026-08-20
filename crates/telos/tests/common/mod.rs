@@ -51,6 +51,7 @@ pub fn with_fixture() -> TempDir {
 pub fn with_fixture_mut(mutate: impl FnOnce(&Path)) -> TempDir {
     let tmp = unsealed_fixture();
     mutate(tmp.path());
+    complete_fixture_for_sealing(tmp.path());
 
     let out = telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
         .output()
@@ -70,6 +71,37 @@ pub fn with_fixture_mut(mutate: impl FnOnce(&Path)) -> TempDir {
     );
 
     tmp
+}
+
+/// Upgrades the intentionally partial spec-only corpus to a sealable tree.
+///
+/// `unsealed_fixture` stays at 0/2-capable reconstruction input. Consumers
+/// that ask for `with_fixture*`, however, ask for a coherent sealed project,
+/// so every active scenario needs a proof and the project needs a runner.
+fn complete_fixture_for_sealing(root: &Path) {
+    let bindings_path = root.join("telos/bindings.tel");
+    let bindings = fs::read_to_string(&bindings_path).unwrap();
+    let invoice_intent = fs::read_to_string(root.join("telos/intents/INT-0017.tel")).unwrap();
+    if invoice_intent.contains("status active") && !bindings.contains("-> SCN-0091") {
+        let (implements, rest) = bindings
+            .split_once('\n')
+            .expect("the billing corpus starts with its implements binding");
+        fs::write(
+            &bindings_path,
+            format!("{implements}\nproves     \"tests/billing.rs\" -> SCN-0091\n{rest}"),
+        )
+        .unwrap();
+    }
+
+    let config_path = root.join("telos/telos.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    if config.contains("cmd = \"\"") {
+        fs::write(
+            &config_path,
+            config.replace("cmd = \"\"", "cmd = \"git --version\""),
+        )
+        .unwrap();
+    }
 }
 
 /// A [`repo`] holding a copy of the `billing` corpus, *without* sealing it:

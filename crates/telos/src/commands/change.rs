@@ -18,6 +18,7 @@ use clap::Subcommand;
 use serde_json::{Value, json};
 
 use telos_core::changes::{delete_change, open_change_infos, read_change, write_change};
+use telos_core::config::Config;
 use telos_core::counters::write_counters;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::git::GitRepo;
@@ -338,6 +339,8 @@ fn approve(ctx: &Ctx, id: &str) -> CmdResult {
         )
         .hint("stage operations with telos add|edit|remove first"));
     }
+    let effective = apply_config_ops(&project.ws.config, &change.ops);
+    Config::validate_transition(&project.ws.config, &effective)?;
 
     let status = match change.status {
         ChangeStatus::Implementing => ChangeStatus::Implementing,

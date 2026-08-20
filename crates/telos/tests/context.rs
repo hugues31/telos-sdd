@@ -412,7 +412,11 @@ fn context_rejects_an_intent_removed_after_an_edit_in_its_owning_change() {
 
 #[test]
 fn context_rejects_a_scenario_removed_from_an_edited_intent() {
-    let tmp = with_fixture();
+    let tmp = with_fixture_mut(|root| {
+        let path = root.join("telos/intents/INT-0017.tel");
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(path, source.replace("status active", "status draft")).unwrap();
+    });
     open_change(tmp.path());
     let out = telos(
         tmp.path(),

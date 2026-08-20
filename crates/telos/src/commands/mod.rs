@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use telos_core::changes::{OpenChangeInfo, list_change_ids, read_change, scan_changes};
+use telos_core::config::Config;
 use telos_core::counters::{Alloc, floors, read_counters};
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
@@ -35,6 +36,7 @@ use telos_core::graph::NodeRef;
 use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, RepoPath, ScenarioId};
 use telos_core::lock::Lock;
 use telos_core::model::{Change, ChangeStatus, TelosModel};
+use telos_core::overlay::apply_config_ops;
 use telos_core::state::{DRIFT_HINT, ProjectStateKind, StateReport, compute_state};
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
@@ -96,6 +98,10 @@ pub(crate) struct Project {
     /// Shorter than `changes` exactly when a file failed to parse.
     pub parsed: Vec<Change>,
     pub state: StateReport,
+    /// Seal-time integrity independent of OID drift. Kept as data so live
+    /// observation can still render legacy/incomplete projects; sealed-state
+    /// consumers decide when to enforce it.
+    pub sealed_integrity: Result<(), TelosError>,
 }
 
 /// Discovers the workspace and the git repository from `ctx.cwd`, requires
@@ -117,6 +123,11 @@ pub(crate) fn project(ctx: &Ctx) -> Result<Project, TelosError> {
     let git = GitRepo::discover(&ctx.cwd)?;
     let scan = scan_changes(&ws)?;
     let state = compute_state(&ws, &lock, &git, &scan.infos)?;
+    let sealed_integrity = ws.config.validate_self().and_then(|()| {
+        ws.load_model()
+            .map_err(diagnostics_to_error)
+            .and_then(|model| telos_core::reconcile::require_sealable_structure(&ws, &model))
+    });
     Ok(Project {
         ws,
         lock,
@@ -124,6 +135,47 @@ pub(crate) fn project(ctx: &Ctx) -> Result<Project, TelosError> {
         changes: scan.infos,
         parsed: scan.parsed,
         state,
+        sealed_integrity,
+    })
+}
+
+/// The effective configuration approved open changes describe, in change-id
+/// order, without mutating the persisted workspace.
+///
+/// Planning may project drafted entity deltas, but commands that execute a
+/// runner may trust only a fresh approval. Multiple config owners cannot be
+/// produced by the CLI's claim gate; if hand edits manufacture them, refuse
+/// deterministically instead of silently making the later id win.
+pub(crate) fn approved_config_workspace(project: &Project) -> Result<Workspace, TelosError> {
+    let mut owner = None;
+    let mut config = project.ws.config.clone();
+    for change in &project.parsed {
+        if !is_approved(change) || change.is_stale() {
+            continue;
+        }
+        if change
+            .ops
+            .iter()
+            .any(|op| matches!(op, telos_core::model::StagedOp::EditConfig(_)))
+        {
+            if let Some(first) = owner {
+                return Err(TelosError::new(
+                    ErrorCode::TelosIntegrityViolation,
+                    format!(
+                        "telos/telos.toml is claimed by both {first} and {}",
+                        change.id
+                    ),
+                ));
+            }
+            owner = Some(change.id);
+            config = apply_config_ops(&config, &change.ops);
+        }
+    }
+    Config::validate_transition(&project.ws.config, &config)?;
+    Ok(Workspace {
+        repo_root: project.ws.repo_root.clone(),
+        telos_dir: project.ws.telos_dir.clone(),
+        config,
     })
 }
 
@@ -305,7 +357,13 @@ pub(crate) fn require_no_open_changes(project: &Project) -> Result<(), TelosErro
         )
         .hint("run `telos change list`"));
     }
-    Ok(())
+    require_sealed_integrity(project)
+}
+
+/// Rejects a lock whose OIDs match but whose model could not earn a seal
+/// under the current structural rules.
+pub(crate) fn require_sealed_integrity(project: &Project) -> Result<(), TelosError> {
+    project.sealed_integrity.clone()
 }
 
 /// `telos version` -- the same version `--version` prints, in the envelope.

@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use common::{repo, telos, with_fixture};
+use common::{repo, telos, with_fixture, with_fixture_mut};
 
 // --- plumbing --------------------------------------------------------------
 
@@ -627,7 +627,11 @@ fn remove_constraint_stages_a_single_line() {
 /// written.
 #[test]
 fn remove_of_a_still_referenced_intent_names_the_referrer() {
-    let tmp = with_fixture();
+    let tmp = with_fixture_mut(|root| {
+        let path = root.join("telos/intents/INT-0017.tel");
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(path, source.replace("status active", "status draft")).unwrap();
+    });
     open_change(tmp.path());
     let before = read(tmp.path(), CHG_0001);
 

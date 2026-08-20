@@ -1,6 +1,5 @@
 //! Read and transactionally stage project configuration.
 
-use globset::Glob;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -100,20 +99,7 @@ fn stage(ctx: &Ctx, change: &str, raw: &str) -> CmdResult {
         },
     };
     config.normalize();
-    if config.agents.hosts != project.ws.config.agents.hosts {
-        return Err(TelosError::new(
-            ErrorCode::TelosIntegrityViolation,
-            "agents.hosts is managed by `telos init --agents` and cannot be changed by `telos config`",
-        ));
-    }
-    for glob in config.code.globs.iter().chain(&config.tests.globs) {
-        Glob::new(glob).map_err(|e| {
-            TelosError::new(
-                ErrorCode::TelosParseError,
-                format!("invalid glob `{glob}`: {e}"),
-            )
-        })?;
-    }
+    Config::validate_transition(&project.ws.config, &config)?;
     let op = StagedOp::EditConfig(config.clone());
     require_unclaimed(&project, id, &op.target_path())?;
     if let Some(existing) = change

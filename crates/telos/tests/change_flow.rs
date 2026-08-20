@@ -196,7 +196,7 @@ fn status_json_with_an_open_change_reports_the_changing_state() {
                     "intents_total": 2,
                     "intents_active": 2,
                     "scenarios_total": 2,
-                    "scenarios_proved": 1,
+                    "scenarios_proved": 2,
                     "intents_implemented": 1
                 }
             },

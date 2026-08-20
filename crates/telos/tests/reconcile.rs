@@ -134,8 +134,16 @@ fn payment_received_payload() -> String {
 }
 
 fn settle_intent_payload() -> String {
+    settle_intent_payload_with_status("draft")
+}
+
+fn active_settle_intent_payload() -> String {
+    settle_intent_payload_with_status("active")
+}
+
+fn settle_intent_payload_with_status(status: &str) -> String {
     json!({
-        "title": "Invoices can be settled", "status": "active",
+        "title": "Invoices can be settled", "status": status,
         "telos": "Customers must see immediately that their debt is cleared.",
         "statement": { "template": "event-driven", "when": "PaymentReceived",
                        "on": "Invoice", "action": "set Invoice.state = settled" },
@@ -168,6 +176,28 @@ fn approved_three_op_change() -> tempfile::TempDir {
         tmp.path(),
         &["add", "intent", "--change", "CHG-0001", "--json"],
         &settle_intent_payload(),
+    );
+    approve(tmp.path());
+    tmp
+}
+
+fn approved_active_three_op_change() -> tempfile::TempDir {
+    let tmp = fresh();
+    open_change(tmp.path());
+    stage(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &invoice_payload(),
+    );
+    stage(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &payment_received_payload(),
+    );
+    stage(
+        tmp.path(),
+        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &active_settle_intent_payload(),
     );
     approve(tmp.path());
     tmp
@@ -251,7 +281,7 @@ fn reconcile_writes_the_canonical_spec_files_byte_for_byte() {
     assert_eq!(
         read(tmp.path(), "telos/intents/INT-0001.tel"),
         "intent INT-0001 \"Invoices can be settled\" {\n  \
-           status active\n  \
+           status draft\n  \
            telos  \"Customers must see immediately that their debt is cleared.\"\n  \
            statement event-driven {\n    \
              when   PaymentReceived on Invoice\n    \
@@ -836,6 +866,7 @@ fn reconcile_full_ok(dir: &Path) -> Value {
 #[test]
 fn full_reconcile_seals_an_unsealed_project() {
     let tmp = unsealed_fixture();
+    complete_unsealed_for_full(tmp.path());
     assert!(
         !tmp.path().join(LOCK).exists(),
         "the fixture starts unsealed"
@@ -861,7 +892,7 @@ fn full_reconcile_seals_an_unsealed_project() {
                 "full": true,
                 "ops_applied": 0,
                 "checks_run": 1,
-                "tests_run": 0,
+                "tests_run": 1,
                 "witness_warnings": []
             },
             "error": null,
@@ -888,6 +919,7 @@ fn full_reconcile_seals_an_unsealed_project() {
 #[test]
 fn full_reconcile_never_reads_the_existing_lock() {
     let tmp = unsealed_fixture();
+    complete_unsealed_for_full(tmp.path());
     fs::write(
         tmp.path().join(LOCK),
         "<<<<<<< HEAD\nversion = 1\n=======\nnot even toml\n>>>>>>> theirs\n",
@@ -926,6 +958,95 @@ fn full_reconcile_refuses_a_spec_that_does_not_resolve() {
         !tmp.path().join(LOCK).exists(),
         "a refused full reconcile must seal nothing"
     );
+}
+
+#[test]
+fn full_reconcile_refuses_an_active_scenario_without_a_proof_before_writing_lock() {
+    let tmp = unsealed_fixture();
+
+    let envelope = reconcile_full(tmp.path());
+
+    assert_eq!(envelope["ok"], json!(false), "got {envelope}");
+    assert_eq!(
+        envelope["error"],
+        json!({
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": "active scenario SCN-0091 has no `proves` binding",
+            "hint": "record a green proof for SCN-0091 through an approved change before reconciling"
+        })
+    );
+    assert!(
+        !tmp.path().join(LOCK).exists(),
+        "a structurally incomplete project must not receive a lock"
+    );
+}
+
+#[test]
+fn ordinary_reconcile_refuses_an_active_scenario_without_a_proof_before_any_write() {
+    let tmp = approved_active_three_op_change();
+    let change_before = read(tmp.path(), CHG_0001);
+    let lock_before = read(tmp.path(), LOCK);
+
+    let envelope = reconcile(tmp.path());
+
+    assert_eq!(envelope["ok"], json!(false), "got {envelope}");
+    assert_eq!(
+        envelope["error"],
+        json!({
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": "active scenario SCN-0001 has no `proves` binding",
+            "hint": "record a green proof for SCN-0001 through an approved change before reconciling"
+        })
+    );
+    assert_eq!(read(tmp.path(), CHG_0001), change_before);
+    assert_eq!(read(tmp.path(), LOCK), lock_before);
+    assert!(!tmp.path().join("telos/intents/INT-0001.tel").exists());
+}
+
+#[test]
+fn full_reconcile_requires_a_runner_when_active_scenarios_all_have_proofs() {
+    let tmp = unsealed_fixture();
+    let bindings = tmp.path().join(BINDINGS);
+    let mut source = fs::read_to_string(&bindings).unwrap();
+    source.push_str("proves     \"tests/billing.rs\" -> SCN-0091\n");
+    fs::write(bindings, source).unwrap();
+
+    let envelope = reconcile_full(tmp.path());
+
+    assert_eq!(envelope["ok"], json!(false), "got {envelope}");
+    assert_eq!(
+        envelope["error"],
+        json!({
+            "code": "TELOS_TEST_NOT_FOUND",
+            "message": "no `[test] cmd` is configured in telos/telos.toml",
+            "hint": "set [test] cmd, e.g. `cargo test {filter}`"
+        })
+    );
+    assert!(!tmp.path().join(LOCK).exists());
+}
+
+fn complete_unsealed_for_full(dir: &Path) {
+    let bindings_path = dir.join(BINDINGS);
+    let bindings = fs::read_to_string(&bindings_path).unwrap();
+    if !bindings.contains("-> SCN-0091") {
+        let (implements, rest) = bindings.split_once('\n').unwrap();
+        fs::write(
+            bindings_path,
+            format!("{implements}\nproves     \"tests/billing.rs\" -> SCN-0091\n{rest}"),
+        )
+        .unwrap();
+    }
+    set_test_cmd_to(dir, "git --version");
+}
+
+#[test]
+fn full_reconcile_without_active_intents_needs_no_runner_or_test_run() {
+    let tmp = fresh();
+    fs::remove_file(tmp.path().join(LOCK)).unwrap();
+
+    let result = reconcile_full_ok(tmp.path());
+
+    assert_eq!(result["tests_run"], json!(0));
 }
 
 /// D10's `--full` half: one invocation of `[test] cmd` with `{filter}`
@@ -1546,11 +1667,10 @@ fn a_test_edited_after_its_green_is_refused_as_sealed() {
 
 // --- advisory (D7): the same verdicts, as warnings ---------------------------
 
-/// `policy.tdd = "advisory"`: the reconcile goes through, and the verdict it
-/// would have refused on comes back in `witness_warnings` -- the frozen
-/// message, hint apart (a warning has nothing to remedy for the caller).
+/// Advisory relaxes red-witness discipline, never the structural requirement
+/// that an active scenario have a proof before it can be sealed.
 #[test]
-fn advisory_reports_the_missing_witness_instead_of_refusing() {
+fn advisory_still_refuses_an_active_scenario_without_a_proof() {
     let tmp = configured("advisory");
     let feature = approved_feature(
         tmp.path(),
@@ -1558,26 +1678,21 @@ fn advisory_reports_the_missing_witness_instead_of_refusing() {
     );
 
     assert_eq!(
-        reconcile_id_ok(tmp.path(), &feature.change),
+        reconcile_id_err(tmp.path(), &feature.change),
         json!({
-            "id": feature.change,
-            "full": false,
-            "ops_applied": 3,
-            "checks_run": 0,
-            "tests_run": 0,
-            "witness_warnings": [
-                format!("scenario {} has no sealed red witness", feature.scenario())
-            ]
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": format!("active scenario {} has no `proves` binding", feature.scenario()),
+            "hint": format!(
+                "record a green proof for {} through an approved change before reconciling",
+                feature.scenario()
+            )
         })
     );
-    // It really reconciled: the delta is on disk and the project is sealed.
     assert!(
-        tmp.path()
+        !tmp.path()
             .join(format!("telos/intents/{}.tel", feature.intent))
             .exists()
     );
-    let status = run_json(tmp.path(), &["status", "--json"]);
-    assert_eq!(status["result"]["state"], json!("coherent"));
 }
 
 #[test]
@@ -1599,10 +1714,135 @@ fn a_staged_config_glob_is_effective_before_reconcile_writes_it() {
     assert!(read(tmp.path(), "telos/telos.toml").contains("globs = []"));
 }
 
-/// The same warning in human mode, where an advisory project's TDD debt has
-/// to be visible at all.
+fn stage_corpus_config(dir: &Path, test_cmd: &str) {
+    stage(
+        dir,
+        &["config", "--change", "CHG-0001", "--json"],
+        &json!({
+            "code": {"globs": ["src/**/*.rs"]},
+            "tests": {"globs": ["tests/**/*.rs"]},
+            "test": {"cmd": test_cmd},
+            "policy": {"tdd": "strict"},
+            "agents": {"hosts": []}
+        })
+        .to_string(),
+    );
+}
+
 #[test]
-fn advisory_prints_the_warning_in_human_mode() {
+fn config_edit_revalidates_scoped_constraints_before_writing() {
+    let tmp = with_fixture_mut(|root| {
+        fs::write(root.join(".constraint-green"), "green\n").unwrap();
+        let path = root.join("telos/constraints/CON-0003.tel");
+        let source = fs::read_to_string(&path).unwrap();
+        let source = source.replace("scope global", "scope INT-0017").replace(
+            "check \"git --version\"",
+            "check \"git hash-object .constraint-green\"",
+        );
+        fs::write(path, source).unwrap();
+    });
+    fs::remove_file(tmp.path().join(".constraint-green")).unwrap();
+    open_change(tmp.path());
+    stage_corpus_config(tmp.path(), "git --version");
+    approve(tmp.path());
+    let config_before = read(tmp.path(), "telos/telos.toml");
+    let lock_before = read(tmp.path(), LOCK);
+
+    let error = reconcile_err(tmp.path());
+
+    assert_eq!(error["code"], json!("TELOS_CONSTRAINT_FAILED"));
+    assert_eq!(
+        error["message"],
+        json!("CON-0003 check failed: `git hash-object .constraint-green`")
+    );
+    assert_eq!(read(tmp.path(), "telos/telos.toml"), config_before);
+    assert_eq!(read(tmp.path(), LOCK), lock_before);
+    assert!(tmp.path().join(CHG_0001).exists());
+}
+
+#[test]
+fn config_edit_runs_every_distinct_proof_with_the_staged_runner_before_writing() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    stage_corpus_config(tmp.path(), "git hash-object .missing-{filter}");
+    approve(tmp.path());
+    let config_before = read(tmp.path(), "telos/telos.toml");
+    let lock_before = read(tmp.path(), LOCK);
+
+    let error = reconcile_err(tmp.path());
+
+    assert_eq!(error["code"], json!("TELOS_INTEGRITY_VIOLATION"));
+    assert_eq!(
+        error["message"],
+        json!(
+            "the test run for `tests/billing.rs` failed: `git hash-object .missing-tests/billing.rs`"
+        )
+    );
+    assert_eq!(read(tmp.path(), "telos/telos.toml"), config_before);
+    assert_eq!(read(tmp.path(), LOCK), lock_before);
+    assert!(tmp.path().join(CHG_0001).exists());
+}
+
+#[test]
+fn config_edit_cannot_remove_the_runner_from_a_project_with_active_obligations() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    stage_corpus_config(tmp.path(), "");
+    approve(tmp.path());
+    let config_before = read(tmp.path(), "telos/telos.toml");
+    let lock_before = read(tmp.path(), LOCK);
+
+    let error = reconcile_err(tmp.path());
+
+    assert_eq!(error["code"], json!("TELOS_TEST_NOT_FOUND"));
+    assert_eq!(read(tmp.path(), "telos/telos.toml"), config_before);
+    assert_eq!(read(tmp.path(), LOCK), lock_before);
+    assert!(tmp.path().join(CHG_0001).exists());
+}
+
+#[test]
+fn telos_test_uses_the_approved_config_staged_by_the_owning_change() {
+    let tmp = fresh();
+    open_change(tmp.path());
+    stage(
+        tmp.path(),
+        &["config", "--change", "CHG-0001", "--json"],
+        &json!({
+            "code": {"globs": ["src/**/*.rs"]},
+            "tests": {"globs": ["tests/**/*.rs"]},
+            "test": {"cmd": RUNNER},
+            "policy": {"tdd": "strict"},
+            "agents": {"hosts": []}
+        })
+        .to_string(),
+    );
+    stage(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &invoice_payload(),
+    );
+    stage(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &payment_received_payload(),
+    );
+    stage(
+        tmp.path(),
+        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &active_settle_intent_payload(),
+    );
+    approve(tmp.path());
+    write_test_file(tmp.path(), &["SCN-0001"], "");
+
+    let result = ok_result(tmp.path(), &["test", "SCN-0001", "--json"]);
+
+    assert_eq!(result["witness"], json!("red"));
+    assert_eq!(result["command"], json!(RUNNER));
+}
+
+/// Human mode surfaces the same structural refusal on stderr.
+#[test]
+fn advisory_prints_the_structural_refusal_in_human_mode() {
     let tmp = configured("advisory");
     let feature = approved_feature(
         tmp.path(),
@@ -1613,14 +1853,14 @@ fn advisory_prints_the_warning_in_human_mode() {
         .output()
         .unwrap();
 
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains(&format!(
-            "warning: scenario {} has no sealed red witness",
+        stderr.contains(&format!(
+            "active scenario {} has no `proves` binding",
             feature.scenario()
         )),
-        "the advisory warning is not in the human output:\n{stdout}"
+        "the structural refusal is not in the human error:\n{stderr}"
     );
 }
 

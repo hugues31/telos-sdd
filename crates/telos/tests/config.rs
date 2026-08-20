@@ -6,6 +6,12 @@ use std::fs;
 
 use serde_json::json;
 
+use telos_core::changes::{read_change, write_change};
+use telos_core::config::AgentHost;
+use telos_core::ids::ChangeId;
+use telos_core::model::{ChangeStatus, StagedOp};
+use telos_core::workspace::Workspace;
+
 use common::{repo, telos};
 
 const PAYLOAD: &str = r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"advisory"},"agents":{"hosts":["claude","codex"]}}"#;
@@ -252,4 +258,145 @@ fn rejected_config_changes_leave_transaction_bytes_unchanged() {
         .assert()
         .failure();
     assert_eq!(bytes(drifted.path()), before_drift);
+}
+
+#[test]
+fn approve_rejects_a_hand_edited_invalid_config_without_freezing_a_digest() {
+    let tmp = configured_change();
+    telos(tmp.path(), &["config", "--change", "CHG-0001"])
+        .write_stdin(PAYLOAD)
+        .assert()
+        .success();
+    let change_path = tmp.path().join("telos/changes/CHG-0001.tel");
+    let source = fs::read_to_string(&change_path).unwrap();
+    fs::write(
+        &change_path,
+        source.replace("code_glob  \"src/**/*.rs\"", "code_glob  \"[\""),
+    )
+    .unwrap();
+    let config_before = fs::read(tmp.path().join("telos/telos.toml")).unwrap();
+    let counters_before = fs::read(tmp.path().join("telos/changes/counters.toml")).unwrap();
+
+    let output = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert!(!output.status.success(), "got {envelope}");
+    assert_eq!(envelope["error"]["code"], json!("TELOS_PARSE_ERROR"));
+    let after = fs::read_to_string(&change_path).unwrap();
+    assert!(after.contains("status drafted"), "{after}");
+    assert!(!after.contains("approved_digest"), "{after}");
+    assert_eq!(
+        fs::read(tmp.path().join("telos/telos.toml")).unwrap(),
+        config_before
+    );
+    assert_eq!(
+        fs::read(tmp.path().join("telos/changes/counters.toml")).unwrap(),
+        counters_before
+    );
+}
+
+#[test]
+fn reconcile_rejects_a_freshly_approved_host_change_without_writing_anything() {
+    let tmp = configured_change();
+    telos(tmp.path(), &["config", "--change", "CHG-0001"])
+        .write_stdin(PAYLOAD)
+        .assert()
+        .success();
+
+    // Simulate a hand-edited change whose attacker also refreshed the digest.
+    // Reconcile must enforce the transition independently of staging/approve.
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let id = ChangeId(1);
+    let mut change = read_change(&ws, id).unwrap();
+    let StagedOp::EditConfig(config) = change
+        .ops
+        .iter_mut()
+        .find(|op| matches!(op, StagedOp::EditConfig(_)))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    config.agents.hosts = vec![AgentHost::Claude];
+    change.status = ChangeStatus::Approved;
+    change.approved_digest = Some(change.ops_digest());
+    write_change(&ws, &change).unwrap();
+
+    let config_before = fs::read(tmp.path().join("telos/telos.toml")).unwrap();
+    let change_before = fs::read(tmp.path().join("telos/changes/CHG-0001.tel")).unwrap();
+    let lock_before = fs::read(tmp.path().join("telos/telos.lock")).unwrap();
+    let output = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert!(!output.status.success(), "got {envelope}");
+    assert_eq!(
+        envelope["error"],
+        json!({
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": "agents.hosts is managed by `telos init --agents` and cannot be changed by `telos config`",
+            "hint": null
+        })
+    );
+    assert_eq!(
+        fs::read(tmp.path().join("telos/telos.toml")).unwrap(),
+        config_before
+    );
+    assert_eq!(
+        fs::read(tmp.path().join("telos/changes/CHG-0001.tel")).unwrap(),
+        change_before
+    );
+    assert_eq!(
+        fs::read(tmp.path().join("telos/telos.lock")).unwrap(),
+        lock_before
+    );
+}
+
+#[test]
+fn reapprove_rejects_a_hand_edited_host_change_and_preserves_the_frozen_digest() {
+    let tmp = configured_change();
+    telos(tmp.path(), &["config", "--change", "CHG-0001"])
+        .write_stdin(PAYLOAD)
+        .assert()
+        .success();
+    telos(tmp.path(), &["change", "approve", "CHG-0001"])
+        .assert()
+        .success();
+
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let id = ChangeId(1);
+    let mut change = read_change(&ws, id).unwrap();
+    let original_digest = change.approved_digest.clone().unwrap();
+    let StagedOp::EditConfig(config) = change
+        .ops
+        .iter_mut()
+        .find(|op| matches!(op, StagedOp::EditConfig(_)))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    config.agents.hosts = vec![AgentHost::Claude];
+    write_change(&ws, &change).unwrap();
+    let before = fs::read(tmp.path().join("telos/changes/CHG-0001.tel")).unwrap();
+
+    let output = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert!(!output.status.success(), "got {envelope}");
+    assert_eq!(
+        envelope["error"]["code"],
+        json!("TELOS_INTEGRITY_VIOLATION")
+    );
+    assert_eq!(
+        fs::read(tmp.path().join("telos/changes/CHG-0001.tel")).unwrap(),
+        before
+    );
+    assert_eq!(
+        read_change(&ws, id).unwrap().approved_digest.as_deref(),
+        Some(original_digest.as_str())
+    );
 }

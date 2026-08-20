@@ -14,8 +14,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::GlobSet;
 
+use crate::config::compile_globs;
 use crate::error::{ErrorCode, TelosError};
 use crate::ids::RepoPath;
 use crate::model::{Binding, TelosModel};
@@ -39,7 +40,7 @@ pub fn glob_matches(root: &Path, patterns: &[String]) -> Result<Vec<RepoPath>, T
         return Ok(Vec::new());
     }
 
-    let set = build_glob_set(patterns)?;
+    let set = compile_globs(patterns)?;
 
     let mut matches = Vec::new();
     walk(root, root, &set, &mut matches)?;
@@ -93,28 +94,6 @@ pub fn orphan_code(ws: &Workspace, model: &TelosModel) -> Result<Vec<RepoPath>, 
 /// would also match `"src/deeply/nested/file.rs"` -- the opposite of the
 /// gitignore-style semantics this engine wants, where `*` stays within one
 /// path component and only `**` spans directories.
-fn build_glob_set(patterns: &[String]) -> Result<GlobSet, TelosError> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        let glob = GlobBuilder::new(pattern)
-            .literal_separator(true)
-            .build()
-            .map_err(|e| {
-                TelosError::new(
-                    ErrorCode::TelosParseError,
-                    format!("invalid glob pattern `{pattern}`: {e}"),
-                )
-            })?;
-        builder.add(glob);
-    }
-    builder.build().map_err(|e| {
-        TelosError::new(
-            ErrorCode::TelosParseError,
-            format!("invalid glob pattern(s): {e}"),
-        )
-    })
-}
-
 /// Recursively visits `dir` (an absolute path, initially `root` itself),
 /// appending every file matching `set` to `out` as a `root`-relative
 /// [`RepoPath`]. `.git` directories are skipped entirely, wherever found.

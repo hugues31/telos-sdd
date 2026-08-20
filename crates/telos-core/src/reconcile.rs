@@ -8,7 +8,7 @@
 //!
 //! # The gate order is frozen
 //!
-//! [`reconcile_change`] runs ten gates, in this order, and the order is
+//! [`reconcile_change`] runs eleven gates, in this order, and the order is
 //! contract rather than implementation detail -- an agent that fixes what a
 //! reconcile complains about must converge, and it only converges if the
 //! complaint it gets is the *first* thing wrong rather than an arbitrary one:
@@ -50,17 +50,20 @@
 //!    pair on the bytes its test file has right now. Under `advisory` the
 //!    same verdicts come back as [`ReconcileOutcome::witness_warnings`]
 //!    instead of refusing. See [`check_witnesses`].
-//! 9. **Constraint checks** (D11), for the constraints this delta puts in
-//!    scope.
-//! 10. **Tests** (D10), one run per distinct `proves` target of the impacted
+//! 9. **Sealable structure** (§3.3 rule 4). Every scenario of every active
+//!    intent has at least one `proves`, and active obligations have a runner.
+//!    This is deliberately stricter than spec-only model loading/rebuild.
+//! 10. **Constraint checks** (D11), for the constraints this delta puts in
+//!     scope.
+//! 11. **Tests** (D10), one run per distinct `proves` target of the impacted
 //!     scenarios -- the folded model's, so a scenario the journal just proved
 //!     is actually run and `tests_run` is honest.
 //!
 //! [`reconcile_full`] is the same transaction with the delta taken out
 //! (D12): no change, so no drift, status, digest or accept gate, no journal
 //! to fold and therefore no witness gate, no previous lock and therefore no
-//! coverage gate, and no ops to apply -- only the four gates that prove a
-//! spec on its own (5, 6, 9, 10) and the seal they earn. It is the exit from
+//! coverage gate, and no ops to apply -- only the five gates that prove a
+//! spec on its own (5, 6, 9, 10, 11) and the seal they earn. It is the exit from
 //! a `telos.lock` merge conflict, and the way a preexisting spec tree gets
 //! its first seal.
 //!
@@ -103,7 +106,7 @@
 //!
 //! # Atomicity, and what stands in for a rollback (D6)
 //!
-//! Not one byte is written before gate 10 has passed. After that, the write
+//! Not one byte is written before gate 11 has passed. After that, the write
 //! order is fixed: the ops' spec `.tel` files, then `telos/bindings.tel`
 //! re-emitted from the folded model (both through the emitter -- reconcile
 //! never edits text), then `telos.lock`, then the change file's deletion.
@@ -131,7 +134,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
-use crate::config::TddPolicy;
+use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
 use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
@@ -141,8 +144,8 @@ use crate::graph::NodeRef;
 use crate::ids::{ConstraintId, IntentId, RepoPath, ScenarioId};
 use crate::lock::{Lock, seal};
 use crate::model::{
-    Binding, Change, ChangeStatus, Constraint, JournalEntry, Scope, StagedOp, TelFile, TelosModel,
-    TestRef,
+    Binding, Change, ChangeStatus, Constraint, IntentStatus, JournalEntry, Scope, StagedOp,
+    TelFile, TelosModel, TestRef,
 };
 use crate::overlay::{apply_config_ops, apply_ops_idempotent, fold_journal_bindings, parse_base};
 use crate::semantic::build_model;
@@ -158,8 +161,8 @@ pub struct ReconcileOutcome {
     pub ops_applied: u32,
     /// Constraint `check` commands run (D11).
     pub checks_run: u32,
-    /// `[test] cmd` invocations run (D10). Zero when no runner is
-    /// configured, which is not an error in M2.
+    /// `[test] cmd` invocations run (D10). Zero when no active obligation
+    /// requires a runner and no impacted proof target is runnable.
     pub tests_run: u32,
     /// The witness verdicts that would have refused this reconcile under
     /// `policy.tdd = "strict"`, as the frozen wordings of Annex F (D7).
@@ -210,6 +213,7 @@ pub fn reconcile_change(
         telos_dir: ws.telos_dir.clone(),
         config: apply_config_ops(&ws.config, &change.ops),
     };
+    Config::validate_transition(&ws.config, &effective_ws.config)?;
     let base = parse_base(ws).map_err(diagnostics_to_error)?;
     let folded = fold_journal_bindings(apply_ops_idempotent(base.clone(), &change.ops), change);
     let model = build_model(folded).map_err(diagnostics_to_error)?;
@@ -217,6 +221,7 @@ pub fn reconcile_change(
     require_no_coverage_shrink(lock, &model, &change.ops)?;
 
     let witness_warnings = check_witnesses(&effective_ws, git, &base, &model, change)?;
+    require_sealable_structure(&effective_ws, &model)?;
 
     let impacted = impacted_nodes(ws, &model, &change.ops);
     let checks_run = run_constraint_checks(&effective_ws, &model, Some(&impacted))?;
@@ -289,7 +294,8 @@ pub fn reconcile_change(
 /// than rewritten.
 ///
 /// What remains is what proves a spec on its own: the full model (rules 1,
-/// 3 and 4 of §3.3), rule 5, every constraint that has a `check` (D11 --
+/// 3 and 4 of §3.3), rule 5, sealable proof/runner structure, every
+/// constraint that has a `check` (D11 --
 /// scope filters against a delta, and there is no delta), and one run of
 /// `[test] cmd` with an empty `{filter}` (D10 -- the whole suite, once).
 pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome, TelosError> {
@@ -298,9 +304,11 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
     // repository" into an immediate answer rather than one that arrives
     // after a full test suite.
     git.ensure_matches_workspace_root(&ws.repo_root)?;
+    ws.config.validate_self()?;
 
     let model = ws.load_model().map_err(diagnostics_to_error)?;
     require_no_orphan_code(ws, &model, &BTreeSet::new())?;
+    require_sealable_structure(ws, &model)?;
 
     let checks_run = run_constraint_checks(ws, &model, None)?;
     let tests_run = run_full_tests(ws)?;
@@ -318,6 +326,64 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
         witness_warnings: Vec::new(),
         lock,
     })
+}
+
+/// The write-time half of §3.3 rule 4.
+///
+/// [`crate::semantic::build_model`] deliberately accepts a spec-only active
+/// intent whose scenarios do not yet have proof bindings: rebuild planning
+/// must remain usable while reconstruction is at 0/N. A seal is a stronger
+/// claim. Before checks, tests, or writes, every scenario owned by an active
+/// intent must have at least one distinct `proves` target, and a project with
+/// any such obligations must have a runnable `[test] cmd`.
+///
+/// The first missing scenario is selected by id, independently of declaration
+/// order, so every caller gets one stable and corrective error. This function
+/// is public because sealed-state consumers use the same predicate to reject
+/// locks produced by older Telos versions without making live/spec-only model
+/// loading stricter.
+pub fn require_sealable_structure(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
+    let active_scenarios: BTreeSet<ScenarioId> = model
+        .intents
+        .values()
+        .filter(|intent| intent.status == IntentStatus::Active)
+        .flat_map(|intent| intent.scenarios.iter().map(|scenario| scenario.id))
+        .collect();
+
+    if active_scenarios.is_empty() {
+        return Ok(());
+    }
+
+    let proved: BTreeSet<ScenarioId> = model
+        .bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            Binding::Proves { scenario, .. } => Some(scenario.node),
+            Binding::Implements { .. } => None,
+        })
+        .collect();
+    if let Some(scenario) = active_scenarios
+        .iter()
+        .find(|scenario| !proved.contains(scenario))
+    {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            format!("active scenario {scenario} has no `proves` binding"),
+        )
+        .hint(format!(
+            "record a green proof for {scenario} through an approved change before reconciling"
+        )));
+    }
+
+    if ws.config.test.cmd.trim().is_empty() {
+        return Err(TelosError::new(
+            ErrorCode::TelosTestNotFound,
+            "no `[test] cmd` is configured in telos/telos.toml",
+        )
+        .hint("set [test] cmd, e.g. `cargo test {filter}`"));
+    }
+
+    Ok(())
 }
 
 // --- gate 1: drift, and the carry-over it decides ----------------------------
@@ -686,24 +752,11 @@ fn require_no_coverage_shrink(
 ///
 /// # A project with no runner owes no witness
 ///
-/// An empty `[test] cmd` skips this gate outright, exactly as it skips gate
-/// 10 ([`run_tests`], D10's «no runner configured is a project that has not
-/// wired one up yet, not a broken transaction»). Here the argument is
-/// stronger than a convention: a witness can only be produced by `telos
-/// test`, which *refuses* without a runner (`TELOS_TEST_NOT_FOUND`, «no
-/// `[test] cmd` is configured»). Enforcing the witness there would leave a
-/// refusal whose hint -- «run `telos test SCN-…`» -- names a command that
-/// cannot succeed, which is precisely the non-convergence the frozen gate
-/// order exists to prevent; and it would refuse the first change of every
-/// freshly `init`ed project, since `init` ships `tdd = "strict"` with an
-/// empty `cmd`.
-///
-/// This opens no door that D10 has not already opened: emptying `[test] cmd`
-/// is an edit to `telos/telos.toml`, a *sealed* spec file, so it is drift
-/// until some change adopts it and a human approves it -- and it already
-/// disables the test gate wholesale. A project that wants the witness
-/// discipline enforced configures a runner, which is the same act as wanting
-/// its tests run at all.
+/// An empty `[test] cmd` skips this witness-only gate. The following
+/// sealable-structure gate still refuses active obligations without a runner;
+/// this skip merely avoids suggesting an impossible `telos test` command
+/// before that authoritative structural diagnosis.
+/// ([`run_tests`] likewise has nothing to execute without a command.)
 fn check_witnesses(
     ws: &Workspace,
     git: &GitRepo,
@@ -790,6 +843,20 @@ fn check_witnesses(
 /// closure rather than failing the reconcile. Gate 5 already proved what
 /// matters, that the *post* model is coherent.
 fn impacted_nodes(ws: &Workspace, model: &TelosModel, ops: &[StagedOp]) -> BTreeSet<NodeRef> {
+    // Configuration controls the runner, glob ownership, TDD policy, and the
+    // execution environment of every constraint. It is therefore a global
+    // mutation: every intent/scenario must be revalidated, not an entity-less
+    // op that accidentally produces an empty impact set.
+    if ops.iter().any(|op| matches!(op, StagedOp::EditConfig(_))) {
+        return model
+            .intents
+            .keys()
+            .copied()
+            .map(NodeRef::Intent)
+            .chain(model.scenario_owner.keys().copied().map(NodeRef::Scenario))
+            .collect();
+    }
+
     let pre = ops
         .iter()
         .any(is_remove)
@@ -867,7 +934,7 @@ fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet
     scenarios
 }
 
-// --- gate 9: constraint checks (D11) ----------------------------------------
+// --- gate 10: constraint checks (D11) ---------------------------------------
 
 /// Runs the `check` of every global constraint and of every scoped one whose
 /// scope meets an impacted intent, at the repository root.
@@ -931,15 +998,16 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
     .hint("Run the constraint's `check` command directly to see its output.")
 }
 
-// --- gate 10: tests (D10) ----------------------------------------------------
+// --- gate 11: tests (D10) ----------------------------------------------------
 
 /// Runs `[test] cmd` once per distinct `proves` target of the impacted
 /// scenarios, `{filter}` substituted with the target's test name (or, when
 /// it names no single test, its path).
 ///
-/// An empty `cmd` skips the whole gate and reports zero runs: «no runner
-/// configured» is a project that has not wired one up yet, not a broken
-/// transaction (D10). A run that fails is the reconcile half of rule 4 --
+/// An empty `cmd` skips the whole gate and reports zero runs. Gate 9 already
+/// proved that no active obligation requires one; draft-only/spec scaffolding
+/// may therefore still reconcile without a runner. A run that fails is the
+/// reconcile half of rule 4 --
 /// a scenario the spec claims is proved, whose proof does not currently
 /// pass -- and is reported as `TELOS_INTEGRITY_VIOLATION` carrying the
 /// substituted command, so the caller can rerun exactly what ran.

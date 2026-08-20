@@ -26,6 +26,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use common::{telos, with_fixture, with_fixture_mut};
+use telos_core::git::GitRepo;
+use telos_core::lock::seal;
+use telos_core::workspace::Workspace;
 
 /// Parses a command's stdout as a JSON envelope.
 fn json_stdout(out: &std::process::Output) -> Value {
@@ -80,6 +83,29 @@ fn fixture_with_runner() -> TempDir {
         )
         .unwrap();
     })
+}
+
+/// A lock produced by an older Telos version around an otherwise complete
+/// active spec, but without a configured runner. This deliberately bypasses
+/// today's reconcile gate so the `telos test` diagnostic remains covered.
+fn fixture_without_runner() -> TempDir {
+    let tmp = with_fixture();
+    let config_path = tmp.path().join("telos/telos.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        config_path,
+        config.replace("cmd = \"git --version\"", "cmd = \"\""),
+    )
+    .unwrap();
+
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let git = GitRepo::discover(tmp.path()).unwrap();
+    let model = ws.load_model().unwrap();
+    seal(&ws, &model, &git, None)
+        .unwrap()
+        .write(&ws.lock_path())
+        .unwrap();
+    tmp
 }
 
 /// `telos change open`, asserting the id every test below assumes.
@@ -518,7 +544,7 @@ fn test_on_a_drafted_owner_asks_for_the_approval_first() {
 /// cmd` empty), reached only once the owner and its status have checked out.
 #[test]
 fn test_without_a_configured_runner_names_the_missing_setting() {
-    let tmp = with_fixture();
+    let tmp = fixture_without_runner();
     open_change(tmp.path());
     assert_eq!(stage_new_scenario(tmp.path()), SCN);
     approve(tmp.path());
@@ -785,7 +811,7 @@ fn approved_owning_int_0042() -> TempDir {
 /// to the id the allocator hands back.
 fn new_intent_payload() -> String {
     json!({
-        "title": "Invoices can be cancelled", "status": "active",
+        "title": "Invoices can be cancelled", "status": "draft",
         "telos": "Customers must be able to void an invoice raised in error.",
         "statement": { "template": "event-driven", "when": "PaymentReceived",
                        "on": "Invoice", "action": "set Invoice.state = cancelled" },

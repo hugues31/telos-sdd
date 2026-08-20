@@ -96,7 +96,10 @@ fn billing_plan_has_exact_metadata_and_the_full_frozen_context_results() {
     );
     assert_eq!(
         steps[0]["context"]["bindings"],
-        json!({"implements": [], "proves": []})
+        json!({
+            "implements": [],
+            "proves": [{"scenario": "SCN-0091", "test": "tests/billing.rs"}]
+        })
     );
     assert_eq!(steps[0]["context"]["neighbors"][0]["id"], json!("INT-0042"));
 
@@ -518,6 +521,54 @@ fn changing_plan_and_status_include_an_added_intent_and_its_green_journal_proof(
                 "command":"git hash-object .green"
             }]
         })
+    );
+}
+
+#[test]
+fn rebuild_status_uses_the_approved_staged_runner() {
+    let tmp = with_fixture_mut(|root| {
+        fs::write(
+            root.join("tests/billing.rs"),
+            "fn scn_0091() {}\nfn scn_0107_full_payment_settles_the_invoice() {}\n",
+        )
+        .unwrap();
+    });
+    fs::write(tmp.path().join(".staged-green"), "green\n").unwrap();
+    let (ok, opened) = run(
+        tmp.path(),
+        &[
+            "change",
+            "open",
+            "Stage the reconstruction runner",
+            "--json",
+        ],
+    );
+    assert!(ok, "open failed: {opened:#}");
+    let payload = json!({
+        "code": {"globs": ["src/**/*.rs"]},
+        "tests": {"globs": ["tests/**/*.rs"]},
+        "test": {"cmd": "git hash-object .staged-green"},
+        "policy": {"tdd": "strict"},
+        "agents": {"hosts": []}
+    });
+    let output = telos(tmp.path(), &["config", "--change", "CHG-0001", "--json"])
+        .write_stdin(payload.to_string())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "stage failed: {output:?}");
+    let (ok, approved) = run(tmp.path(), &["change", "approve", "CHG-0001", "--json"]);
+    assert!(ok, "approve failed: {approved:#}");
+
+    let envelope = success(tmp.path(), &["rebuild", "status", "--json"]);
+
+    assert_eq!(envelope["result"]["scenarios_green"], json!(2));
+    assert!(
+        envelope["result"]["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|scenario| scenario["tests"].as_array().unwrap())
+            .all(|test| test["command"] == json!("git hash-object .staged-green"))
     );
 }
 

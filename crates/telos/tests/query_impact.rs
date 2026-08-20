@@ -330,9 +330,10 @@ fn query_notion_human_mode_prints_bare_names() {
 /// -- INT-0042 requires it directly, and SCN-0091 (INT-0017's own nested
 /// scenario) verifies it directly, `NodeRef`'s variant order placing the
 /// intent before the scenario; SCN-0107 verifies INT-0042 and
-/// `src/billing/invoice.rs` implements INT-0042, both at distance 2, same
-/// ordering rule (a scenario sorts before a code file); the test that
-/// proves SCN-0107 sits one hop further out, at distance 3.
+/// `src/billing/invoice.rs` implements INT-0042, both at distance 2. The
+/// canonical sealed fixture also proves SCN-0091 with `tests/billing.rs`, at
+/// distance 2; the qualified proof of SCN-0107 sits one hop further out, at
+/// distance 3.
 ///
 /// The task brief's illustrative golden for this exact query omits the
 /// `SCN-0091` entry; the five-entry list here was verified against the
@@ -363,6 +364,7 @@ fn impact_int_0017_matches_the_exact_reverse_closure() {
             { "id": "SCN-0091", "via": "verifies", "distance": 1 },
             { "id": "SCN-0107", "via": "verifies", "distance": 2 },
             { "id": "src/billing/invoice.rs", "via": "implements", "distance": 2 },
+            { "id": "tests/billing.rs", "via": "proves", "distance": 2 },
             {
                 "id": "tests/billing.rs::scn_0107_full_payment_settles_the_invoice",
                 "via": "proves",

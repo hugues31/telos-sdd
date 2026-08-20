@@ -17,7 +17,9 @@ use telos_core::semantic::build_model;
 use telos_core::witness::find_test_for;
 use telos_core::workspace::Workspace;
 
-use crate::commands::{Ctx, diagnostics_to_error, project, require_no_unclaimed_drift};
+use crate::commands::{
+    Ctx, approved_config_workspace, diagnostics_to_error, project, require_no_unclaimed_drift,
+};
 use crate::envelope::{CmdResult, Outcome};
 
 #[derive(Debug, Subcommand)]
@@ -85,6 +87,7 @@ fn load(ctx: &Ctx, include_contexts: bool) -> Result<RebuildInput, TelosError> {
     let project = project(ctx)?;
     require_no_unclaimed_drift(&project)?;
     require_parseable_changes(&project)?;
+    let effective_ws = approved_config_workspace(&project)?;
     let disk = project.ws.load_model().map_err(diagnostics_to_error)?;
 
     if project.parsed.is_empty() {
@@ -100,7 +103,7 @@ fn load(ctx: &Ctx, include_contexts: bool) -> Result<RebuildInput, TelosError> {
             BTreeMap::new()
         };
         return Ok(RebuildInput {
-            ws: project.ws,
+            ws: effective_ws,
             model: disk,
             contexts,
         });
@@ -130,7 +133,7 @@ fn load(ctx: &Ctx, include_contexts: bool) -> Result<RebuildInput, TelosError> {
     };
 
     Ok(RebuildInput {
-        ws: project.ws,
+        ws: effective_ws,
         model,
         contexts,
     })

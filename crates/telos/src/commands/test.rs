@@ -51,8 +51,8 @@ use telos_core::overlay::parse_base;
 use telos_core::witness::{find_test_for, required_witnesses};
 
 use crate::commands::{
-    Ctx, Project, diagnostics_to_error, is_approved, nearest_id, project, require_approved,
-    require_no_foreign_drift, unknown,
+    Ctx, Project, approved_config_workspace, diagnostics_to_error, is_approved, nearest_id,
+    project, require_approved, require_no_foreign_drift, unknown,
 };
 use crate::envelope::{CmdResult, Outcome};
 
@@ -79,8 +79,9 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
 
     let owner = owner_of(project, scenario).ok_or_else(|| no_owner(scenario))?;
     require_approved(owner)?;
-    let cmd = require_runner(project)?;
-    let test = find_test_for(&project.ws, scenario, file)?;
+    let effective_ws = approved_config_workspace(project)?;
+    let cmd = require_runner(&effective_ws)?;
+    let test = find_test_for(&effective_ws, scenario, file)?;
     require_no_foreign_drift(project, std::slice::from_ref(&test.path))?;
 
     let mut change = owner.clone();
@@ -126,11 +127,12 @@ fn every(project: &Project, file: Option<&RepoPath>) -> CmdResult {
         .hint("run `telos change list`"));
     }
 
-    let cmd = require_runner(project)?;
+    let effective_ws = approved_config_workspace(project)?;
+    let cmd = require_runner(&effective_ws)?;
 
     let mut resolved = Vec::with_capacity(targets.len());
     for (scenario, owner) in targets {
-        let test = find_test_for(&project.ws, scenario, file)?;
+        let test = find_test_for(&effective_ws, scenario, file)?;
         resolved.push((scenario, owner, test));
     }
     let claimed: Vec<RepoPath> = resolved.iter().map(|(_, _, t)| t.path.clone()).collect();
@@ -305,8 +307,8 @@ fn no_owner(scenario: ScenarioId) -> TelosError {
 ///
 /// Trimmed, so that a `cmd = "   "` is the same "no runner" as `cmd = ""`:
 /// both would run the shell on nothing and report a meaningless verdict.
-fn require_runner(project: &Project) -> Result<String, TelosError> {
-    let cmd = project.ws.config.test.cmd.trim();
+fn require_runner(ws: &telos_core::workspace::Workspace) -> Result<String, TelosError> {
+    let cmd = ws.config.test.cmd.trim();
     if cmd.is_empty() {
         return Err(TelosError::new(
             ErrorCode::TelosTestNotFound,

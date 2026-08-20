@@ -1,0 +1,71 @@
+# Audit fix — reconcile/config invariants
+
+Date : 2026-08-20  
+Périmètre : `telos-core` reconcile/config/globs et commandes CLI change/config/check/status/rebuild/test, avec tests spécialisés et goldens directement affectés.
+
+## Causes racines
+
+1. `build_model` accepte volontairement un modèle spec-only avec des scénarios actifs non encore prouvés afin que `rebuild plan/status` reste utilisable à 0/N. Le scellement réutilisait ce modèle sans garde structurelle plus forte : un `reconcile --full` pouvait donc écrire un lock sans preuve, et sans runner.
+2. `EditConfig` ne produisait aucun nœud impacté. Une modification globale du runner, des globs, de la politique TDD ou de l’environnement des constraints pouvait ainsi contourner les checks ciblés et les preuves distinctes.
+3. La validation des globs et de `agents.hosts` n’existait qu’au staging CLI, avec une compilation différente de celle du walker runtime. Un CHG édité à la main pouvait passer approve/reconcile.
+4. `rebuild status` et `telos test` exécutaient la configuration persistée, même lorsqu’un changement approuvé possédait la configuration effective à employer.
+5. L’égalité des OID du lock suffisait à afficher `coherent`; les locks produits par une ancienne version mais structurellement incomplets restaient acceptés par `status`, `check --sealed` et export.
+
+## Corrections
+
+### Garde structurelle de scellement
+
+- `require_sealable_structure` est une garde partagée, distincte de `build_model`.
+- Chaque scénario d’un intent actif doit posséder au moins un `proves`; le premier scénario manquant est choisi par ID pour une erreur stable et corrective.
+- Dès qu’il existe une obligation active, `[test] cmd` doit être non vide.
+- La garde s’exécute avant checks/tests/écritures dans reconcile ordinaire et full. Un modèle sans intent actif peut encore être scellé sans runner ni tests.
+- Le full valide aussi la configuration persistée.
+- `status` refuse de présenter `coherent` pour un ancien lock incomplet. `check --sealed` et export réutilisent la même intégrité. La vue live conserve sa capacité d’observation des états drifted/changing et la reconstruction spec-only reste permissive.
+
+### Configuration effective et portée globale
+
+- `EditConfig` impacte tous les intents et scénarios : toutes les constraints applicables et toutes les cibles de preuve distinctes sont rejouées.
+- Un helper CLI construit, dans l’ordre déterministe des changements, la configuration des changements frais approuvés/implementing; les propriétaires multiples forgés sont refusés au lieu d’appliquer un « dernier gagnant » implicite.
+- `rebuild status` et `telos test one/all` utilisent cette configuration effective pour la découverte et le runner; les écritures du journal restent dans le workspace réel.
+
+### Validation centralisée
+
+- `Config::validate_self` compile les globs code/tests avec exactement `literal_separator(true)`, sémantique du walker runtime.
+- `Config::validate_transition(base, effective)` valide l’effective et interdit les changements réels de `agents.hosts` après normalisation (ordre/doublons tolérés).
+- Staging, approve, reconcile autoritatif et consommateurs sealed réutilisent ces validations.
+- Un CHG invalide édité à la main reste drafted sans digest lors d’approve; une ré-approbation invalide conserve le digest existant; reconcile refuse sans modifier config, changement ou lock.
+
+## Déroulé TDD
+
+RED séparés observés avant implémentation :
+
+- full et ordinary reconcile acceptaient un scénario actif sans preuve;
+- full avec toutes les preuves mais sans runner ne refusait pas;
+- approve acceptait un glob forgé invalide et reconcile un changement de hosts forgé;
+- EditConfig ne déclenchait ni constraint scoped ni toutes les preuves;
+- rebuild status et `telos test` ignoraient le runner staged approuvé;
+- status/check/export acceptaient un lock legacy structurellement incomplet.
+
+Chaque RED a ensuite été rendu GREEN par la plus petite garde partagée correspondante. Des cas frontières couvrent aussi : zéro intent actif sans runner, absence totale d’écriture au refus, preuves distinctes, ré-approbation sans mutation et maintien du rebuild spec-only 0/2.
+
+## Fixtures et goldens adaptés
+
+La fixture scellée commune est désormais réellement scellable : deux scénarios prouvés et runner de fixture documenté `git --version`. La fixture `unsealed_fixture` reste inchangée et partielle pour la reconstruction spec-only.
+
+Adaptations directement induites : couverture status/change-flow à 2/2, graphe impact incluant la preuve canonique de SCN-0091, cas remove/context isolés avec INT-0017 draft, diagnostic `telos test` sans runner exercé via un lock legacy produit au bas niveau, et intent éphémère draft pour le test d’ownership/remove.
+
+## Vérification fraîche
+
+- `rtk cargo test -p telos-core` : 648 tests, 13 suites, tous verts.
+- Suites spécialisées reconcile/config/rebuild/status_check/view_export : 95 tests, 5 suites, tous verts.
+- Ensemble des autres suites CLI propres hors Task8/Task9 : 313 tests, tous verts.
+- `view_server` hors sandbox (ports loopback) : 5/5 verts.
+- `rtk cargo clippy -p telos-core --all-targets -- -D warnings` : aucune alerte.
+- `rtk cargo clippy -p telos --bins --tests -- -D warnings` : aucune alerte.
+- `rustfmt --check` ciblé et `git diff --check` : propres.
+
+## Risques et limites connus
+
+- `rebuild_demo.rs` n’est pas modifié : son bootstrap public scelle encore des intents actifs à 0/2. Son propriétaire Task8 doit livrer l’adaptation cohérente du demo/README/constraint; son échec est attendu jusque-là.
+- `acceptance_loops.rs` et `contracts.rs` contiennent les changements Task9 non committés, préservés et exclus. `acceptance_loops` conserve notamment un attendu historique `tests_run: 0` incompatible avec le runner de la fixture scellée.
+- Les quatre fichiers Task9, ainsi que README/docs/demo et les changements concurrents export/agents/safe_fs, ne font pas partie du commit focal.

@@ -4,7 +4,10 @@
 //! only sets some sections all yield the same thing for whatever is left
 //! unset: empty globs, an empty test command, and the strict TDD policy.
 
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
+
+use crate::error::{ErrorCode, TelosError};
 
 /// Agent integrations selected when the project was initialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -56,6 +59,62 @@ impl Config {
         self.tests.globs.sort();
         self.tests.globs.dedup();
     }
+
+    /// Validates values whose syntax is only meaningful at runtime.
+    ///
+    /// Deserialization validates the TOML/JSON shape and enum values; glob
+    /// compilation lives here so staging, approval, reconcile, and full
+    /// resealing all use the exact matching semantics used by the walker.
+    pub fn validate_self(&self) -> Result<(), TelosError> {
+        compile_globs(&self.code.globs)?;
+        compile_globs(&self.tests.globs)?;
+        Ok(())
+    }
+
+    /// Validates an approved configuration transition.
+    ///
+    /// Agent hosts describe artifacts installed by `telos init`; config
+    /// changes may not silently add or remove those artifacts. Both sides are
+    /// normalized before comparison so harmless order/duplicates never look
+    /// like a host lifecycle change.
+    pub fn validate_transition(base: &Config, effective: &Config) -> Result<(), TelosError> {
+        effective.validate_self()?;
+
+        let mut base_hosts = base.agents.hosts.clone();
+        let mut effective_hosts = effective.agents.hosts.clone();
+        normalize_hosts(&mut base_hosts);
+        normalize_hosts(&mut effective_hosts);
+        if base_hosts != effective_hosts {
+            return Err(TelosError::new(
+                ErrorCode::TelosIntegrityViolation,
+                "agents.hosts is managed by `telos init --agents` and cannot be changed by `telos config`",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Compiles glob patterns with the runtime walker's path-component semantics.
+pub(crate) fn compile_globs(patterns: &[String]) -> Result<GlobSet, TelosError> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|error| {
+                TelosError::new(
+                    ErrorCode::TelosParseError,
+                    format!("invalid glob pattern `{pattern}`: {error}"),
+                )
+            })?;
+        builder.add(glob);
+    }
+    builder.build().map_err(|error| {
+        TelosError::new(
+            ErrorCode::TelosParseError,
+            format!("invalid glob pattern(s): {error}"),
+        )
+    })
 }
 
 /// Emits canonical TOML for a configuration value.
@@ -136,5 +195,54 @@ mod tests {
         assert_eq!(config.policy.tdd, TddPolicy::Advisory);
         assert!(config.code.globs.is_empty());
         assert_eq!(config.test.cmd, "");
+    }
+
+    #[test]
+    fn validate_self_uses_runtime_glob_semantics_for_both_families() {
+        for mut config in [
+            Config {
+                code: Globs {
+                    globs: vec!["[".to_string()],
+                },
+                ..Config::default()
+            },
+            Config {
+                tests: Globs {
+                    globs: vec!["[".to_string()],
+                },
+                ..Config::default()
+            },
+        ] {
+            config.normalize();
+            let error = config.validate_self().unwrap_err();
+            assert_eq!(error.code, ErrorCode::TelosParseError);
+            assert!(error.message.contains("invalid glob pattern `[`"));
+        }
+    }
+
+    #[test]
+    fn validate_transition_compares_normalized_hosts_and_rejects_real_changes() {
+        let base = Config {
+            agents: AgentsCfg {
+                hosts: vec![AgentHost::Codex, AgentHost::Claude],
+            },
+            ..Config::default()
+        };
+        let reordered = Config {
+            agents: AgentsCfg {
+                hosts: vec![AgentHost::Claude, AgentHost::Codex, AgentHost::Codex],
+            },
+            ..Config::default()
+        };
+        Config::validate_transition(&base, &reordered).unwrap();
+
+        let removed = Config {
+            agents: AgentsCfg {
+                hosts: vec![AgentHost::Claude],
+            },
+            ..Config::default()
+        };
+        let error = Config::validate_transition(&base, &removed).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TelosIntegrityViolation);
     }
 }

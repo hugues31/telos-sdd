@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use telos_core::state::{Coverage, ProjectStateKind, StateReport, coverage};
 
-use crate::commands::{Ctx, project};
+use crate::commands::{Ctx, project, require_sealed_integrity};
 use crate::envelope::{CmdResult, Outcome};
 
 /// A [`Coverage`] with every counter at zero -- what `status` reports when
@@ -36,6 +36,9 @@ const ZERO_COVERAGE: Coverage = Coverage {
 
 pub fn run(ctx: &Ctx) -> CmdResult {
     let project = project(ctx)?;
+    if project.state.state == ProjectStateKind::Coherent {
+        require_sealed_integrity(&project)?;
+    }
     let report = project.state;
 
     let cov = project

@@ -13,6 +13,9 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 use common::{break_int_0042_in_two_ways, telos, unsealed_fixture, with_fixture};
+use telos_core::git::GitRepo;
+use telos_core::lock::seal;
+use telos_core::workspace::Workspace;
 
 /// Parses a command's stdout as a JSON envelope.
 fn json_stdout(out: &std::process::Output) -> Value {
@@ -30,6 +33,18 @@ const INVOICE_TEL: &str = "telos/notions/Invoice.tel";
 /// The exact `TELOS_DRIFT_DETECTED` hint `check --sealed` reports, frozen
 /// by `docs/contracts.md`.
 const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
+
+fn legacy_incomplete_seal() -> tempfile::TempDir {
+    let tmp = unsealed_fixture();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let git = GitRepo::discover(tmp.path()).unwrap();
+    let model = ws.load_model().unwrap();
+    seal(&ws, &model, &git, None)
+        .unwrap()
+        .write(&ws.lock_path())
+        .unwrap();
+    tmp
+}
 
 // --- status: the golden schema ------------------------------------------
 
@@ -61,7 +76,7 @@ fn status_json_on_the_sealed_fixture_matches_the_golden_envelope() {
                     "intents_total": 2,
                     "intents_active": 2,
                     "scenarios_total": 2,
-                    "scenarios_proved": 1,
+                    "scenarios_proved": 2,
                     "intents_implemented": 1
                 }
             },
@@ -111,6 +126,48 @@ fn status_without_a_lock_is_not_initialized() {
     assert_eq!(envelope["result"], Value::Null);
     assert_eq!(envelope["error"]["code"], json!("TELOS_NOT_INITIALIZED"));
     assert_eq!(envelope["error"]["message"], json!("telos.lock is missing"));
+}
+
+#[test]
+fn status_never_reports_a_legacy_structurally_incomplete_lock_as_coherent() {
+    let tmp = legacy_incomplete_seal();
+
+    let out = telos(tmp.path(), &["status", "--json"]).output().unwrap();
+    let envelope = json_stdout(&out);
+
+    assert!(!out.status.success(), "got {envelope}");
+    assert_eq!(
+        envelope["error"],
+        json!({
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": "active scenario SCN-0091 has no `proves` binding",
+            "hint": "record a green proof for SCN-0091 through an approved change before reconciling"
+        })
+    );
+}
+
+#[test]
+fn sealed_check_and_export_reject_the_same_legacy_incomplete_lock() {
+    for args in [
+        vec!["check", "--sealed", "--json"],
+        vec!["view", "--export", "site", "--json"],
+    ] {
+        let tmp = legacy_incomplete_seal();
+
+        let out = telos(tmp.path(), &args).output().unwrap();
+        let envelope = json_stdout(&out);
+
+        assert!(!out.status.success(), "{} got {envelope}", args.join(" "));
+        assert_eq!(
+            envelope["error"],
+            json!({
+                "code": "TELOS_INTEGRITY_VIOLATION",
+                "message": "active scenario SCN-0091 has no `proves` binding",
+                "hint": "record a green proof for SCN-0091 through an approved change before reconciling"
+            })
+        );
+        assert!(!tmp.path().join("site").exists());
+    }
 }
 
 /// A spec file that no longer parses is still drift ([`compute_state`]

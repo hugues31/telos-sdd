@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 
 use common::{break_int_0042_in_two_ways, repo, telos, with_fixture};
@@ -302,6 +304,81 @@ fn init_and_init_agents_keep_the_same_exact_envelope() {
     }
 }
 
+/// Extracts the one canonical, one-row-per-code table from the published
+/// Error codes section. The detailed cases below it intentionally repeat
+/// codes; this table is the machine-readable enumeration an agent routes on.
+fn published_error_codes(contracts: &str) -> Vec<&str> {
+    let canonical = contracts
+        .split_once("### Canonical error-code set\n")
+        .expect("docs/contracts.md has a canonical Error codes table")
+        .1;
+    let table = canonical
+        .split_once("\n### Detailed emission cases")
+        .expect("canonical Error codes table ends before detailed cases")
+        .0;
+
+    let mut lines = table.lines().filter(|line| !line.is_empty());
+    assert_eq!(lines.next(), Some("| Code |"));
+    assert_eq!(lines.next(), Some("|---|"));
+
+    lines
+        .map(|line| {
+            assert!(
+                line.starts_with('|') && line.ends_with('|'),
+                "bad code row: {line}"
+            );
+            let cells: Vec<&str> = line.split('|').collect();
+            assert_eq!(cells.len(), 3, "code row has one column: {line}");
+            cells[1]
+                .trim()
+                .strip_prefix('`')
+                .and_then(|code| code.strip_suffix('`'))
+                .expect("canonical code is backtick-quoted")
+        })
+        .collect()
+}
+
+/// The canonical table is an exact set, not a sampling of prose. This catches
+/// a removed code, an accidental eighteenth code, and a duplicate row.
+#[test]
+fn published_error_code_table_is_exact_and_unique() {
+    let contracts = include_str!("../../../docs/contracts.md");
+    let documented = published_error_codes(contracts);
+    let documented_set: BTreeSet<&str> = documented.iter().copied().collect();
+    let live: BTreeSet<&str> = [
+        "TELOS_DRIFT_DETECTED",
+        "TELOS_APPROVAL_STALE",
+        "TELOS_REFERENCE_UNKNOWN",
+        "TELOS_SCENARIO_RED_EXPECTED",
+        "TELOS_TEST_SEALED",
+        "TELOS_ORPHAN_CODE",
+        "TELOS_CONSTRAINT_FAILED",
+        "TELOS_CHANGE_STATE_INVALID",
+        "TELOS_FILE_CLAIMED",
+        "TELOS_NOT_INITIALIZED",
+        "TELOS_ALREADY_INITIALIZED",
+        "TELOS_PARSE_ERROR",
+        "TELOS_INTEGRITY_VIOLATION",
+        "TELOS_CYCLE_DETECTED",
+        "TELOS_GIT_ERROR",
+        "TELOS_INTERNAL",
+        "TELOS_TEST_NOT_FOUND",
+    ]
+    .into_iter()
+    .collect();
+
+    assert_eq!(live.len(), 17, "the executable ErrorCode set is complete");
+    assert_eq!(
+        documented.len(),
+        documented_set.len(),
+        "the canonical Error codes table must not repeat a code: {documented:?}"
+    );
+    assert_eq!(
+        documented_set, live,
+        "published codes differ from ErrorCode"
+    );
+}
+
 /// M3 extends the public surface with bounded context, red/green witnesses,
 /// journalled bindings, and the two reconciliation gates that enforce them.
 /// Keep the published contract at least as explicit as the executable one:
@@ -315,9 +392,6 @@ fn published_contract_freezes_the_m3_surface() {
         "`context <INT-id|SCN-id>`",
         "`test <SCN-id|--all> [--file <path>]`",
         "`bind <path> <INT-id>`",
-        "`TELOS_TEST_NOT_FOUND`",
-        "`TELOS_SCENARIO_RED_EXPECTED`",
-        "`TELOS_TEST_SEALED`",
         "`open → drafted → approved → implementing → reconciled`",
         "journal records are digest-inert",
         "The ten gates, frozen order",
@@ -327,20 +401,10 @@ fn published_contract_freezes_the_m3_surface() {
         "the file passed with --file does not exist: `<path>`",
         "no file matched by the [tests] globs contains `scn_NNNN`",
         "name the test after the scenario id (`scn_NNNN_…`) in a file the [tests] globs cover, or pass `--file <path>`",
-        "`TELOS_DRIFT_DETECTED`",
-        "`TELOS_APPROVAL_STALE`",
-        "`TELOS_REFERENCE_UNKNOWN`",
-        "`TELOS_ORPHAN_CODE`",
-        "`TELOS_CONSTRAINT_FAILED`",
-        "`TELOS_CHANGE_STATE_INVALID`",
-        "`TELOS_FILE_CLAIMED`",
-        "`TELOS_NOT_INITIALIZED`",
-        "`TELOS_ALREADY_INITIALIZED`",
-        "`TELOS_PARSE_ERROR`",
-        "`TELOS_INTEGRITY_VIOLATION`",
-        "`TELOS_CYCLE_DETECTED`",
-        "`TELOS_GIT_ERROR`",
-        "`TELOS_INTERNAL`",
+        "`scn_NNNN` appears in more than one test file: `<path>`, `<path>`",
+        "The exact JSON result is identical with or without `--agents`",
+        r#"`result`: `{"root": "telos", "sealed": true}`"#,
+        r#"`next_actions`: `["telos status"]`"#,
     ] {
         assert!(
             contracts.contains(required),

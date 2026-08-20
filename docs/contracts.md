@@ -81,7 +81,31 @@ Seventeen codes: the 9 frozen by spec §8, 7 M1 extensions, and M3's
 renamed or removed, only added — this is the whole contract an M3 skill
 routes on.
 
-| Code | When | Hint |
+### Canonical error-code set
+
+| Code |
+|---|
+| `TELOS_DRIFT_DETECTED` |
+| `TELOS_APPROVAL_STALE` |
+| `TELOS_REFERENCE_UNKNOWN` |
+| `TELOS_SCENARIO_RED_EXPECTED` |
+| `TELOS_TEST_SEALED` |
+| `TELOS_ORPHAN_CODE` |
+| `TELOS_CONSTRAINT_FAILED` |
+| `TELOS_CHANGE_STATE_INVALID` |
+| `TELOS_FILE_CLAIMED` |
+| `TELOS_NOT_INITIALIZED` |
+| `TELOS_ALREADY_INITIALIZED` |
+| `TELOS_PARSE_ERROR` |
+| `TELOS_INTEGRITY_VIOLATION` |
+| `TELOS_CYCLE_DETECTED` |
+| `TELOS_GIT_ERROR` |
+| `TELOS_INTERNAL` |
+| `TELOS_TEST_NOT_FOUND` |
+
+### Detailed emission cases
+
+| Emission | When | Hint |
 |---|---|---|
 | `TELOS_DRIFT_DETECTED` | The project's state is `drifted` — *not* merely "not `coherent`": a `changing` project (an open change, nothing unclaimed) does **not** trigger this code, only genuine unclaimed drift does (a sealed path modified or missing, or an unsealed spec file on disk). Emitted by `check --sealed` in M1; from M2 on, also gates `change open`, `add`/`edit`/`remove`, `change approve`, and `change reconcile` *without* `--full` (`--full` never reads the lock, so it is exempt — see the `change reconcile` section below). `change diff`/`list`/`abandon`, `status`, `check` without `--sealed`, and `show` never gate on it — they read, or they clean up, and a drifted project is exactly when a caller needs them most. | `` run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert` `` |
 | `TELOS_APPROVAL_STALE` | (M2) `change reconcile`'s digest gate: a change's approval no longer matches its ops digest, because the delta was staged into again (`add`/`edit`/`remove`) after `telos change approve` — staging into an approved change is deliberately allowed. | `` re-approve with `telos change approve CHG-0001` `` (id-carrying, not a bare instruction to re-run `diff`) |
@@ -126,7 +150,10 @@ routes on.
 `` no file matched by the [tests] globs contains `scn_NNNN` `` with hint
 `` name the test after the scenario id (`scn_NNNN_…`) in a file the [tests] globs cover, or pass `--file <path>` ``
 (substituting the requested scenario id, for example `scn_0108`). Multiple
-matches list their sorted paths and hint `` pass `--file <path>` to pick one ``.
+matches have the exact template
+`` `scn_NNNN` appears in more than one test file: `<path>`, `<path>` ``
+(with the sorted matched paths substituted) and hint
+`` pass `--file <path>` to pick one ``.
 Finally, an explicit absent file is
 `` the file passed with --file does not exist: `<path>` `` with a present,
 null hint.
@@ -768,6 +795,10 @@ same three canonical skill files — `telos`, `telos-challenger`, and
 Telos block in `AGENTS.md`. Existing host configuration is parsed before any
 project write; malformed JSON is `TELOS_PARSE_ERROR` with the repair-and-rerun
 hint.
+
+The exact JSON result is identical with or without `--agents`:
+`result`: `{"root": "telos", "sealed": true}`.
+`next_actions`: `["telos status"]`.
 
 It merges one owned `PreToolUse` command hook without deleting unrelated
 hooks. The guard refuses direct agent writes to the repository `telos/` tree

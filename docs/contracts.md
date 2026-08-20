@@ -122,10 +122,14 @@ the whole contract an M3 skill routes on.
 ## `status`
 
 Reports the project's state against its seal, and a coverage snapshot of the
-spec. Always answers — `status` reports, it never fails because the project
-happens to be drifted or unparseable. It can still fail on `TELOS_NOT_INITIALIZED`
-(no workspace, or a workspace with no lock) or `TELOS_GIT_ERROR` (not a git
-repository).
+spec. Always answers — `status` reports, it never fails because the *spec*
+happens to be drifted or unparseable. It can still fail on three things
+outside that: `TELOS_NOT_INITIALIZED` (no workspace, or a workspace with no
+lock), `TELOS_GIT_ERROR` (not a git repository), and `TELOS_PARSE_ERROR` —
+a `telos.lock` that is not readable TOML, most commonly one a `git merge`
+left conflicted. The lock is what `status` compares *against*, so an
+unreadable one leaves nothing to answer with; the exit is
+`telos change reconcile --full`, which never reads the lock at all.
 
 Order of operations, and why it matters: [`compute_state`] runs *first* and
 never parses a `.tel` file — it only compares git blob OIDs — so a corrupted
@@ -409,7 +413,7 @@ which only happens if the complaint is always the *first* thing wrong:
 
 | # | Gate | Refusal |
 |---|---|---|
-| 1 | drift (unclaimed paths only — a path *this* change claims is expected to differ, that is the change in progress, not damage) | `TELOS_DRIFT_DETECTED`, message names the drifted paths, same frozen hint as `check --sealed` |
+| 1 | drift (unclaimed paths only — a path *any* open change claims is expected to differ, that is a change in progress, not damage; what another change claims is admissible here but not sealable here, see the carry-over below) | `TELOS_DRIFT_DETECTED`, message names the drifted paths, same frozen hint as `check --sealed` |
 | 2 | status (`approved`/`implementing` only) | `TELOS_CHANGE_STATE_INVALID`, `` change CHG-0001 is not approved; approve it first `` |
 | 3 | digest (the delta must still be the one that was approved) | `TELOS_APPROVAL_STALE`, `` re-approve with `telos change approve CHG-0001` `` |
 | 4 | accepted bytes (each `accept` op's blob OID must still match) | `TELOS_INTEGRITY_VIOLATION`, `` `<path>` changed since it was accepted `` / `` `<path>` was accepted but no longer exists `` |
@@ -422,6 +426,29 @@ Only once gate 8 passes does anything reach disk: the spec `.tel` files
 (through the emitter, in staged order), then `telos.lock`, then the change
 file's deletion. `counters.toml` is never touched by reconcile — every id a
 transaction spends was already persisted when the op was staged.
+
+#### The carry-over: drift another open change claims is never sealed here
+
+Gate 1 admits drift *any* open change claims, not just this one's — a
+concurrent change (from M3, an implementing change drifts its code files for
+its whole life) must not hold an unrelated reconcile hostage. The seal draws
+the line the gate does not: **a spec or code path that is both drifted and
+claimed by another open change is sealed at its previously sealed OID**, not
+re-hashed from disk — and stays out of the new lock entirely if the previous
+lock never held it (an adopted-but-unreconciled untracked file). The drift
+therefore survives the reconcile and resurfaces the moment the claiming
+change goes: `status` still reports it, still claimed (so the project is
+`changing`, not `coherent`), and `change abandon` on the claiming change
+turns it straight back into `drifted`. Bytes that arrived out of protocol are
+sealed by the change that reviews them — an `adopt`/`approve`/`reconcile` of
+their own — and by nothing else. A change's *own* claims are re-hashed
+normally: its ops have just rewritten them, which is the point.
+
+`--full` is the deliberate exception and stays unchanged: it re-proves the
+whole tree from disk and seals what it finds, open adopt-changes included.
+That is total proof, not a bypass — the drift it seals has passed every gate
+a spec on its own can be held to (gates 5–8, the whole suite once) — and it
+is why `--full` is the exit from a conflicted lock.
 
 #### `--full`
 

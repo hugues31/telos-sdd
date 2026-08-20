@@ -15,7 +15,9 @@
 //!
 //! 1. **Drift** (D5/D17). Anything on disk that no longer matches the seal
 //!    and that no open change claims stops everything. A path *this* change
-//!    claims is the change in progress, not damage.
+//!    claims is the change in progress, not damage; a path *another* open
+//!    change claims is admissible too -- and is exactly what the carry-over
+//!    below exists for.
 //! 2. **Status** (D16). `approved` or `implementing`; nothing else can be
 //!    reconciled.
 //! 3. **Digest** (D3). The delta must still be the one that was approved.
@@ -42,6 +44,43 @@
 //! and the seal they earn. It is the exit from a `telos.lock` merge
 //! conflict, and the way a preexisting spec tree gets its first seal.
 //!
+//! # The carry-over: what the seal must not launder
+//!
+//! Gate 1 admits drift another open change claims, and it has to: from M3
+//! on, an implementing change drifts its own code files for its whole life,
+//! and a concurrent reconcile of an unrelated change cannot be held hostage
+//! to it. But the seal that reconcile writes is computed by re-hashing the
+//! *whole* tree from disk, so left alone it would fold those foreign bytes
+//! -- never reviewed, never approved -- into a fresh lock, and abandoning
+//! the change that claimed them would leave the project `coherent` with an
+//! out-of-protocol edit permanently sealed. That is precisely the invariant
+//! §4.1 and §5 exist to hold («une édition manuelle = drift», «le seal
+//! détecte la négligence»).
+//!
+//! So the drift of a path *another* open change claims is admissible for
+//! this transaction without being sealable by it. Every such path is
+//! **carried over**: the fresh lock records for it exactly what the
+//! previous lock recorded -- the same OID, in the same table, or the same
+//! absence if the previous lock never held it (an adopted but unreconciled
+//! `Rogue.tel` stays untracked rather than becoming sealed). The drift
+//! therefore survives the reconcile: [`crate::state::compute_state`] still
+//! sees it, the claiming change still covers it, and the moment that change
+//! is abandoned the path resurfaces as `drifted`, exactly as it would have
+//! had the concurrent reconcile never run. A change's *own* claims are not
+//! carried over: it is reconciling them, its ops have just rewritten them,
+//! and re-hashing them from disk is the whole point.
+//!
+//! The seam is deliberate. [`seal`] is left alone -- it means, and keeps
+//! meaning, «the bytes on disk right now», one honest sentence rather than
+//! one qualified by whoever is calling it. [`reconcile_change`] applies the
+//! carry-over to the lock [`seal`] hands back, before writing it, and owns
+//! the exception in its own docs. That also keeps [`reconcile_full`]'s
+//! contract intact: `--full` re-proves everything from disk and seals disk
+//! truth, open adopt-changes included, by design (D12/§7.4). It is total
+//! proof, not a bypass -- a `--full` run while a change holds adopted drift
+//! seals that drift, because `--full`'s answer to «is this tree provable?»
+//! is computed over the tree, not over anybody's claims.
+//!
 //! # Atomicity, and what stands in for a rollback (D6)
 //!
 //! Not one byte is written before gate 8 has passed. After that, the write
@@ -49,7 +88,9 @@
 //! never edits text), then `telos.lock`, then the change file's deletion.
 //! Sealing *after* writing is deliberate: [`seal`] re-hashes the spec tree
 //! from disk, so the lock records the bytes that are really there rather
-//! than the bytes we believed we wrote.
+//! than the bytes we believed we wrote -- everywhere except the carried-over
+//! paths above, which are the one place where «what is really there» is not
+//! this transaction's to record.
 //!
 //! There is no hand-rolled rollback. If the process dies between two of
 //! those writes the working tree is left half-applied, and the recovery
@@ -104,7 +145,13 @@ pub struct ReconcileOutcome {
 /// for its `claims`, to decide which drift is somebody's business and which
 /// is nobody's (gate 1) -- whether it happens to include `change` itself
 /// makes no difference, since `change`'s own claims are folded in either
-/// way.
+/// way and an entry for `change` is filtered back out of the *foreign*
+/// claims.
+///
+/// The `lock` it is handed is the seal this transaction supersedes, and it
+/// is read twice: once by gate 1, to know what has drifted, and once at the
+/// end, to carry over the paths whose drift another open change claims --
+/// see the module docs.
 ///
 /// On `Ok` the spec tree, `telos.lock` and `telos/changes/` have all moved.
 /// On `Err` nothing has been written at all: every gate runs before the
@@ -116,7 +163,7 @@ pub fn reconcile_change(
     change: &Change,
     others: &[OpenChangeInfo],
 ) -> Result<ReconcileOutcome, TelosError> {
-    require_no_foreign_drift(ws, git, lock, change, others)?;
+    let carried = classify_drift(ws, git, lock, change, others)?;
     require_approved(change)?;
     require_fresh_approval(change)?;
     require_accepted_bytes(git, change)?;
@@ -132,15 +179,16 @@ pub fn reconcile_change(
     for op in &change.ops {
         apply_op(ws, op)?;
     }
-    let lock = seal(ws, &model, git, Some(change.id))?;
-    lock.write(&ws.lock_path())?;
+    let mut fresh = seal(ws, &model, git, Some(change.id))?;
+    carry_over(&mut fresh, lock, &carried);
+    fresh.write(&ws.lock_path())?;
     delete_change(ws, change.id)?;
 
     Ok(ReconcileOutcome {
         ops_applied: change.ops.len() as u32,
         checks_run,
         tests_run,
-        lock,
+        lock: fresh,
     })
 }
 
@@ -191,45 +239,109 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
     })
 }
 
-// --- gate 1: drift ----------------------------------------------------------
+// --- gate 1: drift, and the carry-over it decides ----------------------------
 
-/// Refuses while a path neither this change nor any other open one claims
-/// differs from the seal (D5/D17).
+/// Sorts the project's drift into the three kinds this transaction has to
+/// tell apart, and refuses on the only one that stops it (D5/D17).
 ///
-/// The judgement is [`compute_state`]'s, which already drops what `others`
-/// claim; this adds `change`'s own claims on top, so the same verdict comes
-/// out whether or not the caller left `change` in `others`. A claimed path
-/// *is* expected to differ -- that is the whole point of an open change --
-/// and this very reconcile is about to overwrite it with the op's canonical
-/// post-state.
-fn require_no_foreign_drift(
+/// One [`compute_state`] pass -- over *raw* drift, hence the empty
+/// `open_changes` argument -- answers all three:
+///
+/// - **Unclaimed.** Nobody's business, so nobody reviewed it: the reconcile
+///   refuses, naming the paths so a caller does not have to run `status` to
+///   find out which.
+/// - **Claimed by `change`.** The change in progress, not damage -- that is
+///   the whole point of an open change, and this very reconcile is about to
+///   overwrite those paths with its ops' canonical post-state. Admissible,
+///   and sealed from disk like everything else.
+/// - **Claimed by another open change.** Admissible too (M3's implementing
+///   changes drift their code files for their whole life, and an unrelated
+///   reconcile cannot be held hostage to that), but *not* sealable here:
+///   these are the paths returned, for [`carry_over`] to keep at their
+///   previously sealed state. See the module docs.
+///
+/// The same verdict comes out whether or not the caller left `change` in
+/// `others`: its own claims win over a foreign claim of the same path in
+/// the second bullet, and an `others` entry for `change` itself is filtered
+/// out of the third.
+fn classify_drift(
     ws: &Workspace,
     git: &GitRepo,
     lock: &Lock,
     change: &Change,
     others: &[OpenChangeInfo],
-) -> Result<(), TelosError> {
-    let report = compute_state(ws, lock, git, others)?;
+) -> Result<BTreeSet<RepoPath>, TelosError> {
+    let report = compute_state(ws, lock, git, &[])?;
     let mine = change.claims();
-
-    let foreign: Vec<String> = report
-        .drift
+    let theirs: BTreeSet<&RepoPath> = others
         .iter()
-        .filter(|entry| !mine.contains(&entry.path))
-        .map(|entry| format!("`{}`", entry.path))
+        .filter(|info| info.id != change.id)
+        .flat_map(|info| info.claims.iter())
         .collect();
 
-    if foreign.is_empty() {
-        return Ok(());
+    let mut carried = BTreeSet::new();
+    let mut unclaimed = Vec::new();
+    for entry in &report.drift {
+        if mine.contains(&entry.path) {
+            continue;
+        }
+        if theirs.contains(&entry.path) {
+            carried.insert(entry.path.clone());
+        } else {
+            unclaimed.push(format!("`{}`", entry.path));
+        }
+    }
+
+    if unclaimed.is_empty() {
+        return Ok(carried);
     }
     Err(TelosError::new(
         ErrorCode::TelosDriftDetected,
         format!(
             "the project has drifted from its seal: {}",
-            foreign.join(", ")
+            unclaimed.join(", ")
         ),
     )
     .hint(DRIFT_HINT))
+}
+
+/// Restores, in the `fresh` seal, exactly what `previous` recorded for every
+/// path of `carried` -- the same OID in the same table, or the same absence
+/// when `previous` held no record of it at all.
+///
+/// Both tables are rewritten for each path, rather than the one it was
+/// expected in, so that «what the previous lock said about this path» is
+/// reproduced whole: a path that was sealed as `code` and would now be
+/// re-hashed into `spec` (or the reverse) cannot smuggle its bytes in
+/// through the other table.
+///
+/// `spec_digest` is recomputed afterwards, since it is a digest *of* `spec`
+/// ([`Lock::compute_digest`]): a carried-over lock still carrying the digest
+/// of the re-hashed map would be internally inconsistent, which is not a
+/// thing to write to disk whether or not anything reads it back today.
+/// Nothing is recomputed when `carried` is empty, which is the ordinary
+/// case: a lock with no foreign claim to carry is [`seal`]'s output
+/// untouched, byte for byte.
+fn carry_over(fresh: &mut Lock, previous: &Lock, carried: &BTreeSet<RepoPath>) {
+    if carried.is_empty() {
+        return;
+    }
+    for path in carried {
+        restore(&mut fresh.spec, &previous.spec, path);
+        restore(&mut fresh.code, &previous.code, path);
+    }
+    fresh.spec_digest = Lock::compute_digest(&fresh.spec);
+}
+
+fn restore(
+    fresh: &mut BTreeMap<RepoPath, Oid>,
+    previous: &BTreeMap<RepoPath, Oid>,
+    path: &RepoPath,
+) {
+    match previous.get(path) {
+        Some(oid) => fresh.insert(path.clone(), oid.clone()),
+        None => fresh.remove(path),
+    };
 }
 
 // --- gates 2 and 3: status and digest ---------------------------------------
@@ -642,11 +754,13 @@ fn io_error(verb: &str, path: &RepoPath, e: std::io::Error) -> TelosError {
 
 #[cfg(test)]
 mod tests {
-    //! The two decisions of this module that are pure functions of their
-    //! arguments. Everything else here is a transaction over a real
-    //! workspace, a real git repository and a real shell, and is covered
-    //! end to end in `crates/telos/tests/reconcile.rs` -- where a partial
-    //! failure would actually be observable.
+    //! The decisions of this module that are pure functions of their
+    //! arguments -- constraint scoping, removal detection, and the
+    //! carry-over's rewriting of a seal. Everything else here is a
+    //! transaction over a real workspace, a real git repository and a real
+    //! shell, and is covered end to end in `crates/telos/tests/reconcile.rs`
+    //! and `crates/telos/tests/adopt_revert.rs` -- where a partial failure,
+    //! or a laundered edit, would actually be observable.
 
     use super::*;
     use crate::ids::{ConstraintId, NotionName};
@@ -709,5 +823,105 @@ mod tests {
         assert!(!is_remove(&StagedOp::AddConstraint(constraint(
             Scope::Global
         ))));
+    }
+
+    // --- the carry-over --------------------------------------------------
+
+    fn oid(seed: &str) -> Oid {
+        Oid(seed.repeat(40 / seed.len()))
+    }
+
+    fn lock_of(spec: &[(&str, Oid)], code: &[(&str, Oid)]) -> Lock {
+        let spec: BTreeMap<RepoPath, Oid> = spec
+            .iter()
+            .map(|(path, oid)| (RepoPath::new(*path), oid.clone()))
+            .collect();
+        Lock {
+            version: 1,
+            tool: "telos test".to_string(),
+            sealed_by: None,
+            spec_digest: Lock::compute_digest(&spec),
+            spec,
+            code: code
+                .iter()
+                .map(|(path, oid)| (RepoPath::new(*path), oid.clone()))
+                .collect(),
+        }
+    }
+
+    fn carried(paths: &[&str]) -> BTreeSet<RepoPath> {
+        paths.iter().map(|p| RepoPath::new(*p)).collect()
+    }
+
+    const INVOICE: &str = "telos/notions/Invoice.tel";
+    const ROGUE: &str = "telos/notions/Rogue.tel";
+    const CODE: &str = "src/billing/invoice.rs";
+
+    #[test]
+    fn carrying_nothing_over_leaves_the_seal_exactly_as_sealed() {
+        let previous = lock_of(&[(INVOICE, oid("a"))], &[]);
+        let sealed = lock_of(&[(INVOICE, oid("b"))], &[]);
+        let mut fresh = sealed.clone();
+
+        carry_over(&mut fresh, &previous, &carried(&[]));
+
+        assert_eq!(fresh, sealed);
+    }
+
+    #[test]
+    fn a_carried_over_path_keeps_its_previously_sealed_oid() {
+        // The whole point: the drifted bytes `seal` just hashed never reach
+        // the lock, so the drift is still drift after the reconcile.
+        let previous = lock_of(&[(INVOICE, oid("a"))], &[(CODE, oid("c"))]);
+        let mut fresh = lock_of(&[(INVOICE, oid("b"))], &[(CODE, oid("d"))]);
+
+        carry_over(&mut fresh, &previous, &carried(&[INVOICE, CODE]));
+
+        assert_eq!(fresh.spec[&RepoPath::new(INVOICE)], oid("a"));
+        assert_eq!(fresh.code[&RepoPath::new(CODE)], oid("c"));
+        assert_eq!(
+            fresh.spec_digest, previous.spec_digest,
+            "the digest must follow the map it digests"
+        );
+    }
+
+    #[test]
+    fn a_carried_over_path_the_previous_lock_never_held_stays_out() {
+        // Carry-over of absence: an untracked file some other change
+        // adopted is not sealed by *this* transaction, so it stays
+        // untracked -- still drift, still claimed, still reviewable.
+        let previous = lock_of(&[(INVOICE, oid("a"))], &[]);
+        let mut fresh = lock_of(&[(INVOICE, oid("a")), (ROGUE, oid("b"))], &[]);
+
+        carry_over(&mut fresh, &previous, &carried(&[ROGUE]));
+
+        assert!(!fresh.spec.contains_key(&RepoPath::new(ROGUE)));
+        assert_eq!(fresh, previous_with_tool(&previous, &fresh));
+    }
+
+    #[test]
+    fn a_carried_over_path_is_restored_in_both_tables() {
+        // A path the previous lock held as `code` cannot come back as
+        // `spec`, nor the reverse: whichever table `seal` put it in, what
+        // the lock ends up saying about it is what the previous lock said.
+        let previous = lock_of(&[], &[(INVOICE, oid("a"))]);
+        let mut fresh = lock_of(&[(INVOICE, oid("b"))], &[]);
+
+        carry_over(&mut fresh, &previous, &carried(&[INVOICE]));
+
+        assert!(fresh.spec.is_empty(), "the spec table must not hold it");
+        assert_eq!(fresh.code[&RepoPath::new(INVOICE)], oid("a"));
+    }
+
+    /// `previous` with the fields a carry-over does not touch taken from
+    /// `fresh` -- `version`, `tool` and `sealed_by` belong to the new seal,
+    /// so comparing whole locks would otherwise fail on them.
+    fn previous_with_tool(previous: &Lock, fresh: &Lock) -> Lock {
+        Lock {
+            version: fresh.version,
+            tool: fresh.tool.clone(),
+            sealed_by: fresh.sealed_by,
+            ..previous.clone()
+        }
     }
 }

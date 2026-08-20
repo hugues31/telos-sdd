@@ -22,6 +22,12 @@
 //!   is claimed by the change that adopted it (D5), so it stops being drift
 //!   and becomes the change in progress. It is the reconcile, not the adopt,
 //!   that reseals.
+//! - **Only the change that adopted a drift may seal it.** Some *other*
+//!   change reconciling meanwhile is allowed to run -- and carries the
+//!   adopted path over at its previously sealed OID rather than folding
+//!   bytes nobody approved into the new lock. The carry-over section below
+//!   pins that end to end, since it is where an out-of-protocol edit would
+//!   otherwise get laundered into a `coherent` project.
 
 mod common;
 
@@ -145,6 +151,41 @@ fn git(dir: &Path, args: &[&str]) {
 fn commit(dir: &Path) {
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "--quiet", "-m", "seal the billing corpus"]);
+}
+
+/// Stages one op into a change from a JSON payload on stdin, asserting the
+/// envelope came back `ok`.
+fn stage(dir: &Path, args: &[&str], payload: &str) -> Value {
+    let out = telos(dir, args)
+        .write_stdin(payload.to_string())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run telos {args:?}: {e}"));
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not valid JSON ({e}): {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "expected `telos {}` to stage, got: {envelope}",
+        args.join(" ")
+    );
+    envelope
+}
+
+/// The OID `telos.lock` currently records for `rel`, in whichever of its two
+/// tables holds it -- `None` when the seal holds no record of the path at
+/// all. Reads the rendered lock rather than a parse: the file's format is
+/// frozen (`"<path>" = "<oid>"`, one entry per line), and what these tests
+/// need to pin is exactly what a reader of the file would see.
+fn lock_oid(dir: &Path, rel: &str) -> Option<String> {
+    let prefix = format!("{rel:?} = ");
+    read(dir, LOCK).lines().find_map(|line| {
+        line.strip_prefix(&prefix)
+            .map(|oid| oid.trim_matches('"').to_string())
+    })
 }
 
 /// `git hash-object` of a working-tree file: the OID the seal records for it.
@@ -562,7 +603,7 @@ fn adopt_into_an_existing_change_appends_its_ops() {
     let dir = tmp.path();
 
     run_ok(dir, &["change", "open", "tighten the constraint", "--json"]);
-    let mut cmd = telos(
+    stage(
         dir,
         &[
             "edit",
@@ -572,13 +613,8 @@ fn adopt_into_an_existing_change_appends_its_ops() {
             "CHG-0001",
             "--json",
         ],
+        &json!({ "title": "Hexagonal boundaries, tightened" }).to_string(),
     );
-    let out = cmd
-        .write_stdin(json!({ "title": "Hexagonal boundaries, tightened" }).to_string())
-        .output()
-        .expect("failed to stage the edit");
-    let envelope: Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
-    assert_eq!(envelope["ok"], json!(true), "staging failed: {envelope}");
 
     // Only now does the project drift, on a path CHG-0001 does not claim.
     append(dir, INVOICE, "\n");
@@ -602,6 +638,184 @@ fn adopt_into_an_existing_change_appends_its_ops() {
     approve_and_reconcile(dir, "CHG-0001");
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert!(read(dir, CON_0003).contains("Hexagonal boundaries, tightened"));
+}
+
+// --- the carry-over: nobody else's reconcile seals an adopted drift ---------
+
+/// `Invoice`'s sealed `def` line, and the one a hand edit puts in its place.
+/// Chosen so the drift *survives* canonicalization -- a stray newline would
+/// be emitted away, and the final seal would land back on the sealed OID,
+/// which would make the last assertion of the test below vacuous.
+const SEALED_DEF: &str = "A bill issued to a Customer for delivered work.";
+const HAND_EDITED_DEF: &str = "A bill issued to a Customer, edited out of protocol.";
+
+/// The notion the concurrent, unrelated change adds -- the file whose seal
+/// proves the carry-over is surgical rather than a blanket refusal to record
+/// anything.
+const REFUND: &str = "telos/notions/Refund.tel";
+
+fn refund_payload() -> String {
+    json!({
+        "name": "Refund", "kind": "event",
+        "def": "A refund was issued against an invoice.",
+        "attrs": [ {"name": "amount", "type": "money"} ]
+    })
+    .to_string()
+}
+
+/// The composed scenario the whole carry-over exists for: an out-of-protocol
+/// edit, adopted into CHG-0001 and left there, must not be laundered into the
+/// seal by the reconcile of some *other*, unrelated change.
+///
+/// Gate 1 admits drift any open change claims -- deliberately, so that a
+/// concurrent change (M3's implementing changes drift their code files for
+/// their whole life) never holds an unrelated transaction hostage. What must
+/// not follow is that CHG-0002's seal records CHG-0001's never-approved
+/// bytes: it would leave the project `coherent` the moment CHG-0001 was
+/// abandoned, with an edit nobody ever reviewed permanently sealed -- exactly
+/// the invariant §4.1 and §5 exist to hold.
+///
+/// So the drifted path is carried over at its previously sealed OID, and the
+/// drift outlives the reconcile: still claimed (hence `changing`), still
+/// there when the claim goes (hence `drifted`), and sealed for real only by
+/// the ordinary adopt/approve/reconcile loop that reviews it.
+#[test]
+fn a_concurrent_reconcile_carries_over_another_changes_adopted_drift() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+    commit(dir);
+    let sealed_oid = hash_object(dir, INVOICE);
+
+    // --- the out-of-protocol edit, adopted and left drafted ---------------
+    write(
+        dir,
+        INVOICE,
+        &read(dir, INVOICE).replace(SEALED_DEF, HAND_EDITED_DEF),
+    );
+    let drifted_oid = hash_object(dir, INVOICE);
+    assert_ne!(
+        drifted_oid, sealed_oid,
+        "the hand edit did not change the file"
+    );
+    assert_eq!(state(dir)["state"], json!("drifted"));
+
+    run_ok(dir, &["adopt", "--json"]);
+    assert_eq!(state(dir)["state"], json!("changing"));
+
+    // --- an unrelated change, opened after it, goes all the way through ---
+    run_ok(dir, &["change", "open", "record refunds", "--json"]);
+    stage(
+        dir,
+        &["add", "notion", "--change", "CHG-0002", "--json"],
+        &refund_payload(),
+    );
+    run_ok(dir, &["change", "approve", "CHG-0002", "--json"]);
+    run_ok(dir, &["change", "reconcile", "CHG-0002", "--json"]);
+
+    // Its own file is sealed the ordinary way -- the carry-over is surgical.
+    assert_eq!(
+        lock_oid(dir, REFUND).as_deref(),
+        Some(&*hash_object(dir, REFUND))
+    );
+    // CHG-0001's path is not: the seal still records the *old* bytes.
+    assert_eq!(
+        lock_oid(dir, INVOICE),
+        Some(sealed_oid.clone()),
+        "the reconcile sealed bytes nobody approved"
+    );
+    assert!(
+        !read(dir, LOCK).contains(&drifted_oid),
+        "the drifted OID reached the lock through some other entry"
+    );
+    // ... and the working tree still holds them, untouched.
+    assert!(read(dir, INVOICE).contains(HAND_EDITED_DEF));
+
+    // So the drift survived the reconcile: claimed, hence `changing`.
+    let after = state(dir);
+    assert_eq!(after["state"], json!("changing"));
+    assert_eq!(
+        after["changes"],
+        json!([{ "id": "CHG-0001", "status": "drafted", "obligations": ["approve", "reconcile"] }])
+    );
+    assert_eq!(after["drift"], json!(null));
+
+    // --- dropping the claim resurfaces it rather than laundering it -------
+    run_ok(dir, &["change", "abandon", "CHG-0001", "--json"]);
+    let abandoned = state(dir);
+    assert_eq!(abandoned["state"], json!("drifted"));
+    assert_eq!(abandoned["drift"]["paths"], json!([INVOICE]));
+
+    // --- and the ordinary loop is what seals it, bytes and all ------------
+    run_ok(dir, &["adopt", "--json"]);
+    approve_and_reconcile(dir, "CHG-0003");
+
+    assert_eq!(state(dir)["state"], json!("coherent"));
+    assert!(read(dir, INVOICE).contains(HAND_EDITED_DEF));
+    let now = hash_object(dir, INVOICE);
+    assert_ne!(now, sealed_oid, "the reviewed bytes are the new ones");
+    assert_eq!(lock_oid(dir, INVOICE).as_deref(), Some(&*now));
+}
+
+/// The carry-over of *absence*: a spec file some other change adopted but
+/// never reconciled was never in the seal to begin with, so a concurrent
+/// reconcile must leave it out rather than record it -- otherwise the same
+/// laundering happens one level down, with `Untracked` drift instead of
+/// `Modified`.
+#[test]
+fn a_concurrent_reconcile_leaves_another_changes_untracked_file_unsealed() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+
+    write(dir, ROGUE, ROGUE_TEL);
+    run_ok(dir, &["adopt", "--json"]);
+
+    run_ok(dir, &["change", "open", "record refunds", "--json"]);
+    stage(
+        dir,
+        &["add", "notion", "--change", "CHG-0002", "--json"],
+        &refund_payload(),
+    );
+    run_ok(dir, &["change", "approve", "CHG-0002", "--json"]);
+    run_ok(dir, &["change", "reconcile", "CHG-0002", "--json"]);
+
+    assert_eq!(
+        lock_oid(dir, ROGUE),
+        None,
+        "a file only another change claims must not enter the seal"
+    );
+    assert_eq!(state(dir)["state"], json!("changing"));
+
+    run_ok(dir, &["change", "abandon", "CHG-0001", "--json"]);
+    let abandoned = state(dir);
+    assert_eq!(abandoned["state"], json!("drifted"));
+    assert_eq!(abandoned["drift"]["paths"], json!([ROGUE]));
+}
+
+/// D12/§7.4's deliberate exception, pinned so nobody "fixes" it into the
+/// carry-over: `--full` re-proves the whole tree from disk and seals what it
+/// finds, open adopt-changes included. It is total proof, not a bypass --
+/// the drift it seals has been through every gate a spec can be held to,
+/// which is more than the per-change path asks of anything.
+#[test]
+fn a_full_reseal_seals_disk_truth_even_under_an_open_adopt_change() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+
+    write(
+        dir,
+        INVOICE,
+        &read(dir, INVOICE).replace(SEALED_DEF, HAND_EDITED_DEF),
+    );
+    let drifted_oid = hash_object(dir, INVOICE);
+    run_ok(dir, &["adopt", "--json"]);
+
+    run_ok(dir, &["change", "reconcile", "--full", "--json"]);
+
+    assert_eq!(lock_oid(dir, INVOICE), Some(drifted_oid));
+    // The change is still open and still claims the path (D12 leaves open
+    // changes alone), so the project is `changing` -- but its op is now a
+    // no-op against a seal that already holds those bytes.
+    assert_eq!(state(dir)["state"], json!("changing"));
 }
 
 // --- revert -----------------------------------------------------------------

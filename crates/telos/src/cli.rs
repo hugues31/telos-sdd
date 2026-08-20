@@ -67,7 +67,7 @@ enum Command {
         /// name (`Invoice`).
         target: String,
     },
-    /// Open, list and abandon changes.
+    /// Open, list, diff, approve, reconcile and abandon changes.
     Change {
         #[command(subcommand)]
         change: ChangeCommand,

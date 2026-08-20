@@ -30,7 +30,9 @@ use telos_core::workspace::Workspace;
 use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_no_unclaimed_drift};
 use crate::envelope::{CmdResult, Outcome};
 
-/// The five verbs T8 leaves `change` with (T10 adds `reconcile`).
+/// The six verbs of `change`: `open`, `list`, `abandon`, `diff`, `approve`
+/// (T8) and `reconcile` (T10) -- the whole change lifecycle, from allocating
+/// an id to the transaction that spends it.
 #[derive(Debug, Clone, Subcommand)]
 pub enum ChangeCommand {
     /// Open a new, empty change and allocate its id.

@@ -168,6 +168,13 @@ impl Lock {
 /// sealing paths relative to a git root that isn't actually `ws.repo_root`
 /// would silently hash the wrong tree.
 ///
+/// Records the bytes on disk *right now*, and nothing else: that is the one
+/// sentence this function means, and it is not qualified by who calls it. A
+/// caller that must not seal some of those live OIDs corrects the `Lock`
+/// this hands back rather than asking `seal` to lie -- see
+/// [`crate::reconcile::reconcile_change`]'s carry-over, which keeps a path
+/// another open change claims at its previously sealed OID.
+///
 /// Does not write the lock to disk -- the caller does that with
 /// [`Lock::write`].
 pub fn seal(

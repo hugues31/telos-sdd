@@ -12,12 +12,19 @@
 //! `loop_merge` came off at M2, which landed `change open`/`edit`/`approve`/
 //! `reconcile [--full]` -- it now runs in the ordinary suite and is the
 //! milestone's executable done-criterion. `loop_feature` and `loop_drift`
-//! stay `#[ignore]`d for M3 (`test`/`bind`, and the red/green witness
-//! protocol). Run with `cargo test --workspace -- --ignored` today, those
-//! two are expected to fail -- on the *first* command M2 doesn't have, not
-//! on a compile error or a panic unrelated to the missing surface. That
-//! failure is this file doing its job: it is the roadmap's done-criterion,
-//! not a bug to fix here.
+//! stay `#[ignore]`d for M3, but for two different reasons, and
+//! `cargo test --workspace -- --ignored` shows the difference today:
+//!
+//! - `loop_feature` **fails**, on the *first* command M2 doesn't have
+//!   (`test`/`bind`, and the red/green witness protocol) -- not on a compile
+//!   error or a panic unrelated to the missing surface. That failure is this
+//!   file doing its job: it is the roadmap's done-criterion, not a bug to
+//!   fix here.
+//! - `loop_drift` **passes** as written: every command it calls landed at
+//!   M2. It stays `#[ignore]`d for milestone sequencing -- the Implement
+//!   phase it currently skips, going straight from `approve` to `reconcile`,
+//!   is the part M3 fills in, and its `#[ignore]` comes off then, alongside
+//!   `loop_feature`'s. See the note on the test itself.
 //!
 //! Payload JSON shapes fed to `add`/`edit` on stdin follow Annex D, frozen
 //! by T13 into `docs/contracts.md` -- `loop_feature` uses the real,

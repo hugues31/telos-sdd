@@ -745,6 +745,24 @@ fn reconcile_runs_one_test_per_impacted_scenario() {
     );
 }
 
+#[test]
+fn reconcile_runner_preserves_an_embedded_quoted_filter() {
+    let tmp = approved_int_0042_edit(with_fixture_mut(|root| {
+        set_test_cmd_to(root, "git hash-object \"prefix-{filter}-suffix\"");
+        // The fixture's initial `reconcile --full` substitutes an empty
+        // filter, so its composed whole-suite target must exist as well.
+        fs::write(root.join("prefix--suffix"), "").unwrap();
+    }));
+    fs::write(
+        tmp.path()
+            .join("prefix-scn_0107_full_payment_settles_the_invoice-suffix"),
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(reconcile_ok(tmp.path())["tests_run"], json!(1));
+}
+
 /// The same setup without the marker: the run fails, and the message carries
 /// the substituted command verbatim.
 #[test]

@@ -374,11 +374,99 @@ fn filtered_shell_run_supports_a_placeholder_already_quoted_as_one_argument() {
 }
 
 #[test]
-fn filtered_shell_run_rejects_a_placeholder_embedded_in_a_quoted_fragment() {
+fn filtered_shell_run_supports_a_placeholder_embedded_in_double_quotes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (filter, template, file) = if cfg!(windows) {
+        (
+            "proof&mkdir injected",
+            "if exist \"prefix-{filter}-suffix\" (exit 0) else (exit 1)",
+            "prefix-proof&mkdir injected-suffix",
+        )
+    } else {
+        (
+            "proof;mkdir injected",
+            "test -f \"prefix-{filter}-suffix\"",
+            "prefix-proof;mkdir injected-suffix",
+        )
+    };
+    fs::write(tmp.path().join(file), "proof\n").unwrap();
+
+    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+
+    assert_eq!(run.command, template.replace("{filter}", filter).trim_end());
+    assert_eq!(run.result.status, 0);
+    assert!(!tmp.path().join("injected-suffix").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn filtered_shell_run_supports_a_placeholder_embedded_in_single_quotes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let filter = "proof;mkdir injected";
+    fs::write(
+        tmp.path().join("prefix-proof;mkdir injected-suffix"),
+        "proof\n",
+    )
+    .unwrap();
+
+    let run =
+        run_shell_with_filter("test -f 'prefix-{filter}-suffix'", filter, tmp.path()).unwrap();
+
+    assert_eq!(run.command, "test -f 'prefix-proof;mkdir injected-suffix'");
+    assert_eq!(run.result.status, 0);
+    assert!(!tmp.path().join("injected-suffix").exists());
+}
+
+#[test]
+fn filtered_shell_run_supports_unquoted_prefix_suffix_and_multiple_occurrences() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (filter, template, file) = if cfg!(windows) {
+        (
+            "proof&mkdir injected",
+            "if exist prefix-{filter}-suffix (if exist \"prefix-{filter}-suffix\" (exit 0) else (exit 1)) else (exit 1)",
+            "prefix-proof&mkdir injected-suffix",
+        )
+    } else {
+        (
+            "proof;mkdir injected",
+            "test -f prefix-{filter}-suffix && test -f \"prefix-{filter}-suffix\"",
+            "prefix-proof;mkdir injected-suffix",
+        )
+    };
+    fs::write(tmp.path().join(file), "proof\n").unwrap();
+
+    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+
+    assert_eq!(run.command, template.replace("{filter}", filter).trim_end());
+    assert_eq!(run.result.status, 0);
+    assert!(!tmp.path().join("injected-suffix").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn filtered_shell_run_disables_windows_injection_metacharacters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let filter = "proof&mkdir injected|echo bad^caret%PATH%!delayed!";
+
+    let run = run_shell_with_filter("echo {filter} > observed.txt", filter, tmp.path()).unwrap();
+
+    assert_eq!(run.result.status, 0);
+    assert!(!tmp.path().join("injected").exists());
+    assert!(
+        fs::read_to_string(tmp.path().join("observed.txt"))
+            .unwrap()
+            .contains(filter)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn filtered_shell_run_rejects_a_windows_quote_before_spawn() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let err = run_shell_with_filter("echo \"prefix-{filter}\"", "proof", tmp.path()).unwrap_err();
+    let err =
+        run_shell_with_filter("echo {filter}", "proof\"&mkdir injected", tmp.path()).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosParseError);
-    assert!(err.message.contains("whole quoted argument"));
+    assert!(!tmp.path().join("injected").exists());
 }

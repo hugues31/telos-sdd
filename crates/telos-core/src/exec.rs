@@ -77,13 +77,10 @@ pub fn run_shell_with_filter(
     }
 
     const FILTER_ENV: &str = "TELOS_INTERNAL_TEST_FILTER";
-    let reference = if cfg!(windows) {
-        "\"%TELOS_INTERNAL_TEST_FILTER%\""
-    } else {
-        "\"$TELOS_INTERNAL_TEST_FILTER\""
-    };
-    let executable = safe_filter_command(template, reference)?;
-    let output = shell_command(&executable)
+    let shell = ShellFlavor::current();
+    validate_filter_data(filter, shell)?;
+    let executable = rewrite_filter_template(template, shell)?;
+    let output = filtered_shell_command(&executable)
         .env(FILTER_ENV, filter)
         .current_dir(cwd)
         .output()
@@ -100,44 +97,72 @@ pub fn run_shell_with_filter(
     })
 }
 
-/// Rewrites each shell-active `{filter}` as a quoted environment reference.
-///
-/// A placeholder may be unquoted or be the complete contents of one quoted
-/// argument. In the latter case the source quotes are consumed because the
-/// environment reference already supplies its own quotes. Embedding the
-/// placeholder in a larger quoted fragment is rejected: composing shell
-/// syntax around untrusted data that way cannot be made portable without
-/// changing the command's argument contract.
-fn safe_filter_command(template: &str, reference: &str) -> Result<String, TelosError> {
-    const FILTER: &str = "{filter}";
-    const DOUBLE_QUOTED_FILTER: &str = "\"{filter}\"";
-    const SINGLE_QUOTED_FILTER: &str = "'{filter}'";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellFlavor {
+    Unix,
+    Windows,
+}
 
-    let mut executable = String::with_capacity(template.len() + reference.len());
+impl ShellFlavor {
+    fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Unix
+        }
+    }
+
+    fn expansion(self, quote: Option<char>) -> &'static str {
+        match (self, quote) {
+            (Self::Unix, None) => "\"$TELOS_INTERNAL_TEST_FILTER\"",
+            (Self::Unix, Some('"')) => "$TELOS_INTERNAL_TEST_FILTER",
+            (Self::Unix, Some('\'')) => "'\"$TELOS_INTERNAL_TEST_FILTER\"'",
+            (Self::Windows, None) => "\"%TELOS_INTERNAL_TEST_FILTER%\"",
+            (Self::Windows, Some('"')) => "%TELOS_INTERNAL_TEST_FILTER%",
+            _ => unreachable!("only the shell's active quote styles are tracked"),
+        }
+    }
+}
+
+/// Refuses filter bytes `cmd.exe` cannot keep inside one quoted data argument.
+/// Delayed expansion is disabled separately, so `!` remains ordinary data;
+/// `%` expansion is not recursive, and the other cmd metacharacters stay
+/// inert inside the quotes introduced by [`rewrite_filter_template`].
+fn validate_filter_data(filter: &str, shell: ShellFlavor) -> Result<(), TelosError> {
+    let invalid = filter.contains('\0')
+        || (shell == ShellFlavor::Windows
+            && (filter.contains('"') || filter.contains('\r') || filter.contains('\n')));
+    if invalid {
+        return Err(TelosError::new(
+            ErrorCode::TelosParseError,
+            "test filter contains bytes that cannot be passed safely to the platform shell",
+        ));
+    }
+    Ok(())
+}
+
+/// Rewrites every `{filter}` according to its shell quote context.
+///
+/// Outside quotes the environment expansion receives its own double quotes.
+/// Inside double quotes the surrounding template already provides them. A
+/// Unix single-quoted region is closed for one quoted expansion and reopened,
+/// preserving normal shell concatenation for embedded forms such as
+/// `'module::{filter}'`. The public displayed command remains the independent
+/// literal substitution produced before this function is called.
+fn rewrite_filter_template(template: &str, shell: ShellFlavor) -> Result<String, TelosError> {
+    const FILTER: &str = "{filter}";
+
+    let mut executable = String::with_capacity(template.len() + 32);
     let mut quote = None;
     let mut index = 0;
 
     while index < template.len() {
         let rest = &template[index..];
 
-        if quote.is_none() {
-            if rest.starts_with(DOUBLE_QUOTED_FILTER)
-                || (cfg!(unix) && rest.starts_with(SINGLE_QUOTED_FILTER))
-            {
-                executable.push_str(reference);
-                index += DOUBLE_QUOTED_FILTER.len();
-                continue;
-            }
-            if rest.starts_with(FILTER) {
-                executable.push_str(reference);
-                index += FILTER.len();
-                continue;
-            }
-        } else if rest.starts_with(FILTER) {
-            return Err(TelosError::new(
-                ErrorCode::TelosParseError,
-                "unsafe [test] cmd: {filter} must be unquoted or the whole quoted argument",
-            ));
+        if rest.starts_with(FILTER) {
+            executable.push_str(shell.expansion(quote));
+            index += FILTER.len();
+            continue;
         }
 
         let character = rest
@@ -147,7 +172,7 @@ fn safe_filter_command(template: &str, reference: &str) -> Result<String, TelosE
         executable.push(character);
         index += character.len_utf8();
 
-        if is_shell_escape(character, quote) {
+        if is_shell_escape(character, quote, shell) {
             if template[index..].starts_with(FILTER) {
                 return Err(TelosError::new(
                     ErrorCode::TelosParseError,
@@ -163,7 +188,7 @@ fn safe_filter_command(template: &str, reference: &str) -> Result<String, TelosE
 
         match quote {
             Some(active) if character == active => quote = None,
-            None if character == '"' || (cfg!(unix) && character == '\'') => {
+            None if character == '"' || (shell == ShellFlavor::Unix && character == '\'') => {
                 quote = Some(character)
             }
             _ => {}
@@ -173,11 +198,10 @@ fn safe_filter_command(template: &str, reference: &str) -> Result<String, TelosE
     Ok(executable.trim_end().to_string())
 }
 
-fn is_shell_escape(character: char, quote: Option<char>) -> bool {
-    if cfg!(windows) {
-        character == '^'
-    } else {
-        character == '\\' && quote != Some('\'')
+fn is_shell_escape(character: char, quote: Option<char>, shell: ShellFlavor) -> bool {
+    match shell {
+        ShellFlavor::Windows => character == '^',
+        ShellFlavor::Unix => character == '\\' && quote != Some('\''),
     }
 }
 
@@ -205,6 +229,19 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
+/// Builds the shell command used only for data-bearing filtered runs.
+/// Windows explicitly disables AutoRun and delayed `!name!` expansion so an
+/// exclamation mark originating in the environment value remains data.
+fn filtered_shell_command(cmd: &str) -> Command {
+    if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args(["/D", "/V:OFF", "/C", cmd]);
+        command
+    } else {
+        shell_command(cmd)
+    }
+}
+
 /// Replaces every occurrence of the literal `{filter}` in `cmd` with
 /// `filter`, then `trim_end`s the whole result (D10).
 ///
@@ -215,4 +252,65 @@ fn shell_command(cmd: &str) -> Command {
 /// `"cargo test "`.
 pub fn substitute_filter(cmd: &str, filter: &str) -> String {
     cmd.replace("{filter}", filter).trim_end().to_string()
+}
+
+#[cfg(test)]
+mod filter_rewrite_tests {
+    use super::{ShellFlavor, rewrite_filter_template, validate_filter_data};
+    use crate::error::ErrorCode;
+
+    const UNIX_ENV: &str = "TELOS_INTERNAL_TEST_FILTER";
+
+    #[test]
+    fn unix_rewrite_preserves_composition_in_every_quote_context() {
+        assert_eq!(
+            rewrite_filter_template(
+                "runner module::{filter}_case \"double::{filter}\" 'single::{filter}'",
+                ShellFlavor::Unix,
+            )
+            .unwrap(),
+            format!(
+                "runner module::\"${UNIX_ENV}\"_case \"double::${UNIX_ENV}\" \
+                 'single::'\"${UNIX_ENV}\"''"
+            )
+        );
+    }
+
+    #[test]
+    fn unix_rewrite_handles_whole_quoted_and_multiple_placeholders() {
+        assert_eq!(
+            rewrite_filter_template(
+                "runner \"{filter}\" '{filter}' {filter}-{filter}",
+                ShellFlavor::Unix,
+            )
+            .unwrap(),
+            format!(
+                "runner \"${UNIX_ENV}\" ''\"${UNIX_ENV}\"'' \
+                 \"${UNIX_ENV}\"-\"${UNIX_ENV}\""
+            )
+        );
+    }
+
+    #[test]
+    fn windows_rewrite_uses_the_existing_double_quote_context() {
+        assert_eq!(
+            rewrite_filter_template(
+                "runner module::{filter}_case \"double::{filter}\" \"{filter}\"",
+                ShellFlavor::Windows,
+            )
+            .unwrap(),
+            "runner module::\"%TELOS_INTERNAL_TEST_FILTER%\"_case \
+             \"double::%TELOS_INTERNAL_TEST_FILTER%\" \
+             \"%TELOS_INTERNAL_TEST_FILTER%\""
+        );
+    }
+
+    #[test]
+    fn windows_validation_accepts_metacharacters_but_rejects_quote_and_controls() {
+        validate_filter_data("proof&other|caret^percent%bang!", ShellFlavor::Windows).unwrap();
+        for invalid in ["bad\"quote", "bad\rreturn", "bad\nline", "bad\0nul"] {
+            let err = validate_filter_data(invalid, ShellFlavor::Windows).unwrap_err();
+            assert_eq!(err.code, ErrorCode::TelosParseError);
+        }
+    }
 }

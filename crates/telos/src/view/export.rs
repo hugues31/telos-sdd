@@ -1,18 +1,22 @@
 //! Atomic static export of a rendered [`ViewSnapshot`].
 //!
-//! The exporter prepares every page in memory, reserves the final directory
-//! without replacement, marks it incomplete, and writes only through its held
-//! capability. A failed export remains explicitly incomplete and is refused
-//! on retry; the exporter never guesses that a pathname is still its own and
-//! never recursively cleans it up.
+//! Every page is rendered in memory, written through a held capability into a
+//! high-entropy sibling staging directory, and validated before one atomic,
+//! no-replace publication. The final destination is therefore absent on
+//! failure and never exposes a partially written tree.
 //!
-//! Unix has no operation that both creates a directory and returns its handle,
-//! nor a rename operation whose source is a directory handle. The reservation
-//! therefore rejects a substituted symlink or non-empty directory before page
-//! writes, and completion verifies the held object around marker removal.
+//! `mkdir` does not return the directory it creates, and Unix/Darwin rename
+//! directories by a parent capability plus source name rather than by source
+//! handle. Telos records the new entry's identity immediately after creation,
+//! reopens it no-follow, and checks it again after the publication test hook.
+//! Together with an unpredictable name this covers the negligence/concurrency
+//! model; a same-UID adversary observing and swapping the name inside an
+//! unhooked syscall interval is explicitly outside that model.
 
 use std::ffi::OsString;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fmt::Write as _;
+use std::fs;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
@@ -32,20 +36,18 @@ struct EntryIdentity {
     inode: u64,
 }
 
-const INDEX_PATH: &str = "index.html";
-const INCOMPLETE_INDEX: &[u8] = b"<!doctype html><title>Telos export incomplete</title>\n";
-
-struct ReservedDestination {
+struct StagingDirectory {
     parent: Dir,
     parent_path: PathBuf,
+    target: OsString,
     name: OsString,
     path: PathBuf,
-    dir: Dir,
-    index: cap_std::fs::File,
+    dir: Option<Dir>,
     identity: EntryIdentity,
+    published: bool,
 }
 
-/// Renders and publishes every static page below a create-only `destination`.
+/// Renders and atomically publishes every static page below `destination`.
 /// The returned paths are relative to `destination` and lexicographically
 /// sorted, making both the answer and an exported tree deterministic.
 pub(crate) fn export(
@@ -55,9 +57,7 @@ pub(crate) fn export(
     export_with_writer_and_hooks(
         snapshot,
         destination,
-        |_destination_path, destination, relative, bytes| {
-            write_relative(destination, relative, bytes)
-        },
+        |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
         |_destination| Ok(()),
         |_destination| Ok(()),
         |_destination| Ok(()),
@@ -86,11 +86,11 @@ where
 }
 
 #[cfg(test)]
-fn export_with_writer_and_before_complete<F, H>(
+fn export_with_writer_and_before_publish<F, H>(
     snapshot: &ViewSnapshot,
     destination: &Path,
     write_file: F,
-    before_complete: H,
+    before_publish: H,
 ) -> Result<Vec<PathBuf>, TelosError>
 where
     F: FnMut(&Path, &Dir, &Path, &[u8]) -> io::Result<()>,
@@ -102,7 +102,7 @@ where
         write_file,
         |_destination| Ok(()),
         |_destination| Ok(()),
-        before_complete,
+        before_publish,
         |_destination| Ok(()),
     )
 }
@@ -112,8 +112,8 @@ fn export_with_writer_and_hooks<F, B, R, H, J>(
     destination: &Path,
     mut write_file: F,
     before_reserve: B,
-    after_destination_create: R,
-    before_complete: H,
+    after_staging_create: R,
+    before_publish: H,
     after_identity_check: J,
 ) -> Result<Vec<PathBuf>, TelosError>
 where
@@ -123,37 +123,38 @@ where
     H: FnOnce(&Path) -> io::Result<()>,
     J: FnOnce(&Path) -> io::Result<()>,
 {
+    before_reserve(destination)
+        .map_err(|error| io_error("prepare destination reservation for", destination, error))?;
+    refuse_existing(destination)?;
     let rendered = rendered_files(snapshot)?;
-    let mut reserved = ReservedDestination::reserve_with_hooks(
-        destination,
-        before_reserve,
-        after_destination_create,
-    )?;
+    let mut staging = StagingDirectory::reserve_with_hook(destination, after_staging_create)?;
 
     (|| {
         for (relative, bytes) in &rendered {
-            if relative == Path::new(INDEX_PATH) {
-                continue;
-            }
-            let path = reserved.path().join(relative);
-            write_file(reserved.path(), reserved.dir(), relative, bytes)
+            let path = staging.path().join(relative);
+            write_file(staging.path(), staging.dir(), relative, bytes)
                 .map_err(|error| io_error("write", &path, error))?;
         }
 
-        before_complete(reserved.path())
-            .map_err(|error| io_error("prepare completion for", destination, error))?;
-        reserved.verify_entry()?;
-        after_identity_check(reserved.path())
-            .map_err(|error| io_error("finish destination verification for", destination, error))?;
-        reserved.verify_entry()?;
-        reserved.complete(&rendered)?;
+        staging.validate_contents(&rendered)?;
+        before_publish(staging.path())
+            .map_err(|error| io_error("finalize staging for", destination, error))?;
+        staging.refuse_existing_destination(destination)?;
+        staging.verify_entry()?;
+        after_identity_check(staging.path())
+            .map_err(|error| io_error("finish staging verification for", destination, error))?;
+        staging.refuse_existing_destination(destination)?;
+        staging.verify_entry()?;
+        publish_no_replace(&mut staging, destination, existing_destination)?;
+        staging.published = true;
         Ok(rendered.into_iter().map(|(path, _)| path).collect())
     })()
 }
 
 fn write_relative(destination: &Dir, relative: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = create_new_relative(destination, relative)?;
-    file.write_all(bytes)
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn create_new_relative(destination: &Dir, relative: &Path) -> io::Result<cap_std::fs::File> {
@@ -219,21 +220,16 @@ fn read_relative(root: &Dir, relative: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-impl ReservedDestination {
-    fn reserve_with_hooks<B, H>(
-        destination: &Path,
-        before_reserve: B,
-        after_create: H,
-    ) -> Result<Self, TelosError>
+impl StagingDirectory {
+    fn reserve_with_hook<H>(destination: &Path, after_create: H) -> Result<Self, TelosError>
     where
-        B: FnOnce(&Path) -> io::Result<()>,
         H: FnOnce(&Path) -> io::Result<()>,
     {
         let parent_path = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let name = destination.file_name().ok_or_else(|| {
+        let target = destination.file_name().ok_or_else(|| {
             TelosError::new(
                 ErrorCode::TelosInternal,
                 format!(
@@ -244,56 +240,66 @@ impl ReservedDestination {
         })?;
         let parent = Dir::open_ambient_dir(parent_path, ambient_authority())
             .map_err(|error| io_error("open parent of", destination, error))?;
-        before_reserve(destination)
-            .map_err(|error| io_error("prepare destination reservation for", destination, error))?;
-        match parent.create_dir(name) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                return Err(existing_destination(destination));
+
+        for _ in 0..128 {
+            let name = random_staging_name(destination)?;
+            match parent.create_dir(&name) {
+                Ok(()) => {
+                    let path = parent_path.join(&name);
+                    let created_metadata = parent.symlink_metadata(&name).map_err(|error| {
+                        io_error("inspect created staging beside", destination, error)
+                    })?;
+                    if !created_metadata.is_dir() || created_metadata.file_type().is_symlink() {
+                        return Err(stale_staging(
+                            &path,
+                            "the newly created entry is not a real directory",
+                        ));
+                    }
+                    let created_identity = identity(&created_metadata);
+
+                    after_create(&path).map_err(|error| {
+                        io_error("finish staging reservation for", destination, error)
+                    })?;
+                    let dir = parent.open_dir_nofollow(&name).map_err(|error| {
+                        stale_staging(&path, format!("cannot open it no-follow: {error}"))
+                    })?;
+                    let opened_identity = identity(
+                        &dir.dir_metadata()
+                            .map_err(|error| stale_staging(&path, error))?,
+                    );
+                    if opened_identity != created_identity {
+                        return Err(stale_staging(
+                            &path,
+                            "the entry changed between creation and no-follow open",
+                        ));
+                    }
+
+                    let staging = Self {
+                        parent,
+                        parent_path: parent_path.to_path_buf(),
+                        target: target.to_os_string(),
+                        name,
+                        path,
+                        dir: Some(dir),
+                        identity: created_identity,
+                        published: false,
+                    };
+                    staging.verify_entry()?;
+                    staging.refuse_existing_destination(destination)?;
+                    return Ok(staging);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(io_error("create staging beside", destination, error)),
             }
-            Err(error) => return Err(io_error("reserve", destination, error)),
         }
 
-        let path = parent_path.join(name);
-        after_create(&path)
-            .map_err(|error| io_error("finish destination reservation for", destination, error))?;
-        let dir = parent.open_dir_nofollow(name).map_err(|error| {
-            stale_destination(&path, format!("cannot open it no-follow: {error}"))
-        })?;
-        if dir
-            .entries()
-            .map_err(|error| stale_destination(&path, error))?
-            .next()
-            .transpose()
-            .map_err(|error| stale_destination(&path, error))?
-            .is_some()
-        {
-            return Err(stale_destination(
-                &path,
-                "the newly reserved directory was replaced with a non-empty owner",
-            ));
-        }
-        let identity = identity(
-            &dir.dir_metadata()
-                .map_err(|error| stale_destination(&path, error))?,
-        );
-        let mut index = create_new_relative(&dir, Path::new(INDEX_PATH))
-            .map_err(|error| io_error("mark incomplete", destination, error))?;
-        index
-            .write_all(INCOMPLETE_INDEX)
-            .and_then(|()| index.sync_all())
-            .map_err(|error| io_error("mark incomplete", destination, error))?;
-        let reserved = Self {
-            parent,
-            parent_path: parent_path.to_path_buf(),
-            name: name.to_os_string(),
-            path,
-            dir,
-            index,
-            identity,
-        };
-        reserved.verify_entry()?;
-        Ok(reserved)
+        Err(TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "failed to reserve a unique export staging directory beside {}",
+                destination.display()
+            ),
+        ))
     }
 
     fn path(&self) -> &Path {
@@ -301,97 +307,88 @@ impl ReservedDestination {
     }
 
     fn dir(&self) -> &Dir {
-        &self.dir
+        self.dir.as_ref().expect("staging capability remains open")
     }
 
     fn verify_entry(&self) -> Result<(), TelosError> {
         let entry = self.parent.open_dir_nofollow(&self.name).map_err(|error| {
-            stale_destination(
+            stale_staging(
                 &self.parent_path.join(&self.name),
                 format!("cannot reopen the reserved entry: {error}"),
             )
         })?;
         let entry_identity = identity(&entry.dir_metadata().map_err(|error| {
-            stale_destination(
+            stale_staging(
                 &self.path,
                 format!("cannot inspect the directory entry: {error}"),
             )
         })?);
         let handle_identity = identity(&self.dir().dir_metadata().map_err(|error| {
-            stale_destination(
+            stale_staging(
                 &self.path,
                 format!("cannot inspect the held directory: {error}"),
             )
         })?);
         if entry_identity != self.identity || handle_identity != self.identity {
-            return Err(stale_destination(
+            return Err(stale_staging(
                 &self.parent_path.join(&self.name),
-                "the directory entry no longer names the reserved destination directory",
+                "the directory entry no longer names the reserved staging directory",
             ));
         }
         Ok(())
     }
 
-    fn complete(&mut self, rendered: &[(PathBuf, Vec<u8>)]) -> Result<(), TelosError> {
-        self.validate_contents(rendered, false)?;
-        let index = rendered
-            .iter()
-            .find(|(path, _)| path == Path::new(INDEX_PATH))
-            .map(|(_, bytes)| bytes.as_slice())
-            .ok_or_else(|| stale_destination(&self.path, "rendered export has no index"))?;
-        self.rewrite_index(index)?;
-        if let Err(error) = self
-            .verify_entry()
-            .and_then(|()| self.validate_contents(rendered, true))
-        {
-            let _ = self.rewrite_index(INCOMPLETE_INDEX);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn rewrite_index(&mut self, bytes: &[u8]) -> Result<(), TelosError> {
-        self.index
-            .set_len(0)
-            .and_then(|()| self.index.seek(SeekFrom::Start(0)).map(|_| ()))
-            .and_then(|()| self.index.write_all(bytes))
-            .and_then(|()| self.index.sync_all())
-            .map_err(|error| io_error("write", &self.path.join(INDEX_PATH), error))
-    }
-
-    fn validate_contents(
-        &self,
-        rendered: &[(PathBuf, Vec<u8>)],
-        complete: bool,
-    ) -> Result<(), TelosError> {
+    fn validate_contents(&self, rendered: &[(PathBuf, Vec<u8>)]) -> Result<(), TelosError> {
         let mut actual = Vec::new();
         collect_files(self.dir(), Path::new(""), &mut actual)
-            .map_err(|error| io_error("inspect incomplete export", &self.path, error))?;
+            .map_err(|error| io_error("inspect staged export", &self.path, error))?;
         actual.sort();
         let mut expected: Vec<_> = rendered.iter().map(|(path, _)| path.clone()).collect();
         expected.sort();
         if actual != expected {
-            return Err(stale_destination(
+            return Err(stale_staging(
                 &self.path,
-                "its contents changed before completion",
+                "its contents changed before publication",
             ));
         }
         for (relative, bytes) in rendered {
-            let expected = if !complete && relative == Path::new(INDEX_PATH) {
-                INCOMPLETE_INDEX
-            } else {
-                bytes
-            };
             let actual = read_relative(self.dir(), relative)
-                .map_err(|error| io_error("verify", &self.path.join(relative), error))?;
-            if actual != expected {
-                return Err(stale_destination(
+                .map_err(|error| io_error("verify staging", &self.path.join(relative), error))?;
+            if actual != *bytes {
+                return Err(stale_staging(
                     &self.path.join(relative),
-                    "its bytes changed before completion",
+                    "its bytes changed before publication",
                 ));
             }
         }
         Ok(())
+    }
+
+    fn refuse_existing_destination(&self, destination: &Path) -> Result<(), TelosError> {
+        match self.parent.symlink_metadata(&self.target) {
+            Ok(_) => Err(existing_destination(destination)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error("inspect", destination, error)),
+        }
+    }
+}
+
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        if self.published || self.dir.is_none() || self.verify_entry().is_err() {
+            return;
+        }
+        let Some(dir) = self.dir.take() else {
+            return;
+        };
+        #[cfg(windows)]
+        {
+            let _ = cleanup_windows_owned_directory(dir, &self.path, self.identity);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = dir.remove_open_dir_all();
+        }
     }
 }
 
@@ -423,11 +420,38 @@ fn identity(metadata: &cap_std::fs::Metadata) -> EntryIdentity {
     }
 }
 
-fn stale_destination(path: &Path, reason: impl std::fmt::Display) -> TelosError {
+fn random_staging_name(destination: &Path) -> Result<OsString, TelosError> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!("failed to generate an export staging name: {error}"),
+        )
+    })?;
+    let mut suffix = String::with_capacity(entropy.len() * 2);
+    for byte in entropy {
+        write!(&mut suffix, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(OsString::from(format!(
+        "{}{}",
+        staging_prefix(destination),
+        suffix
+    )))
+}
+
+fn staging_prefix(destination: &Path) -> String {
+    let name = destination
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| std::ffi::OsStr::new("telos-export"));
+    format!(".{}.telos-staging-", name.to_string_lossy())
+}
+
+fn stale_staging(path: &Path, reason: impl std::fmt::Display) -> TelosError {
     TelosError::new(
         ErrorCode::TelosInternal,
         format!(
-            "refusing stale export destination {}: {reason}",
+            "refusing stale export staging entry {}: {reason}",
             path.display()
         ),
     )
@@ -470,6 +494,338 @@ fn rendered_files(snapshot: &ViewSnapshot) -> Result<Vec<(PathBuf, Vec<u8>)>, Te
         .collect()
 }
 
+fn refuse_existing(destination: &Path) -> Result<(), TelosError> {
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(existing_destination(destination)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error("inspect", destination, error)),
+    }
+}
+
+/// Atomically promotes `staging` only when `destination` does not exist.
+///
+/// Linux exposes no directory-rename-by-handle primitive. Both names are
+/// resolved below the retained parent capability, and the caller verifies the
+/// recorded staging identity immediately before this no-replace syscall.
+#[cfg(target_os = "linux")]
+fn publish_no_replace(
+    staging: &mut StagingDirectory,
+    destination: &Path,
+    existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let staging_name = CString::new(staging.name.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export staging path contains a NUL byte: {}",
+                staging.path().display()
+            ),
+        )
+    })?;
+    let destination_name = CString::new(staging.target.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export destination path contains a NUL byte: {}",
+                destination.display()
+            ),
+        )
+    })?;
+
+    // SAFETY: both C strings remain alive for the call, and both names are
+    // resolved relative to the retained destination-parent capability.
+    let result = unsafe {
+        libc::renameat2(
+            staging.parent.as_raw_fd(),
+            staging_name.as_ptr(),
+            staging.parent.as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        return Err(existing(destination));
+    }
+    Err(io_error("publish", destination, error))
+}
+
+/// Darwin's exclusive rename has the same destination no-replace contract.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn publish_no_replace(
+    staging: &mut StagingDirectory,
+    destination: &Path,
+    existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let staging_name = CString::new(staging.name.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export staging path contains a NUL byte: {}",
+                staging.path().display()
+            ),
+        )
+    })?;
+    let destination_name = CString::new(staging.target.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export destination path contains a NUL byte: {}",
+                destination.display()
+            ),
+        )
+    })?;
+
+    // SAFETY: both C strings remain alive for the call, and both names are
+    // resolved relative to the retained destination-parent capability.
+    let result = unsafe {
+        libc::renameatx_np(
+            staging.parent.as_raw_fd(),
+            staging_name.as_ptr(),
+            staging.parent.as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        return Err(existing(destination));
+    }
+    Err(io_error("publish", destination, error))
+}
+
+/// Windows renames the staging directory object referenced by a DELETE-capable
+/// handle. The ordinary capability is closed first because cap-std opens
+/// directories without `FILE_SHARE_DELETE`; the replacement-resistant handle
+/// is then opened no-follow and checked against the recorded identity.
+#[cfg(windows)]
+fn publish_no_replace(
+    staging: &mut StagingDirectory,
+    destination: &Path,
+    existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+
+    let dir = staging
+        .dir
+        .take()
+        .expect("staging capability remains open before publication");
+    drop(dir);
+
+    let handle =
+        open_windows_owned_directory(&staging.path, staging.identity).map_err(|error| {
+            stale_staging(
+                &staging.path,
+                format!("cannot acquire its source-bound publication handle: {error}"),
+            )
+        })?;
+    let result = rename_windows_directory_handle(&handle, &staging.parent, &staging.target);
+    drop(handle);
+    if result.is_ok() {
+        return Ok(());
+    }
+
+    restore_windows_capability(staging);
+    let error = result.expect_err("checked error above");
+    if error
+        .raw_os_error()
+        .is_some_and(|code| code as u32 == ERROR_ALREADY_EXISTS || code as u32 == ERROR_FILE_EXISTS)
+    {
+        return Err(existing(destination));
+    }
+    Err(io_error("publish", destination, error))
+}
+
+#[cfg(windows)]
+fn restore_windows_capability(staging: &mut StagingDirectory) {
+    let Ok(dir) = staging.parent.open_dir_nofollow(&staging.name) else {
+        return;
+    };
+    let Ok(metadata) = dir.dir_metadata() else {
+        return;
+    };
+    if identity(&metadata) == staging.identity {
+        staging.dir = Some(dir);
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_owned_directory(path: &Path, expected: EntryIdentity) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = cap_std::fs::File::from_std(file.try_clone()?).metadata()?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || identity(&metadata) != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "directory handle does not identify the reserved staging directory",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn rename_windows_directory_handle(
+    source: &std::fs::File,
+    parent: &Dir,
+    target: &std::ffi::OsStr,
+) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
+    };
+
+    let name: Vec<u16> = target.encode_wide().collect();
+    if name.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "export destination name contains a NUL code unit",
+        ));
+    }
+    let name_bytes = name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "export name is too long"))?;
+    let buffer_len = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+        .checked_add(name_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "export name is too long"))?;
+    let word = std::mem::size_of::<usize>();
+    let mut buffer = vec![0_usize; buffer_len.div_ceil(word)];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+
+    // SAFETY: `buffer` is pointer-aligned and large enough for the fixed
+    // header plus every UTF-16 code unit. The source and parent handles remain
+    // open for the duration of the call, and replacement is explicitly false.
+    let result = unsafe {
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).RootDirectory = parent.as_raw_handle();
+        (*info).FileNameLength = u32::try_from(name_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "export name is too long"))?;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+        SetFileInformationByHandle(
+            source.as_raw_handle(),
+            FileRenameInfo,
+            info.cast(),
+            u32::try_from(buffer_len).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "export name is too long")
+            })?,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn cleanup_windows_owned_directory(
+    dir: Dir,
+    path: &Path,
+    expected: EntryIdentity,
+) -> io::Result<()> {
+    clear_windows_directory(&dir, path)?;
+    drop(dir);
+    let handle = open_windows_owned_directory(path, expected)?;
+    delete_windows_directory_handle(&handle)
+}
+
+#[cfg(windows)]
+fn clear_windows_directory(directory: &Dir, path: &Path) -> io::Result<()> {
+    let entries = directory
+        .entries()?
+        .map(|entry| {
+            let entry = entry?;
+            Ok((entry.file_name(), entry.file_type()?))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    for (name, file_type) in entries {
+        if file_type.is_dir() && !file_type.is_symlink() {
+            let child = directory.open_dir_nofollow(&name)?;
+            let child_identity = identity(&child.dir_metadata()?);
+            let child_path = path.join(&name);
+            clear_windows_directory(&child, &child_path)?;
+            drop(child);
+            let handle = open_windows_owned_directory(&child_path, child_identity)?;
+            delete_windows_directory_handle(&handle)?;
+        } else {
+            directory.remove_file_or_symlink(&name)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn delete_windows_directory_handle(directory: &std::fs::File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: the structure has the exact Windows ABI and stays alive for the
+    // call; `directory` was opened with DELETE and FILE_SHARE_DELETE.
+    let result = unsafe {
+        SetFileInformationByHandle(
+            directory.as_raw_handle(),
+            FileDispositionInfo,
+            std::ptr::addr_of!(disposition).cast(),
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+                .expect("Windows disposition structure size fits u32"),
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios", windows)))]
+fn publish_no_replace(
+    _staging: &mut StagingDirectory,
+    destination: &Path,
+    _existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
+    Err(TelosError::new(
+        ErrorCode::TelosInternal,
+        format!(
+            "atomic no-replace export publication is unsupported on this platform: {}",
+            destination.display()
+        ),
+    ))
+}
+
 fn existing_destination(destination: &Path) -> TelosError {
     TelosError::new(
         ErrorCode::TelosChangeStateInvalid,
@@ -499,8 +855,8 @@ mod tests {
     use telos_core::workspace::Workspace;
 
     use super::{
-        export, export_with_writer, export_with_writer_and_before_complete,
-        export_with_writer_and_hooks, write_relative,
+        export_with_writer, export_with_writer_and_before_publish, export_with_writer_and_hooks,
+        write_relative,
     };
     use crate::view::model::ViewSnapshot;
 
@@ -520,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn a_write_failure_leaves_an_explicitly_incomplete_destination() {
+    fn a_staging_write_failure_leaves_no_destination_or_staging_directory() {
         let temporary = tempfile::tempdir().unwrap();
         let destination = temporary.path().join("site");
         let error = export_with_writer(
@@ -533,21 +889,26 @@ mod tests {
         .unwrap_err();
 
         assert!(error.message.contains("forced staging write failure"));
-        assert_eq!(
-            fs::read(destination.join("index.html")).unwrap(),
-            b"<!doctype html><title>Telos export incomplete</title>\n"
-        );
-        assert!(!destination.join(".telos-export-incomplete").exists());
+        assert!(!destination.exists());
+        assert!(fs::read_dir(temporary.path()).unwrap().next().is_none());
+    }
 
-        let retry = export(&fixture_snapshot(), &destination).unwrap_err();
-        assert_eq!(
-            retry.code,
-            telos_core::error::ErrorCode::TelosChangeStateInvalid
-        );
-        assert_eq!(
-            fs::read(destination.join("index.html")).unwrap(),
-            b"<!doctype html><title>Telos export incomplete</title>\n"
-        );
+    #[test]
+    fn a_finalization_failure_leaves_no_destination_or_staging_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("site");
+
+        let error = export_with_writer_and_before_publish(
+            &fixture_snapshot(),
+            &destination,
+            |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
+            |_staging| Err(io::Error::other("forced finalization failure")),
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("forced finalization failure"));
+        assert!(!destination.exists());
+        assert!(fs::read_dir(temporary.path()).unwrap().next().is_none());
     }
 
     #[test]
@@ -567,9 +928,7 @@ mod tests {
         let error = export_with_writer_and_hooks(
             &snapshot,
             &destination,
-            |_destination_path, destination, relative, bytes| {
-                write_relative(destination, relative, bytes)
-            },
+            |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
             |_destination| {
                 barrier.wait();
                 actor
@@ -600,13 +959,13 @@ mod tests {
     }
 
     #[test]
-    fn a_substituted_destination_entry_is_never_completed() {
+    fn a_substituted_staging_entry_is_never_published() {
         let temporary = tempfile::tempdir().unwrap();
         let destination = temporary.path().join("site");
         let displaced = temporary.path().join("displaced-staging");
         let replacement = std::sync::Mutex::new(None);
 
-        let error = export_with_writer_and_before_complete(
+        let error = export_with_writer_and_before_publish(
             &fixture_snapshot(),
             &destination,
             |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
@@ -622,15 +981,8 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, telos_core::error::ErrorCode::TelosInternal);
-        assert_eq!(
-            fs::read_to_string(destination.join("hostile.txt")).unwrap(),
-            "not the export"
-        );
-        assert!(!destination.join("index.html").exists());
-        assert_eq!(
-            fs::read(displaced.join("index.html")).unwrap(),
-            b"<!doctype html><title>Telos export incomplete</title>\n"
-        );
+        assert!(!destination.exists());
+        assert!(displaced.join("index.html").is_file());
         let replacement = replacement.into_inner().unwrap().unwrap();
         assert_eq!(
             fs::read_to_string(replacement.join("hostile.txt")).unwrap(),
@@ -639,13 +991,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_completion_never_cleans_up_a_substituted_destination_entry() {
+    fn failed_publication_never_cleans_up_a_substituted_staging_entry() {
         let temporary = tempfile::tempdir().unwrap();
         let destination = temporary.path().join("site");
         let displaced = temporary.path().join("displaced-staging");
         let replacement = std::sync::Mutex::new(None);
 
-        let error = export_with_writer_and_before_complete(
+        let error = export_with_writer_and_before_publish(
             &fixture_snapshot(),
             &destination,
             |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
@@ -655,12 +1007,16 @@ mod tests {
                 fs::create_dir(&staging)?;
                 fs::write(staging.join("hostile.txt"), "replacement owner")?;
                 *replacement.lock().unwrap() = Some(staging);
+                fs::create_dir(&destination)?;
                 fs::write(destination.join("owner.txt"), "destination owner")
             },
         )
         .unwrap_err();
 
-        assert_eq!(error.code, telos_core::error::ErrorCode::TelosInternal);
+        assert_eq!(
+            error.code,
+            telos_core::error::ErrorCode::TelosChangeStateInvalid
+        );
         assert_eq!(
             fs::read_to_string(destination.join("owner.txt")).unwrap(),
             "destination owner"
@@ -673,25 +1029,22 @@ mod tests {
     }
 
     #[test]
-    fn a_destination_entry_substituted_between_creation_and_open_is_not_adopted() {
+    fn a_staging_entry_substituted_between_creation_and_open_is_not_adopted() {
         let temporary = tempfile::tempdir().unwrap();
         let destination = temporary.path().join("site");
-        let displaced = temporary.path().join("created-destination");
+        let displaced = temporary.path().join("created-staging");
         let replacement = std::sync::Mutex::new(None);
 
         let error = export_with_writer_and_hooks(
             &fixture_snapshot(),
             &destination,
-            |_destination_path, destination, relative, bytes| {
-                write_relative(destination, relative, bytes)
-            },
+            |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
             |_destination| Ok(()),
-            |destination| {
-                let destination = destination.to_path_buf();
-                fs::rename(&destination, &displaced)?;
-                fs::create_dir(&destination)?;
-                fs::write(destination.join("hostile.txt"), "reservation replacement")?;
-                *replacement.lock().unwrap() = Some(destination);
+            |staging| {
+                let staging = staging.to_path_buf();
+                fs::rename(&staging, &displaced)?;
+                fs::create_dir(&staging)?;
+                *replacement.lock().unwrap() = Some(staging);
                 Ok(())
             },
             |_destination| Ok(()),
@@ -701,49 +1054,51 @@ mod tests {
 
         assert_eq!(error.code, telos_core::error::ErrorCode::TelosInternal);
         let replacement = replacement.into_inner().unwrap().unwrap();
-        assert_eq!(
-            fs::read_to_string(replacement.join("hostile.txt")).unwrap(),
-            "reservation replacement"
-        );
-        assert!(!replacement.join("index.html").exists());
+        assert!(!destination.exists());
+        assert!(fs::read_dir(&replacement).unwrap().next().is_none());
+        assert!(displaced.is_dir());
     }
 
     #[test]
-    fn a_destination_entry_substituted_after_identity_check_is_not_completed() {
+    fn a_staging_entry_substituted_after_identity_check_is_not_published() {
         let temporary = tempfile::tempdir().unwrap();
         let destination = temporary.path().join("site");
-        let displaced = temporary.path().join("verified-destination");
+        let displaced = temporary.path().join("verified-staging");
 
         let error = export_with_writer_and_hooks(
             &fixture_snapshot(),
             &destination,
-            |_destination_path, destination, relative, bytes| {
-                write_relative(destination, relative, bytes)
-            },
+            |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
             |_destination| Ok(()),
             |_destination| Ok(()),
             |_destination| Ok(()),
-            |destination| {
-                let destination = destination.to_path_buf();
-                fs::rename(&destination, &displaced)?;
-                fs::create_dir(&destination)?;
-                fs::write(destination.join("hostile.txt"), "post-check replacement")
+            |staging| {
+                let staging = staging.to_path_buf();
+                fs::rename(&staging, &displaced)?;
+                fs::create_dir(&staging)?;
+                fs::write(staging.join("hostile.txt"), "post-check replacement")
             },
         )
         .unwrap_err();
 
         assert_eq!(error.code, telos_core::error::ErrorCode::TelosInternal);
+        assert!(!destination.exists());
+        assert!(displaced.join("graph.html").is_file());
+        let replacement = fs::read_dir(temporary.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.join("hostile.txt").is_file())
+            .expect("replacement staging remains owned by the concurrent actor");
         assert_eq!(
-            fs::read_to_string(destination.join("hostile.txt")).unwrap(),
+            fs::read_to_string(replacement.join("hostile.txt")).unwrap(),
             "post-check replacement"
         );
-        assert!(!destination.join("index.html").exists());
-        assert!(displaced.join("index.html").is_file());
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_destination_symlink_substituted_before_writes_never_receives_export_bytes() {
+    fn a_staging_symlink_substituted_before_writes_never_receives_export_bytes() {
         use std::os::unix::fs::symlink;
 
         let temporary = tempfile::tempdir().unwrap();
@@ -769,16 +1124,17 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code, telos_core::error::ErrorCode::TelosInternal);
-        assert!(
-            fs::symlink_metadata(&destination)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(!destination.exists());
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
-        assert_eq!(
-            fs::read(displaced.join("index.html")).unwrap(),
-            b"<!doctype html><title>Telos export incomplete</title>\n"
-        );
+        assert!(displaced.join("index.html").is_file());
+        let replacement = fs::read_dir(temporary.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            })
+            .expect("replacement staging symlink remains owned by the concurrent actor");
+        assert_eq!(fs::read_link(replacement).unwrap(), outside);
     }
 }

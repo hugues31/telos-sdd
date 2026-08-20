@@ -1,35 +1,18 @@
 //! The three **acceptance loops** from spec §14: the product's executable
-//! roadmap. Each one scripts a full product loop -- `change open`, `add`,
-//! `test`, `bind`, `adopt`, `reconcile --full`, and friends -- through
-//! commands that do not exist yet (M2: the change/transaction surface; M3:
-//! `test`/`bind`/`context`). They compile today because every command is
-//! just a string argument handed to the spawned `telos` binary: there is no
-//! compile-time coupling to a Rust API that doesn't exist.
+//! roadmap. Each scripts a full product loop — `change open`, `add`, `test`,
+//! `bind`, `adopt`, `reconcile --full`, and friends — by spawning the `telos`
+//! binary. They have no compile-time coupling to the command implementation.
 //!
-//! They are committed `#[ignore]`d and stay that way until the milestone
-//! that implements their last missing command lands, at which point that
-//! loop's `#[ignore]` comes off and the test starts asserting for real.
-//! `loop_merge` came off at M2, which landed `change open`/`edit`/`approve`/
-//! `reconcile [--full]` -- it now runs in the ordinary suite and is the
-//! milestone's executable done-criterion. `loop_feature` and `loop_drift`
-//! stay `#[ignore]`d for M3, but for two different reasons, and
-//! `cargo test --workspace -- --ignored` shows the difference today:
-//!
-//! - `loop_feature` **fails**, on the *first* command M2 doesn't have
-//!   (`test`/`bind`, and the red/green witness protocol) -- not on a compile
-//!   error or a panic unrelated to the missing surface. That failure is this
-//!   file doing its job: it is the roadmap's done-criterion, not a bug to
-//!   fix here.
-//! - `loop_drift` **passes** as written: every command it calls landed at
-//!   M2. It stays `#[ignore]`d for milestone sequencing -- the Implement
-//!   phase it currently skips, going straight from `approve` to `reconcile`,
-//!   is the part M3 fills in, and its `#[ignore]` comes off then, alongside
-//!   `loop_feature`'s. See the note on the test itself.
+//! All three loops now run in the ordinary suite. `loop_feature` proves M3
+//! end to end, including a discoverable scenario test and sealed red/green
+//! witnesses; `loop_drift` proves an out-of-protocol edit can be adopted and
+//! reconciled; and `loop_merge` proves a lock-only merge conflict is resolved
+//! by `reconcile --full`. Together they are the roadmap's executable
+//! done-criterion.
 //!
 //! Payload JSON shapes fed to `add`/`edit` on stdin follow Annex D, frozen
-//! by T13 into `docs/contracts.md` -- `loop_feature` uses the real,
+//! by T13 into `docs/contracts.md`. `loop_feature` uses the real,
 //! agent-facing shape rather than an invented one.
-
 mod common;
 
 use std::fs;
@@ -243,11 +226,9 @@ fn current_branch(dir: &Path) -> String {
 /// commands and JSON payloads, never a hand-edited `.tel` file, never a
 /// hash.
 ///
-/// Un-ignored once M3 lands `test`/`bind` (M2's `change`/`add` surface is a
-/// prerequisite but M3's red/green witness protocol is the last piece this
-/// loop needs end to end).
+/// M3's `test`/`bind` surface and sealed red/green witness protocol make this
+/// loop executable end to end in the ordinary suite.
 #[test]
-#[ignore = "un-ignored at M3 (test/bind)"]
 fn loop_feature() {
     let tmp = repo();
     let dir = tmp.path();
@@ -259,22 +240,13 @@ fn loop_feature() {
     assert_eq!(status["result"]["state"], json!("coherent"));
 
     // --- Configure the test runner, through the protocol ----------------
-    // M1 has no real cargo project in this throwaway sandbox repo to
-    // compile a failing test against, so `telos.toml`'s `[test] cmd` is
-    // pointed at a tiny shell script this test controls, which reports red
-    // or green by reading a marker file the loop flips between the two
-    // `telos test` calls below (M1 stand-in only -- M3 exercises a real
-    // cargo project end to end).
+    // The fixture configures a marker-controlled runner. The generated
+    // scenario source below is discoverable under `[tests].globs`; its bytes
+    // stay unchanged across the red and green witness calls, while the marker
+    // alone selects the runner outcome.
     //
-    // `telos/telos.toml` is itself a sealed spec file (`Workspace::
-    // spec_files`), so writing it directly on disk leaves it as *unclaimed*
-    // drift, which outranks any later open change (M2: drift refuses
-    // `change open`/`approve`/`reconcile` before a change even gets a
-    // chance to claim anything else). So this goes through the protocol
-    // like every other write, using `adopt` -- the only way to stage an
-    // opaque file telos does not model as an entity -- and does so *before*
-    // "Invoices can be settled" opens, so that change's own base is
-    // coherent again by the time it starts.
+    // `telos/telos.toml` is a sealed spec file, so this setup is adopted
+    // before the feature change opens and the repository is coherent again.
     fs::write(
         dir.join("telos/telos.toml"),
         "[code]\nglobs = [\"src/**/*.rs\"]\n\n\
@@ -287,9 +259,8 @@ fn loop_feature() {
     fs::write(
         dir.join("scripts/fake-test.sh"),
         "#!/bin/sh\n\
-         # M1 stand-in for a real test runner (task 16 brief): red/green is\n\
-         # decided by a marker file this test flips, not by compiling anything.\n\
-         # M3 replaces this with cargo test against a real fixture project.\n\
+         # Fixture runner: the marker file selects red or green while the
+         # generated scenario test source remains byte-for-byte unchanged.
          dir=$(dirname \"$0\")\n\
          if [ -f \"$dir/../.fake-test-green\" ]; then exit 0; else exit 1; fi\n",
     )
@@ -302,6 +273,7 @@ fn loop_feature() {
         perms.set_mode(0o755);
         fs::set_permissions(&script, perms).unwrap();
     }
+
     let adopted_toml = run_ok(dir, &["adopt", "--json"]);
     let toml_change_id = adopted_toml["result"]["change"]
         .as_str()
@@ -395,6 +367,16 @@ fn loop_feature() {
     run_ok(dir, &["change", "diff", &change_id, "--json"]);
     run_ok(dir, &["change", "approve", &change_id, "--json"]);
 
+    // Create the discoverable generated-project source before the first
+    // `telos test`. These bytes remain unchanged across the red and green
+    // calls; the runner marker below is their only varying input.
+    fs::create_dir_all(dir.join("tests")).expect("failed to create tests/");
+    fs::write(
+        dir.join("tests/scn_0001_invoice.rs"),
+        "#[test]\nfn scn_0001_invoice_settles() {}\n",
+    )
+    .expect("failed to write scenario test source");
+
     // --- Implement -------------------------------------------------------
     // Red witness before green, per §7.2.4.
     let red = run_ok(dir, &["test", &scenario_id, "--json"]);
@@ -404,6 +386,13 @@ fn loop_feature() {
 
     let green = run_ok(dir, &["test", &scenario_id, "--json"]);
     assert_eq!(green["result"]["witness"], json!("green"));
+
+    // The discoverable test source proves the intent, so it is bound before
+    // reconciliation just as the domain source below is.
+    run_ok(
+        dir,
+        &["bind", "tests/scn_0001_invoice.rs", &intent_id, "--json"],
+    );
 
     // Minimal domain code, bound to the intent it implements.
     fs::create_dir_all(dir.join("src")).expect("failed to create src/");
@@ -433,15 +422,10 @@ fn loop_feature() {
 /// `adopt` captures it as a real change, after which the ordinary loop
 /// finishes it the same way `loop_feature` does.
 ///
-/// Every command it calls landed at M2, and it passes as written today
-/// (verified at T13 and again at T14 with `cargo test -p telos --test
-/// acceptance_loops -- --ignored`). It stays `#[ignore]`d anyway: the
-/// milestone plan schedules its un-ignoring for M3, alongside
-/// `loop_feature`, and this loop's Implement phase -- the one it currently
-/// skips entirely, going straight from `approve` to `reconcile` -- is the
-/// part M3's `test`/`bind` fill in.
+/// This M3 acceptance loop runs in the ordinary suite. It proves that the
+/// adoption path restores a coherent repository through the same lifecycle
+/// commands used by the feature loop.
 #[test]
-#[ignore = "un-ignored at M3 (passes today; its Implement phase is still M3's)"]
 fn loop_drift() {
     let tmp = with_fixture();
     let dir = tmp.path();
@@ -512,9 +496,8 @@ fn loop_drift() {
 /// rule, re-runs the impacted proof obligations, and re-seals. Proof, not a
 /// bypass.
 ///
-/// Un-ignored at M2, which landed `change open`/`edit`/`approve`/`reconcile
-/// [--full]` -- the loop's last missing commands. It is M2's executable
-/// done-criterion.
+/// This loop runs in the ordinary suite: its M2 transaction surface and M3
+/// witness-aware reconciliation remain an executable merge criterion.
 ///
 /// # Amendments made when this loop was un-ignored (T14)
 ///

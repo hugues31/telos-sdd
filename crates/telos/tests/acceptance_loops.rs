@@ -15,9 +15,9 @@
 //! file doing its job: it is the roadmap's done-criterion, not a bug to fix
 //! here.
 //!
-//! Payload JSON shapes fed to `add`/`edit` on stdin are invented for this
-//! test -- M2 freezes their real shape. They're marked below wherever they
-//! appear.
+//! Payload JSON shapes fed to `add`/`edit` on stdin follow Annex D, frozen
+//! by T13 into `docs/contracts.md` -- `loop_feature` uses the real,
+//! agent-facing shape rather than an invented one.
 
 mod common;
 
@@ -207,85 +207,23 @@ fn loop_feature() {
     let status = run_ok(dir, &["status", "--json"]);
     assert_eq!(status["result"]["state"], json!("coherent"));
 
-    // --- Challenge -------------------------------------------------------
-    // `telos change open "<motivation>"` starts a transaction; the delta is
-    // staged into it with `add`, never written to `telos/` directly.
-    let opened = run_ok(
-        dir,
-        &["change", "open", "Invoices can be settled", "--json"],
-    );
-    let change_id = opened["result"]["id"]
-        .as_str()
-        .expect("`change open` answers with the new change's id (M2)")
-        .to_string();
-
-    // Payload shapes are invented for this test -- M2 freezes the `add`
-    // family's real JSON. These mirror the spec's canonical example (§4.5):
-    // the `Invoice` notion, the `PaymentReceived` event it reacts to, and
-    // the intent + scenario that ties them together.
-    run_ok_stdin(
-        dir,
-        &["add", "notion", "--change", &change_id, "--json"],
-        r#"{
-            "id": "Invoice",
-            "kind": "entity",
-            "def": "A bill issued to a Customer for delivered work.",
-            "attrs": [
-                {"name": "state", "type": "enum", "values": ["open", "settled"]}
-            ]
-        }"#,
-    );
-    run_ok_stdin(
-        dir,
-        &["add", "notion", "--change", &change_id, "--json"],
-        r#"{
-            "id": "PaymentReceived",
-            "kind": "event",
-            "def": "A payment arrived for an invoice."
-        }"#,
-    );
-    run_ok_stdin(
-        dir,
-        &["add", "intent", "--change", &change_id, "--json"],
-        r#"{
-            "id": "INT-0001",
-            "title": "Invoices can be settled",
-            "status": "active",
-            "telos": "Customers must see immediately that their debt is cleared.",
-            "statement": {
-                "template": "event-driven",
-                "when": "PaymentReceived",
-                "on": "Invoice",
-                "action": "set Invoice.state = settled"
-            },
-            "scenarios": [
-                {
-                    "id": "SCN-0001",
-                    "title": "a full payment settles the invoice",
-                    "given": [{"notion": "Invoice", "state": {"state": "open"}}],
-                    "when": {"notion": "PaymentReceived", "payload": {}},
-                    "then": ["Invoice.state == settled"]
-                }
-            ]
-        }"#,
-    );
-
-    // --- Approve -------------------------------------------------------
-    // `diff` renders the staged delta for human review; `approve` locks the
-    // approval to that delta's digest -- editing it afterward invalidates
-    // the approval (M2, `TELOS_APPROVAL_STALE`), but this loop never edits
-    // after approving.
-    run_ok(dir, &["change", "diff", &change_id, "--json"]);
-    run_ok(dir, &["change", "approve", &change_id, "--json"]);
-
-    // --- Implement -------------------------------------------------------
-    // Red witness before green, per §7.2.4. M1 has no real cargo project in
-    // this throwaway sandbox repo to compile a failing test against, so
-    // (per this task's brief) `telos.toml`'s `[test] cmd` is pointed at a
-    // tiny shell script this test controls, which reports red or green by
-    // reading a marker file the loop flips between the two `telos test`
-    // calls below. This is an M1 stand-in only -- M3 exercises a real cargo
-    // project end to end.
+    // --- Configure the test runner, through the protocol ----------------
+    // M1 has no real cargo project in this throwaway sandbox repo to
+    // compile a failing test against, so `telos.toml`'s `[test] cmd` is
+    // pointed at a tiny shell script this test controls, which reports red
+    // or green by reading a marker file the loop flips between the two
+    // `telos test` calls below (M1 stand-in only -- M3 exercises a real
+    // cargo project end to end).
+    //
+    // `telos/telos.toml` is itself a sealed spec file (`Workspace::
+    // spec_files`), so writing it directly on disk leaves it as *unclaimed*
+    // drift, which outranks any later open change (M2: drift refuses
+    // `change open`/`approve`/`reconcile` before a change even gets a
+    // chance to claim anything else). So this goes through the protocol
+    // like every other write, using `adopt` -- the only way to stage an
+    // opaque file telos does not model as an entity -- and does so *before*
+    // "Invoices can be settled" opens, so that change's own base is
+    // coherent again by the time it starts.
     fs::write(
         dir.join("telos/telos.toml"),
         "[code]\nglobs = [\"src/**/*.rs\"]\n\n\
@@ -313,23 +251,117 @@ fn loop_feature() {
         perms.set_mode(0o755);
         fs::set_permissions(&script, perms).unwrap();
     }
+    let adopted_toml = run_ok(dir, &["adopt", "--json"]);
+    let toml_change_id = adopted_toml["result"]["change"]
+        .as_str()
+        .expect("`adopt` answers with the id of the change capturing the drift (M2)")
+        .to_string();
+    run_ok(dir, &["change", "diff", &toml_change_id, "--json"]);
+    run_ok(dir, &["change", "approve", &toml_change_id, "--json"]);
+    run_ok(dir, &["change", "reconcile", &toml_change_id, "--json"]);
+    let status = run_ok(dir, &["status", "--json"]);
+    assert_eq!(status["result"]["state"], json!("coherent"));
 
-    let red = run_ok(dir, &["test", "SCN-0001", "--json"]);
+    // --- Challenge -------------------------------------------------------
+    // `telos change open "<motivation>"` starts a transaction; the delta is
+    // staged into it with `add`, never written to `telos/` directly.
+    let opened = run_ok(
+        dir,
+        &["change", "open", "Invoices can be settled", "--json"],
+    );
+    let change_id = opened["result"]["id"]
+        .as_str()
+        .expect("`change open` answers with the new change's id (M2)")
+        .to_string();
+
+    // Payload shapes are Annex D's frozen `add` shape (docs/contracts.md):
+    // a notion's identity is its `name`, an `add` never carries an id of
+    // its own, and `given`/`when` steps carry their state under `fields`.
+    // These mirror the spec's canonical example (§4.5): the `Invoice`
+    // notion, the `PaymentReceived` event it reacts to, and the intent +
+    // scenario that ties them together.
+    run_ok_stdin(
+        dir,
+        &["add", "notion", "--change", &change_id, "--json"],
+        r#"{
+            "name": "Invoice",
+            "kind": "entity",
+            "def": "A bill issued to a Customer for delivered work.",
+            "attrs": [
+                {"name": "state", "type": "enum", "values": ["open", "settled"]}
+            ]
+        }"#,
+    );
+    run_ok_stdin(
+        dir,
+        &["add", "notion", "--change", &change_id, "--json"],
+        r#"{
+            "name": "PaymentReceived",
+            "kind": "event",
+            "def": "A payment arrived for an invoice."
+        }"#,
+    );
+    let added_intent = run_ok_stdin(
+        dir,
+        &["add", "intent", "--change", &change_id, "--json"],
+        r#"{
+            "title": "Invoices can be settled",
+            "status": "active",
+            "telos": "Customers must see immediately that their debt is cleared.",
+            "statement": {
+                "template": "event-driven",
+                "when": "PaymentReceived",
+                "on": "Invoice",
+                "action": "set Invoice.state = settled"
+            },
+            "scenarios": [
+                {
+                    "title": "a full payment settles the invoice",
+                    "given": [{"notion": "Invoice", "fields": {"state": "open"}}],
+                    "when": {"notion": "PaymentReceived", "fields": {}},
+                    "then": ["Invoice.state == settled"]
+                }
+            ]
+        }"#,
+    );
+    // `add` never carries an id (Annex D): the intent's id and its
+    // scenario's id are both allocated by the CLI and captured from
+    // `result` here, never hardcoded.
+    let intent_id = added_intent["result"]["id"]
+        .as_str()
+        .expect("`add intent` answers with the allocated intent id (M2)")
+        .to_string();
+    let scenario_id = added_intent["result"]["scenario_ids"][0]
+        .as_str()
+        .expect("`add intent` reports the allocated scenario id(s) (M2)")
+        .to_string();
+
+    // --- Approve -------------------------------------------------------
+    // `diff` renders the staged delta for human review; `approve` locks the
+    // approval to that delta's digest -- editing it afterward invalidates
+    // the approval (M2, `TELOS_APPROVAL_STALE`), but this loop never edits
+    // after approving.
+    run_ok(dir, &["change", "diff", &change_id, "--json"]);
+    run_ok(dir, &["change", "approve", &change_id, "--json"]);
+
+    // --- Implement -------------------------------------------------------
+    // Red witness before green, per §7.2.4.
+    let red = run_ok(dir, &["test", &scenario_id, "--json"]);
     assert_eq!(red["result"]["witness"], json!("red"));
 
     fs::write(dir.join(".fake-test-green"), "").expect("failed to flip the marker to green");
 
-    let green = run_ok(dir, &["test", "SCN-0001", "--json"]);
+    let green = run_ok(dir, &["test", &scenario_id, "--json"]);
     assert_eq!(green["result"]["witness"], json!("green"));
 
     // Minimal domain code, bound to the intent it implements.
     fs::create_dir_all(dir.join("src")).expect("failed to create src/");
     fs::write(
         dir.join("src/billing.rs"),
-        "// Minimal domain code for INT-0001, named after the notions it implements.\n",
+        "// Minimal domain code, named after the notions it implements.\n",
     )
     .expect("failed to write src/billing.rs");
-    run_ok(dir, &["bind", "src/billing.rs", "INT-0001", "--json"]);
+    run_ok(dir, &["bind", "src/billing.rs", &intent_id, "--json"]);
 
     // --- Reconcile -------------------------------------------------------
     // Applies the staged delta atomically, revalidates every §3.3 rule,

@@ -841,6 +841,34 @@ fn published_init_and_export_publication_matrices_are_exact() {
 }
 
 #[test]
+fn published_filesystem_publication_threat_model_is_exact() {
+    let contracts = include_str!("../../../docs/contracts.md");
+    let rows = markdown_table(contracts, "### Filesystem publication threat model");
+
+    assert_eq!(rows[0], ["Surface", "Covered environment", "Guarantee"]);
+    assert_eq!(
+        rows[1..],
+        [
+            [
+                "init",
+                "negligence and ordinary concurrent filesystem owners",
+                "no owner overwritten; failed partial init authenticated and safely resumable",
+            ],
+            [
+                "export",
+                "negligence and ordinary concurrent filesystem owners",
+                "no owner overwritten; no final destination on error",
+            ],
+            [
+                "init and export",
+                "same-UID adversary substituting a path between syscalls",
+                "excluded by the §5 threat model",
+            ],
+        ]
+    );
+}
+
+#[test]
 fn published_billing_reconstruction_checkpoints_are_exact() {
     let contracts = include_str!("../../../docs/contracts.md");
     let rows = markdown_table(contracts, "### Billing reconstruction checkpoints");

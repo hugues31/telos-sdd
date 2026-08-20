@@ -165,7 +165,7 @@ routes on.
 | `TELOS_PARSE_ERROR` | (M2) An `add`/`edit` payload on stdin is not a JSON object, or its shape does not match the payload schemas section below (Annex D) (`message` prefixed `` payload: `` — e.g. `` payload: missing required field `title` in intent payload ``). A handful of exact wordings are frozen verbatim without that prefix: an unknown key (`` unknown key `titel` in notion payload ``), an unknown closed-set word (`` unknown attribute type `txt`; expected one of string, int, decimal, money, bool, date, datetime, enum, ref ``), a `decimal` value sent as a JSON number, and a malformed `set` action. | None today. |
 | `TELOS_INTEGRITY_VIOLATION` | A rule §3.3 violation with no dedicated hint: `seal` finding a binding to a code file that doesn't exist on disk, an entity declared twice, or (M2) `remove`/`adopt` leaving a still-referenced entity behind (`cannot remove <entity>: <referrer>`). | None today — `message` names the offending path or entity. |
 | `TELOS_INTEGRITY_VIOLATION` | (M2) `change reconcile`'s accept-OID gate: an `accept` op's path changed, or vanished, since `adopt` recorded its OID (message `` `<path>` changed since it was accepted `` or `` `<path>` was accepted but no longer exists ``). | `` re-run `telos adopt` to accept the current bytes of `<path>` `` |
-| `TELOS_INTEGRITY_VIOLATION` | (M2) `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once) exited non-zero or could not be spawned (message `` the test run for `<target>` failed: `<substituted cmd>` ``). The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the command directly to see why it fails, then reconcile again` |
+| `TELOS_INTEGRITY_VIOLATION` | (M2) `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once when at least one intent is active) exited non-zero or could not be spawned (message `` the test run for `<target>` failed: `<substituted cmd>` ``). A full reconcile with only draft/deprecated intents invokes no runner. The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the command directly to see why it fails, then reconcile again` |
 | `TELOS_INTEGRITY_VIOLATION` | (M2) An `edit notion` payload changes the notion's `name` — a staged op cannot rename an entity, since the op's target path is derived from the entity's identity (message `` cannot rename notion `<from>` to `<to>` ``). | `` stage `remove notion <from>` and an `add` of the new one instead `` |
 | `TELOS_INTEGRITY_VIOLATION` | (M2) `adopt` cannot express the deletion of a file that carries no entity of its own: a bound code file (message `` cannot adopt: bound file `<path>` was deleted ``) or an unbound opaque file such as `telos.toml` (message `` cannot adopt: `<path>` was deleted ``). | `` restore it with `telos revert`, or remove its binding `` for a bound file; `` restore it with `telos revert` `` for an unbound one. |
 | `TELOS_INTEGRITY_VIOLATION` | (M2) `adopt` finds a drifted `.tel` file whose declared entity belongs at another path — adopting it as-is would capture the wrong path and leave the real drift uncaptured (message `` `<path>` declares an entity that belongs in `<declared-path>` ``). | `` rename the file to match the entity it declares, or the entity to match the file `` |
@@ -622,8 +622,10 @@ normally: its ops have just rewritten them, which is the point.
 `--full` is the deliberate exception and stays unchanged: it re-proves the
 whole tree from disk and seals what it finds, open adopt-changes included.
 That is total proof, not a bypass — the drift it seals has passed every gate
-a spec on its own can be held to (the applicable gates below, the whole suite
-once) — and it is why `--full` is the exit from a conflicted lock.
+a spec on its own can be held to: the applicable gates below, plus the whole
+suite once when at least one intent is active, or no runner invocation when
+all intents are draft/deprecated. This is why `--full` is the exit from a
+conflicted lock.
 
 #### `--full`
 
@@ -1021,13 +1023,14 @@ file, directory, live symlink, or dangling symlink. A collision returns
 `TELOS_CHANGE_STATE_INVALID`, message ``export destination `DIR` already
 exists``, hint `choose an empty path that does not exist`.
 
-Every page is rendered in memory before publication. The exporter writes a
-unique sibling staging directory and promotes it atomically with a
-no-replacement primitive; a late owner is never overwritten, and failures do
-not publish a partial destination. `files` is sorted by repository-style `/`
-path. HTML is byte-deterministic and self-contained: CSS and JavaScript are
-inline and no page contains an external URL, font, image, stylesheet, script,
-or network request.
+Every page is rendered in memory before publication. Under the filesystem
+publication threat model below, the exporter writes a unique sibling staging
+directory and promotes it atomically with a no-replacement primitive: no
+ordinary concurrent owner is overwritten, and any render, write, or
+finalization error leaves no final destination. `files` is sorted by
+repository-style `/` path. HTML is byte-deterministic and self-contained: CSS
+and JavaScript are inline and no page contains an external URL, font, image,
+stylesheet, script, or network request.
 
 ### Export publication matrix
 
@@ -1083,12 +1086,14 @@ reloading never write project or Telos bytes.
 ### `rebuild plan|status`
 
 Both subcommands are read-only, have `command: "rebuild"`, make no LLM call,
-and never generate application code. They alone admit spec-only mode. If a
-lock entry exists, it must be readable and the project may be `coherent` or
-`changing`; `drifted` returns `TELOS_DRIFT_DETECTED`. In `changing`, every
-parseable open change is folded by ascending change ID, journals are folded,
-cross-change claims and semantic integrity are revalidated, and each context
-pack still follows the exact public `telos context` owner resolution.
+and never generate application code. They are the only model/graph consumers
+that admit spec-only mode. Config read also works without a lock, but reads
+project metadata rather than loading the model or graph. If a lock entry
+exists, it must be readable and the project may be `coherent` or `changing`;
+`drifted` returns `TELOS_DRIFT_DETECTED`. In `changing`, every parseable open
+change is folded by ascending change ID, journals are folded, cross-change
+claims and semantic integrity are revalidated, and each context pack still
+follows the exact public `telos context` owner resolution.
 
 #### Plan
 
@@ -1180,6 +1185,19 @@ declarations.
 | all active scenarios proved, runner blank/whitespace | refuse TELOS_TEST_NOT_FOUND before checks/tests/writes |
 | all active scenarios proved, runner nonblank | admit the later constraint/test gates |
 
+### Filesystem publication threat model
+
+The init and export guarantees cover negligence and ordinary, non-adversarial
+filesystem concurrency. Consistent with the storage model in design §5, they
+do not claim resistance to a same-UID adversary able to observe a CSPRNG
+staging name and substitute a path entry between syscalls.
+
+| Surface | Covered environment | Guarantee |
+|---|---|---|
+| init | negligence and ordinary concurrent filesystem owners | no owner overwritten; failed partial init authenticated and safely resumable |
+| export | negligence and ordinary concurrent filesystem owners | no owner overwritten; no final destination on error |
+| init and export | same-UID adversary substituting a path between syscalls | excluded by the §5 threat model |
+
 ### `init [--agents ...] [--ci github]`
 
 `--ci github` participates in one preflight with every requested agent host.
@@ -1190,12 +1208,13 @@ workflow, and init marker absent or byte-for-byte unchanged.
 
 After preflight, `.telos-init.json` records a versioned transaction, normalized
 agent/CI options, exact core snapshots, and an authenticated phase. Persisted
-CAS transitions authorize core publication and then integrations. Every
-created artifact is fully staged and synced under a random sibling before a
-no-replace publish; user configuration merges are recomputed/compared before
-atomic replacement. No final file is opened with truncate, and a late file,
-directory, live symlink, dangling symlink, parent replacement, or staging-name
-owner is never overwritten or removed.
+CAS transitions authorize core publication and then integrations. Within the
+filesystem publication threat model above, every created artifact is fully
+staged and synced under a random sibling before a no-replace publish; user
+configuration merges are recomputed/compared before atomic replacement. No
+final file is opened with truncate; any late file, directory, live symlink,
+dangling symlink, parent replacement, or staging-name owner introduced by
+ordinary concurrency is preserved rather than overwritten or removed.
 
 If publication fails after the marker exists, a retry is allowed only with
 the same normalized `--agents`/`--ci` options and only while the marker,

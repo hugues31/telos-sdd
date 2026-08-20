@@ -12,6 +12,8 @@ The recorded no-skill pressure baselines were used as the behavioral RED witness
 
 The first executable `agent_init` RED was run before production changes. Result: **11 failed, 2 passed**. Expected failures were Clap rejecting the absent `--agents`, the absent internal guard entry point, missing artifacts, and missing JSON preflight. A second focused RED for structurally invalid hook configuration failed because `telos/` had already been created; the preflight was then extended before rendering.
 
+A later GREEN pressure evaluation found one router rationalization: saying “use challenger/implementer” did not force the router to load and hand off to that skill. A focused assertion was added first and failed on the missing mandatory-handoff language. The canonical router then gained one minimal rule requiring load/invocation before any phase action and forbidding the router from executing Challenge or Implement itself. The challenger GREEN pass exposed a related wording ambiguity (“ends after presenting digest” versus invoking approve); another focused assertion failed first, then the sentence was narrowed to say that invoking approve only opens the native prompt and no continuation is allowed before the human answers.
+
 ## Decisions
 
 - `AgentHost` is a typed Clap `ValueEnum`; `--agents` is comma-delimited and normalized with deterministic set ordering. The successful init envelope remains unchanged.
@@ -28,6 +30,7 @@ The first executable `agent_init` RED was run before production changes. Result:
 - Added opt-in Claude/Codex parsing and hidden hook dispatch in `cli.rs`.
 - Added preflight and requested-host rendering to `init` without changing its result envelope.
 - Added canonical router, challenger, and implementer skills with literal state/error routing, explicit command order, phase boundaries, and stop conditions derived from the pressure failures.
+- Made router-to-phase handoff mandatory without duplicating either phase workflow, and made the challenger stop boundary explicitly follow native prompt triggering rather than approval being granted by the agent.
 - Added Claude settings/skill renderer and Codex skills/AGENTS/hooks/rules renderer.
 - Added a common allow/deny/ask policy covering file tools, `apply_patch`, direct Bash mutations, read-only inspection, and native decision paths.
 - Added `agent_init.rs` coverage for opt-in selection, duplicates, Clap rejection before writes, byte identity/frontmatter, pressure-derived instructions, guard decisions, official host output shapes, Rust rule semantics, merge preservation, owned-entry uniqueness, and syntax/shape preflight safety.
@@ -46,15 +49,21 @@ All shell commands were invoked through `rtk`.
   - `cargo test -p telos --test agent_init` → **14 passed**.
   - `cargo test -p telos --test cli_m1` → **14 passed**.
   - `cargo test --workspace` → **865 passed, 2 ignored**.
+- GREEN-pressure router RED: focused `skill_pressure_rules_pin_order_and_stop_conditions` → **1 failed**, missing `Routing is a mandatory handoff`.
+- GREEN-pressure challenger RED: the same focused test → **1 failed**, missing the native-prompt stop boundary.
+- Follow-up GREEN after both minimal rules: focused pressure test → **1 passed**; complete `agent_init` → **14 passed**.
+- Fresh follow-up gate before commit: `cargo fmt --check` → exit 0; `agent_init` → **14 passed**; `cargo test --workspace` → **865 passed, 2 ignored**; `git diff --check` → exit 0.
 
 ## Commits
 
 - Pre-rebase implementation commit: `3474f6e` (`feat(cli): generate agent host skills and guards`).
 - Rebased implementation commit: `b75ce434dcef7ddc3bf1e0312c62a0b819088c00`.
+- Initial report commit: `b569e70`.
+- GREEN-pressure follow-up commit: `11b70ec` (`fix(skills): require routed phase handoff`).
 
 ## Self-review and residual risks
 
-Auto-review checked the complete diff against the brief, verified `git diff --check`, confirmed the Task 1 `Context` variant/module/dispatch survived the rebase, and found no out-of-scope source changes.
+Auto-review checked the complete diff against the brief, verified `git diff --check`, confirmed the Task 1 `Context` variant/module/dispatch survived the rebase, found no out-of-scope source changes, and confirmed the router fix is one rule rather than a duplicated challenger/implementer workflow.
 
 Residual operational risks are explicit:
 

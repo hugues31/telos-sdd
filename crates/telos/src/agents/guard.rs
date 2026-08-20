@@ -535,40 +535,162 @@ fn directly_mutates_telos(commands: &[SimpleCommand], cwd: &Path, root: &Path) -
 /// the interpreter's eval mode structurally, regardless of source text, while
 /// leaving ordinary `interpreter path/to/script` invocations available.
 fn uses_opaque_inline_eval(program: &str, command: &[String]) -> bool {
-    let args = command
-        .iter()
-        .skip(1)
-        .take_while(|argument| argument.as_str() != "--");
-
-    if versioned_program(program, "python") || versioned_program(program, "pypy") {
-        return args.clone().any(|argument| short_option(argument, 'c'));
-    }
-    if versioned_program(program, "ruby") {
-        return args.clone().any(|argument| short_option(argument, 'e'));
-    }
-    if versioned_program(program, "perl") {
-        return args
-            .clone()
-            .any(|argument| short_option(argument, 'e') || short_option(argument, 'E'));
-    }
-    if matches!(program, "node" | "nodejs") {
-        return args.clone().any(|argument| {
-            short_option(argument, 'e')
-                || short_option(argument, 'p')
-                || long_option(argument, "eval")
-                || long_option(argument, "print")
-        });
-    }
-    if versioned_program(program, "php") {
-        return args
-            .clone()
-            .any(|argument| short_option(argument, 'r') || long_option(argument, "run"));
-    }
-    if versioned_program(program, "lua") || versioned_program(program, "luajit") {
-        return args.clone().any(|argument| short_option(argument, 'e'));
-    }
     if matches!(program, "awk" | "gawk" | "mawk" | "nawk") {
         return awk_uses_inline_program(command);
+    }
+
+    let options = if versioned_program(program, "python") || versioned_program(program, "pypy") {
+        PYTHON_OPTIONS
+    } else if versioned_program(program, "ruby") {
+        RUBY_OPTIONS
+    } else if versioned_program(program, "perl") {
+        PERL_OPTIONS
+    } else if matches!(program, "node" | "nodejs") {
+        NODE_OPTIONS
+    } else if versioned_program(program, "php") {
+        PHP_OPTIONS
+    } else if versioned_program(program, "lua") || versioned_program(program, "luajit") {
+        LUA_OPTIONS
+    } else {
+        return false;
+    };
+    eval_before_interpreter_operand(command, options)
+}
+
+#[derive(Clone, Copy)]
+struct InterpreterOptions {
+    eval_short: &'static [char],
+    eval_long: &'static [&'static str],
+    value_short: &'static [char],
+    attached_value_short: &'static [char],
+    value_long: &'static [&'static str],
+    terminal_short: &'static [char],
+    terminal_long: &'static [&'static str],
+}
+
+const PYTHON_OPTIONS: InterpreterOptions = InterpreterOptions {
+    eval_short: &['c'],
+    eval_long: &[],
+    value_short: &['W', 'X'],
+    attached_value_short: &[],
+    value_long: &["check-hash-based-pycs"],
+    terminal_short: &['m'],
+    terminal_long: &[],
+};
+const RUBY_OPTIONS: InterpreterOptions = InterpreterOptions {
+    eval_short: &['e'],
+    eval_long: &[],
+    value_short: &['C', 'E', 'F', 'I', 'K', 'T', 'r'],
+    attached_value_short: &[],
+    value_long: &[
+        "backtrace-limit",
+        "disable",
+        "dump",
+        "enable",
+        "encoding",
+        "external-encoding",
+        "internal-encoding",
+    ],
+    terminal_short: &['S'],
+    terminal_long: &[],
+};
+const PERL_OPTIONS: InterpreterOptions = InterpreterOptions {
+    eval_short: &['e', 'E'],
+    eval_long: &[],
+    value_short: &['F', 'I', 'M', 'm'],
+    attached_value_short: &['0', 'C', 'D', 'd', 'i', 'l', 'x'],
+    value_long: &[],
+    terminal_short: &[],
+    terminal_long: &[],
+};
+const NODE_OPTIONS: InterpreterOptions = InterpreterOptions {
+    eval_short: &['e', 'p'],
+    eval_long: &["eval", "print"],
+    value_short: &['r'],
+    attached_value_short: &[],
+    value_long: &[
+        "conditions",
+        "env-file",
+        "env-file-if-exists",
+        "import",
+        "inspect-port",
+        "loader",
+        "require",
+        "title",
+    ],
+    terminal_short: &[],
+    terminal_long: &["run"],
+};
+const PHP_OPTIONS: InterpreterOptions = InterpreterOptions {
+    eval_short: &['r'],
+    eval_long: &["run"],
+    value_short: &['c', 'd', 'z'],
+    attached_value_short: &[],
+    value_long: &["define", "php-ini", "zend-extension"],
+    terminal_short: &['f'],
+    terminal_long: &["file"],
+};
+const LUA_OPTIONS: InterpreterOptions = InterpreterOptions {
+    eval_short: &['e'],
+    eval_long: &[],
+    value_short: &['l'],
+    attached_value_short: &[],
+    value_long: &[],
+    terminal_short: &[],
+    terminal_long: &[],
+};
+
+fn eval_before_interpreter_operand(command: &[String], options: InterpreterOptions) -> bool {
+    let mut index = 1;
+    while let Some(argument) = command.get(index).map(String::as_str) {
+        if argument == "--" || argument == "-" || !argument.starts_with('-') {
+            return false;
+        }
+        if argument.starts_with("--") {
+            if options
+                .eval_long
+                .iter()
+                .any(|option| long_option(argument, option))
+            {
+                return true;
+            }
+            if options
+                .terminal_long
+                .iter()
+                .any(|option| long_option(argument, option))
+            {
+                return false;
+            }
+            index += if options
+                .value_long
+                .iter()
+                .any(|option| argument == format!("--{option}"))
+            {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+
+        let mut consumes_next = false;
+        let mut short_options = argument[1..].chars().peekable();
+        while let Some(option) = short_options.next() {
+            if options.eval_short.contains(&option) {
+                return true;
+            }
+            if options.terminal_short.contains(&option) {
+                return false;
+            }
+            if options.value_short.contains(&option) {
+                consumes_next = short_options.peek().is_none();
+                break;
+            }
+            if options.attached_value_short.contains(&option) && short_options.peek().is_some() {
+                break;
+            }
+        }
+        index += if consumes_next { 2 } else { 1 };
     }
     false
 }
@@ -581,13 +703,6 @@ fn versioned_program(program: &str, stem: &str) -> bool {
                     .chars()
                     .all(|character| character.is_ascii_digit() || character == '.')
         })
-}
-
-fn short_option(argument: &str, option: char) -> bool {
-    argument
-        .strip_prefix('-')
-        .filter(|options| !options.starts_with('-'))
-        .is_some_and(|options| options.contains(option))
 }
 
 fn long_option(argument: &str, option: &str) -> bool {

@@ -338,12 +338,18 @@ fn guard_denies_opaque_inline_interpreter_evaluation() {
     let tmp = repo();
     for command in [
         r#"python3 -c "open('telos/bindings.tel','w').write('x')""#,
+        r#"python3 -W ignore -c "open('telos/bindings.tel','w').write('x')""#,
         r#"python -c "print('no visible path')""#,
         r#"ruby -e "File.write('telos/bindings.tel', 'x')""#,
+        r#"ruby -I lib -e "File.write('telos/bindings.tel', 'x')""#,
         r#"perl -e "open(F, '>', 'telos/bindings.tel')""#,
+        r#"perl -I lib -e "open(F, '>', 'telos/bindings.tel')""#,
         r#"node -e "require('fs').writeFileSync('telos/bindings.tel','x')""#,
+        r#"node --require preload.js -e "require('fs').writeFileSync('telos/bindings.tel','x')""#,
         r#"php -r "file_put_contents('telos/bindings.tel', 'x');""#,
+        r#"php -d display_errors=1 -r "file_put_contents('telos/bindings.tel', 'x');""#,
         r#"lua -e "io.open('telos/bindings.tel', 'w')""#,
+        r#"lua -l helper -e "io.open('telos/bindings.tel', 'w')""#,
         r#"awk 'BEGIN { print "x" > "telos/bindings.tel" }'"#,
     ] {
         assert_eq!(
@@ -376,11 +382,21 @@ fn guard_allows_safe_interpreter_script_files() {
     let tmp = repo();
     for command in [
         "python3 scripts/check.py",
+        "python3 scripts/check.py -c src/config.toml",
+        "python3 -m scripts.check -c src/config.toml",
+        "python3 -- scripts/check.py -c src/config.toml",
         "ruby scripts/check.rb",
+        "ruby scripts/check.rb -e src/config.toml",
+        "ruby -S check.rb -e src/config.toml",
         "perl scripts/check.pl",
+        "perl scripts/check.pl -e src/config.toml",
         "node scripts/check.js",
+        "node scripts/check.js -e src/config.toml",
         "php scripts/check.php",
+        "php scripts/check.php -r src/config.toml",
+        "php -f scripts/check.php -r src/config.toml",
         "lua scripts/check.lua",
+        "lua scripts/check.lua -e src/config.toml",
         "awk -f scripts/check.awk src/input.txt",
     ] {
         assert_eq!(

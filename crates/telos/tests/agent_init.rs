@@ -588,10 +588,20 @@ fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() 
         "telos adopt",
         "telos revert",
     ] {
-        assert_eq!(
-            bash_decision(tmp.path(), "codex", command),
-            "allow",
-            "{command}"
+        let out = hook(
+            tmp.path(),
+            "codex",
+            json!({
+                "cwd": tmp.path(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }),
+        );
+        assert!(
+            out["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
         );
         assert_eq!(
             rendered_rule_decision_for_shell(&rules, command),
@@ -777,7 +787,16 @@ fn guard_surfaces_repository_derived_decision_context() {
             .expect("Claude reason")
             .contains(&expected)
     );
-    assert_eq!(codex["hookSpecificOutput"]["permissionDecision"], "allow");
+    assert!(
+        codex["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
+    assert!(
+        codex["hookSpecificOutput"]
+            .get("permissionDecisionReason")
+            .is_none()
+    );
     assert!(
         codex["systemMessage"]
             .as_str()
@@ -825,7 +844,16 @@ fn guard_surfaces_sorted_current_drift_context_for_adopt_and_revert() {
                 .expect("Claude reason")
                 .contains(&expected)
         );
-        assert_eq!(codex["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(
+            codex["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
+        );
+        assert!(
+            codex["hookSpecificOutput"]
+                .get("permissionDecisionReason")
+                .is_none()
+        );
         assert!(
             codex["systemMessage"]
                 .as_str()
@@ -881,6 +909,101 @@ fn guard_denies_unbound_or_noncanonical_human_actions() {
 }
 
 #[test]
+fn codex_guard_uses_undecided_output_for_allowed_commands() {
+    let tmp = repo();
+    telos(tmp.path(), &["init", "--agents", "codex"])
+        .assert()
+        .success();
+    stage_drafted_config_change(tmp.path(), &["codex"]);
+
+    for command in [
+        "telos status --json",
+        "telos change approve CHG-0001",
+        "telos adopt",
+        "telos revert",
+    ] {
+        let out = hook(
+            tmp.path(),
+            "codex",
+            json!({
+                "cwd": tmp.path(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }),
+        );
+        assert!(
+            out["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none(),
+            "{command}"
+        );
+        assert!(
+            out["hookSpecificOutput"]
+                .get("permissionDecisionReason")
+                .is_none(),
+            "{command}"
+        );
+    }
+
+    let denied = hook(
+        tmp.path(),
+        "codex",
+        json!({
+            "cwd": tmp.path(),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {"command": "*** Update File: telos/telos.toml"},
+        }),
+    );
+    assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(
+        denied["hookSpecificOutput"]
+            .get("permissionDecisionReason")
+            .is_some()
+    );
+}
+
+#[test]
+fn guard_denies_alternate_telos_executable_spellings() {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+    stage_drafted_config_change(tmp.path(), &[]);
+
+    for command in [
+        "/absolute/path/to/telos change approve CHG-0001",
+        "./telos change approve CHG-0001",
+        "/absolute/path/to/telos adopt",
+        "./telos adopt",
+        "/absolute/path/to/telos revert",
+        "./telos revert",
+    ] {
+        for host in ["claude", "codex"] {
+            let out = hook(
+                tmp.path(),
+                host,
+                json!({
+                    "cwd": tmp.path(),
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                }),
+            );
+            assert_eq!(
+                out["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{host}: {command}"
+            );
+            assert!(
+                out["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str()
+                    .expect("denial reason")
+                    .contains("direct canonical `telos")
+            );
+        }
+    }
+}
+
+#[test]
 fn claude_asks_for_resolved_human_decisions_without_trusting_descriptions() {
     let tmp = repo();
     telos(tmp.path(), &["init"]).assert().success();
@@ -923,7 +1046,21 @@ fn codex_guard_never_returns_ask_and_rules_own_native_prompts() {
         "telos adopt",
         "telos revert",
     ] {
-        assert_eq!(bash_decision(tmp.path(), "codex", command), "allow");
+        let out = hook(
+            tmp.path(),
+            "codex",
+            json!({
+                "cwd": tmp.path(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }),
+        );
+        assert!(
+            out["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
+        );
     }
 
     let rules = read(tmp.path(), ".codex/rules/telos.rules");

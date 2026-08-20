@@ -84,24 +84,35 @@ pub fn run(host: AgentHost) -> ExitCode {
 }
 
 fn hook_output(host: AgentHost, outcome: GuardDecision) -> Value {
-    let permission = match outcome.decision {
-        Decision::Allow => "allow",
-        Decision::Deny => "deny",
-        Decision::Ask => "ask",
-    };
     let mut output = json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": permission,
-            "permissionDecisionReason": outcome.reason,
         }
     });
 
-    if host == AgentHost::Codex
-        && let Some(context) = outcome.context
-    {
-        output["systemMessage"] = json!(context.text);
-        output["hookSpecificOutput"]["additionalContext"] = json!(context.text);
+    match host {
+        AgentHost::Claude => {
+            let permission = match outcome.decision {
+                Decision::Allow => "allow",
+                Decision::Deny => "deny",
+                Decision::Ask => "ask",
+            };
+            output["hookSpecificOutput"]["permissionDecision"] = json!(permission);
+            output["hookSpecificOutput"]["permissionDecisionReason"] = json!(outcome.reason);
+        }
+        AgentHost::Codex => {
+            // Codex accepts an undecided PreToolUse result, but rejects both
+            // `ask` and `allow`. Static `.rules` own approval prompts, while
+            // explicit denials still need to prevent unsafe mutations.
+            if outcome.decision == Decision::Deny {
+                output["hookSpecificOutput"]["permissionDecision"] = json!("deny");
+                output["hookSpecificOutput"]["permissionDecisionReason"] = json!(outcome.reason);
+            }
+            if let Some(context) = outcome.context {
+                output["systemMessage"] = json!(context.text);
+                output["hookSpecificOutput"]["additionalContext"] = json!(context.text);
+            }
+        }
     }
     output
 }
@@ -929,7 +940,7 @@ fn is_human_action_attempt(command: &SimpleCommand) -> bool {
     command
         .argv
         .first()
-        .is_some_and(|program| program == "telos")
+        .is_some_and(|program| program_name(program) == "telos")
         && (command.argv.windows(2).any(
             |words| matches!(words, [first, second] if first == "change" && second == "approve"),
         ) || command
@@ -999,7 +1010,7 @@ fn deny_opaque_inline_eval() -> GuardDecision {
 fn deny_unbound_action() -> GuardDecision {
     GuardDecision {
         decision: Decision::Deny,
-        reason: "Telos guard could not resolve current decision context; retry a direct canonical Telos command from an initialized repository".into(),
+        reason: "Telos guard could not resolve current decision context; retry the direct canonical `telos ...` command spelling from an initialized repository".into(),
         context: None,
     }
 }

@@ -62,8 +62,16 @@ Adaptations directement induites : couverture status/change-flow à 2/2, graphe 
 - Le test global EditConfig utilise désormais un runner qui journalise les filtres réellement substitués. Trois bindings, dont une cible partagée par deux scénarios, produisent exactement deux lignes distinctes et `tests_run: 2`.
 - Aucun test « propriétaires config multiples » n’a été ajouté : l’API CLI naturelle interdit déjà le second claim. Construire ce cas exige de forger manuellement deux CHG et testerait principalement le contournement du format, alors que la branche défensive reste déterministe dans `approved_config_workspace`.
 
+## Round post-review 2
+
+- Finding : `check_witnesses` classait encore le runner avec `is_empty()` alors que la garde structurelle et les deux exécuteurs utilisaient `trim().is_empty()`.
+- RED public : un changement ajoute SCN-0108 actif, journalise seulement un run vert (preuve présente, witness rouge dû), puis sa config approuvée est révisée vers un runner composé d’espaces. Reconcile renvoyait à tort `TELOS_SCENARIO_RED_EXPECTED` avant la gate runner.
+- Correction minimale : `check_witnesses` emploie désormais `ws.config.test.cmd.trim().is_empty()`. Le même test reçoit exactement `TELOS_TEST_NOT_FOUND`, sans écriture de config, lock ou suppression du CHG.
+- La suite reconcile couvre les trois classifications : runner vide et whitespace comme absents, runner non vide comme présent; elle conserve aussi les branches draft-only whitespace à `tests_run: 0` et active/non vide redevable d’un witness.
+
 ## Vérification fraîche
 
+- Round post-review 2 : `rtk cargo test -p telos --test reconcile` : 49/49; `rtk cargo test -p telos-core` : 648/648; clippy ciblé core/reconcile avec `-D warnings` et rustfmt ciblé : propres.
 - Round post-review 1 : `rtk cargo test -p telos --test reconcile` : 48/48; clippy ciblé `telos-core --all-targets` et `telos --test reconcile` avec `-D warnings` : aucune alerte.
 - `rtk cargo test -p telos-core` : 648 tests, 13 suites, tous verts.
 - Suites spécialisées reconcile/config/rebuild/status_check/view_export : 95 tests, 5 suites, tous verts.

@@ -764,7 +764,7 @@ fn check_witnesses(
     model: &TelosModel,
     change: &Change,
 ) -> Result<Vec<String>, TelosError> {
-    if ws.config.test.cmd.is_empty() {
+    if ws.config.test.cmd.trim().is_empty() {
         return Ok(Vec::new());
     }
 

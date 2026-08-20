@@ -1843,6 +1843,73 @@ fn config_edit_cannot_remove_the_runner_from_a_project_with_active_obligations()
 }
 
 #[test]
+fn whitespace_runner_reports_missing_runner_before_missing_red_witness() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    stage(
+        tmp.path(),
+        &[
+            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+        ],
+        &json!({
+            "scenarios": [
+                {
+                    "id": "SCN-0091",
+                    "title": "a newly issued invoice is open",
+                    "given": [{"notion": "Customer", "fields": {"name": "ACME"}}],
+                    "when": {"notion": "InvoiceIssued", "fields": {}},
+                    "then": ["Invoice.state == open"]
+                },
+                {
+                    "title": "an issued invoice starts with nothing paid",
+                    "given": [{
+                        "notion": "Invoice",
+                        "fields": {"state": "open", "balance": "0.00 EUR"}
+                    }],
+                    "when": {"notion": "InvoiceIssued", "fields": {}},
+                    "then": ["Invoice.state == open"]
+                }
+            ]
+        })
+        .to_string(),
+    );
+    stage_corpus_config(tmp.path(), "git hash-object {filter}");
+    approve(tmp.path());
+    fs::write(tmp.path().join(test_fn("SCN-0108")), "green\n").unwrap();
+    fs::write(
+        tmp.path().join("tests/whitespace_runner.rs"),
+        format!("fn {}() {{}}\n", test_fn("SCN-0108")),
+    )
+    .unwrap();
+    witness(tmp.path(), "SCN-0108", "green");
+    let change_path = tmp.path().join(CHG_0001);
+    let change = fs::read_to_string(&change_path).unwrap();
+    let whitespace = change.replace(
+        "test_cmd   \"git hash-object {filter}\"",
+        "test_cmd   \"   \"",
+    );
+    assert_ne!(whitespace, change, "the staged runner was not found");
+    fs::write(change_path, whitespace).unwrap();
+    approve(tmp.path());
+    let config_before = read(tmp.path(), "telos/telos.toml");
+    let lock_before = read(tmp.path(), LOCK);
+
+    let error = reconcile_err(tmp.path());
+
+    assert_eq!(
+        error,
+        json!({
+            "code": "TELOS_TEST_NOT_FOUND",
+            "message": "no `[test] cmd` is configured in telos/telos.toml",
+            "hint": "set [test] cmd, e.g. `cargo test {filter}`"
+        })
+    );
+    assert_eq!(read(tmp.path(), "telos/telos.toml"), config_before);
+    assert_eq!(read(tmp.path(), LOCK), lock_before);
+    assert!(tmp.path().join(CHG_0001).exists());
+}
+
+#[test]
 fn telos_test_uses_the_approved_config_staged_by_the_owning_change() {
     let tmp = fresh();
     open_change(tmp.path());

@@ -8,7 +8,7 @@
 //!
 //! # The gate order is frozen
 //!
-//! [`reconcile_change`] runs nine gates, in this order, and the order is
+//! [`reconcile_change`] runs ten gates, in this order, and the order is
 //! contract rather than implementation detail -- an agent that fixes what a
 //! reconcile complains about must converge, and it only converges if the
 //! complaint it gets is the *first* thing wrong rather than an arbitrary one:
@@ -37,24 +37,32 @@
 //!    green run asserts are resolved here like any other binding -- and
 //!    every gate below judges the model they are part of (D2).
 //! 6. **Rule 5** (D8). No code without telos, over the *post* model --
-//!    the folded one, so a file bound by a journal line is covered.
-//! 7. **The sealed red witness** (D7), under `policy.tdd = "strict"`: every
+//!    the folded one, so a file bound by a journal line is covered. A path
+//!    some open change's journal has declared in flight -- this change's
+//!    own included -- is exempt: see [`require_no_orphan_code`].
+//! 7. **The sealed code coverage** (D9). Every path the *previous* seal held
+//!    in its `code` table must still be covered by a binding of the folded
+//!    model, unless this delta stages `telos/bindings.tel` itself -- in
+//!    which case the shrink is what was reviewed. See
+//!    [`require_no_coverage_shrink`].
+//! 8. **The sealed red witness** (D7), under `policy.tdd = "strict"`: every
 //!    scenario this delta makes new or different owes an intact red/green
 //!    pair on the bytes its test file has right now. Under `advisory` the
 //!    same verdicts come back as [`ReconcileOutcome::witness_warnings`]
 //!    instead of refusing. See [`check_witnesses`].
-//! 8. **Constraint checks** (D11), for the constraints this delta puts in
+//! 9. **Constraint checks** (D11), for the constraints this delta puts in
 //!    scope.
-//! 9. **Tests** (D10), one run per distinct `proves` target of the impacted
-//!    scenarios -- the folded model's, so a scenario the journal just proved
-//!    is actually run and `tests_run` is honest.
+//! 10. **Tests** (D10), one run per distinct `proves` target of the impacted
+//!     scenarios -- the folded model's, so a scenario the journal just proved
+//!     is actually run and `tests_run` is honest.
 //!
 //! [`reconcile_full`] is the same transaction with the delta taken out
 //! (D12): no change, so no drift, status, digest or accept gate, no journal
-//! to fold and therefore no witness gate, and no ops to apply -- only the
-//! four gates that prove a spec on its own (5, 6, 8, 9) and the seal they
-//! earn. It is the exit from a `telos.lock` merge conflict, and the way a
-//! preexisting spec tree gets its first seal.
+//! to fold and therefore no witness gate, no previous lock and therefore no
+//! coverage gate, and no ops to apply -- only the four gates that prove a
+//! spec on its own (5, 6, 9, 10) and the seal they earn. It is the exit from
+//! a `telos.lock` merge conflict, and the way a preexisting spec tree gets
+//! its first seal.
 //!
 //! # The carry-over: what the seal must not launder
 //!
@@ -95,7 +103,7 @@
 //!
 //! # Atomicity, and what stands in for a rollback (D6)
 //!
-//! Not one byte is written before gate 9 has passed. After that, the write
+//! Not one byte is written before gate 10 has passed. After that, the write
 //! order is fixed: the ops' spec `.tel` files, then `telos/bindings.tel`
 //! re-emitted from the folded model (both through the emitter -- reconcile
 //! never edits text), then `telos.lock`, then the change file's deletion.
@@ -166,20 +174,21 @@ pub struct ReconcileOutcome {
     pub lock: Lock,
 }
 
-/// Applies one approved change: the nine gates of the module docs, then the
+/// Applies one approved change: the ten gates of the module docs, then the
 /// writes of D6.
 ///
 /// `others` is what the change store currently reports open. It is only read
 /// for its `claims`, to decide which drift is somebody's business and which
-/// is nobody's (gate 1) -- whether it happens to include `change` itself
+/// is nobody's (gate 1), and which unbound code file is somebody's declared
+/// work in flight (gate 6) -- whether it happens to include `change` itself
 /// makes no difference, since `change`'s own claims are folded in either
 /// way and an entry for `change` is filtered back out of the *foreign*
 /// claims.
 ///
 /// The `lock` it is handed is the seal this transaction supersedes, and it
-/// is read twice: once by gate 1, to know what has drifted, and once at the
-/// end, to carry over the paths whose drift another open change claims --
-/// see the module docs.
+/// is read three times: by gate 1, to know what has drifted; by gate 7, to
+/// know what code coverage it recorded; and at the end, to carry over the
+/// paths whose drift another open change claims -- see the module docs.
 ///
 /// On `Ok` the spec tree, `telos.lock` and `telos/changes/` have all moved.
 /// On `Err` nothing has been written at all: every gate runs before the
@@ -199,7 +208,8 @@ pub fn reconcile_change(
     let base = parse_base(ws).map_err(diagnostics_to_error)?;
     let folded = fold_journal_bindings(apply_ops_idempotent(base.clone(), &change.ops), change);
     let model = build_model(folded).map_err(diagnostics_to_error)?;
-    require_no_orphan_code(ws, &model)?;
+    require_no_orphan_code(ws, &model, &in_flight_paths(change, others))?;
+    require_no_coverage_shrink(lock, &model, &change.ops)?;
 
     let witness_warnings = check_witnesses(ws, git, &base, &model, change)?;
 
@@ -241,9 +251,15 @@ pub fn reconcile_change(
 /// digest and accept OIDs** (gates 2-4) are properties of a change, and
 /// there is none: open changes are tolerated and left exactly as they are,
 /// files untouched and still open -- a full reseal is about the spec on
-/// disk, not about anybody's staged delta. **The witness** (gate 7) is a
-/// property of a change's *journal*, so it goes the same way, and
-/// `witness_warnings` comes back empty. **The ops** are likewise absent,
+/// disk, not about anybody's staged delta. **The sealed code coverage**
+/// (gate 7) is a comparison against the previous seal, so it goes with the
+/// lock this function does not read: §7.4's total proof of the tree cannot
+/// be qualified by what an older, possibly worthless lock happened to
+/// cover, and rule 5 above already proves that every file the globs match
+/// *is* bound. **The witness** (gate 8) is a property of a change's
+/// *journal*, so it goes the same way, and `witness_warnings` comes back
+/// empty -- and with no change to claim anything in flight, rule 5 exempts
+/// nothing here either. **The ops** are likewise absent,
 /// hence `ops_applied: 0` and a `sealed_by: None` seal: no transaction
 /// produced this state, it was simply found -- and with no ops there is no
 /// journal to fold either, so `bindings.tel` is read as it stands rather
@@ -261,7 +277,7 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
     git.ensure_matches_workspace_root(&ws.repo_root)?;
 
     let model = ws.load_model().map_err(diagnostics_to_error)?;
-    require_no_orphan_code(ws, &model)?;
+    require_no_orphan_code(ws, &model, &BTreeSet::new())?;
 
     let checks_run = run_constraint_checks(ws, &model, None)?;
     let tests_run = run_full_tests(ws)?;
@@ -464,6 +480,43 @@ fn require_accepted_bytes(git: &GitRepo, change: &Change) -> Result<(), TelosErr
 
 // --- gate 6: rule 5, no code without telos ----------------------------------
 
+/// The paths rule 5 must stay silent about because some open change has
+/// already declared them in flight (T5).
+///
+/// Two sources, and the asymmetry between them is the point:
+///
+/// - **This change's journal.** A `bind` line, or a red run's test file, is
+///   a declaration that the path is being worked on *now*. A red run in
+///   particular asserts no binding at all -- that is what red means (D2) --
+///   so its test file is uncovered by construction until the green folds a
+///   `proves` in. Left to rule 5, the only red-only reconcile there is would
+///   answer «orphan, run `telos bind`», which is the wrong next step and
+///   does not converge: the honest verdict is gate 8's, one gate later, and
+///   it names the green that is missing. Rule 5 is not weakened by this,
+///   only deferred -- at the green end state the fold turns the run into a
+///   `proves` and the path is covered by the model itself.
+/// - **Every *other* open change's claims**, ops included. M3's implementing
+///   changes write unbound code files for their whole life, and an unrelated
+///   reconcile cannot be held hostage to that any more than gate 1 can be.
+///   The exemption lasts exactly as long as the claim: abandon that change
+///   and the file is rule 5's business again, on the very next reconcile.
+///
+/// `others` may or may not contain `change` itself; its entry is filtered
+/// out either way, so the answer is the same -- exactly as in [`classify_drift`].
+fn in_flight_paths(change: &Change, others: &[OpenChangeInfo]) -> BTreeSet<RepoPath> {
+    change
+        .journal
+        .iter()
+        .map(|entry| entry.path().clone())
+        .chain(
+            others
+                .iter()
+                .filter(|info| info.id != change.id)
+                .flat_map(|info| info.claims.iter().cloned()),
+        )
+        .collect()
+}
+
 /// D8, over the model the delta describes: a file the `[code]` globs match
 /// must be covered by an `implements` binding, one the `[tests]` globs match
 /// by a `proves` one, independently.
@@ -472,9 +525,18 @@ fn require_accepted_bytes(git: &GitRepo, change: &Change) -> Result<(), TelosErr
 /// recomputed here because the message has to name which of the two families
 /// the file failed -- they have different remedies, and an agent reading
 /// «no `implements` binding» knows what to write next.
-fn require_no_orphan_code(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
+///
+/// `exempt` is what some open change has declared in flight
+/// ([`in_flight_paths`]), and it is empty for a `--full` reseal: `--full`
+/// proves the tree on disk, and a journal nobody has reconciled yet is not
+/// part of that proof (§7.4).
+fn require_no_orphan_code(
+    ws: &Workspace,
+    model: &TelosModel,
+    exempt: &BTreeSet<RepoPath>,
+) -> Result<(), TelosError> {
     let orphans = orphan_code(ws, model)?;
-    let Some(path) = orphans.first() else {
+    let Some(path) = orphans.iter().find(|path| !exempt.contains(*path)) else {
         return Ok(());
     };
 
@@ -502,7 +564,68 @@ fn require_no_orphan_code(ws: &Workspace, model: &TelosModel) -> Result<(), Telo
     ))
 }
 
-// --- gate 7: the sealed red witness (D7) -------------------------------------
+// --- gate 7: the sealed code coverage (D9) -----------------------------------
+
+/// D9, the M2 residual: a reconcile may not shrink the code coverage the
+/// previous seal recorded unless the shrink is what was reviewed.
+///
+/// [`seal`] derives `lock.code` from the model's bindings, so «the previous
+/// lock held this path and the folded model binds nothing that reaches it»
+/// means exactly one thing: the bindings table lost a line between the two
+/// transactions. Nothing writes `bindings.tel` outside a reconcile, and no
+/// journal line may even name it (D2), so that line went missing outside the
+/// protocol -- a hand edit, a bad merge, a truncation. Sealing over it would
+/// launder that loss into a fresh, coherent-looking lock, and the file it
+/// used to cover would silently stop being spec-governed. That is the
+/// ledger attack, and
+/// it is exactly what §4.1's «une édition manuelle = drift» forbids.
+///
+/// The one exemption is a delta that *stages* `telos/bindings.tel` -- the
+/// `accept` op `adopt` produces for it. Then the new table is the delta's
+/// own content, it went through `change diff` and `change approve`, and a
+/// human said yes to this precise shrink. Any op targeting the path counts,
+/// not just `accept`: what matters is that the reviewed delta is about that
+/// file.
+///
+/// Deliberately local and static: the alternative -- deriving the expected
+/// code table from the carried-over lock -- would need `git cat-file` on a
+/// seal that may never have been committed, and would make [`seal`] report
+/// something other than the bytes on disk. Here the two inputs are a lock
+/// already in hand and a model already built, so the gate costs nothing and
+/// says one thing.
+///
+/// The **first** dropped path aborts, in `lock.code`'s own sorted order, for
+/// the convergence reason the whole gate order exists for: a caller fixes
+/// one named thing and re-runs.
+fn require_no_coverage_shrink(
+    previous: &Lock,
+    model: &TelosModel,
+    ops: &[StagedOp],
+) -> Result<(), TelosError> {
+    let bindings_path = RepoPath::new(BINDINGS_PATH);
+    if ops.iter().any(|op| op.target_path() == bindings_path) {
+        return Ok(());
+    }
+
+    let covered: BTreeSet<&RepoPath> = model.bindings.iter().map(Binding::code_path).collect();
+    let Some(dropped) = previous.code.keys().find(|path| !covered.contains(path)) else {
+        return Ok(());
+    };
+
+    Err(TelosError::new(
+        ErrorCode::TelosIntegrityViolation,
+        format!(
+            "sealing would drop `{dropped}` from the code table: no binding covers it \
+             and this change does not stage {BINDINGS_PATH}"
+        ),
+    )
+    .hint(
+        "the bindings shrank outside this change; reconcile or abandon the change that \
+         claims telos/bindings.tel, or restore them with `telos revert`",
+    ))
+}
+
+// --- gate 8: the sealed red witness (D7) -------------------------------------
 
 /// The witness discipline, as a static gate over the journal (D7): every
 /// scenario this delta makes new or different owes an intact red/green pair
@@ -528,7 +651,7 @@ fn require_no_orphan_code(ws: &Workspace, model: &TelosModel) -> Result<(), Telo
 /// # A project with no runner owes no witness
 ///
 /// An empty `[test] cmd` skips this gate outright, exactly as it skips gate
-/// 9 ([`run_tests`], D10's «no runner configured is a project that has not
+/// 10 ([`run_tests`], D10's «no runner configured is a project that has not
 /// wired one up yet, not a broken transaction»). Here the argument is
 /// stronger than a convention: a witness can only be produced by `telos
 /// test`, which *refuses* without a runner (`TELOS_TEST_NOT_FOUND`, «no
@@ -707,7 +830,7 @@ fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet
     scenarios
 }
 
-// --- gate 8: constraint checks (D11) ----------------------------------------
+// --- gate 9: constraint checks (D11) ----------------------------------------
 
 /// Runs the `check` of every global constraint and of every scoped one whose
 /// scope meets an impacted intent, at the repository root.
@@ -771,7 +894,7 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
     .hint("Run the constraint's `check` command directly to see its output.")
 }
 
-// --- gate 9: tests (D10) -----------------------------------------------------
+// --- gate 10: tests (D10) ----------------------------------------------------
 
 /// Runs `[test] cmd` once per distinct `proves` target of the impacted
 /// scenarios, `{filter}` substituted with the target's test name (or, when
@@ -1088,6 +1211,123 @@ mod tests {
 
         assert!(fresh.spec.is_empty(), "the spec table must not hold it");
         assert_eq!(fresh.code[&RepoPath::new(INVOICE)], oid("a"));
+    }
+
+    // --- gate 7: the sealed code coverage (D9) ---------------------------
+
+    fn model_binding(paths: &[&str]) -> TelosModel {
+        TelosModel {
+            bindings: paths
+                .iter()
+                .map(|path| Binding::Implements {
+                    path: RepoPath::new(*path),
+                    intent: Sp {
+                        node: IntentId(42),
+                        span: Span::default(),
+                    },
+                })
+                .collect(),
+            ..TelosModel::default()
+        }
+    }
+
+    fn accept(path: &str) -> StagedOp {
+        StagedOp::Accept {
+            path: RepoPath::new(path),
+            oid: oid("e"),
+        }
+    }
+
+    #[test]
+    fn a_sealed_code_path_no_binding_still_covers_refuses_the_reconcile() {
+        // The ledger attack: `bindings.tel` shrank outside this delta, and
+        // this delta does not stage it -- so nobody reviewed the shrink.
+        let previous = lock_of(&[], &[(CODE, oid("c"))]);
+
+        let error = require_no_coverage_shrink(&previous, &TelosModel::default(), &[])
+            .expect_err("dropping a sealed code path must refuse");
+
+        assert_eq!(error.code, ErrorCode::TelosIntegrityViolation);
+        assert_eq!(
+            error.message,
+            format!(
+                "sealing would drop `{CODE}` from the code table: no binding covers it \
+                 and this change does not stage telos/bindings.tel"
+            )
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some(
+                "the bindings shrank outside this change; reconcile or abandon the change \
+                 that claims telos/bindings.tel, or restore them with `telos revert`"
+            )
+        );
+    }
+
+    #[test]
+    fn a_delta_that_stages_the_bindings_file_may_shrink_the_coverage() {
+        // The `accept` op `adopt` stages *is* the review: a human approved a
+        // delta whose whole content is the new bindings table.
+        let previous = lock_of(&[], &[(CODE, oid("c"))]);
+        let ops = [accept(BINDINGS_PATH), accept("telos/telos.toml")];
+
+        assert!(require_no_coverage_shrink(&previous, &TelosModel::default(), &ops).is_ok());
+    }
+
+    #[test]
+    fn a_sealed_code_path_the_model_still_binds_is_no_shrink() {
+        // What the gate reads is coverage, not bytes: the file may have been
+        // rewritten, moved between tables, or left alone.
+        let previous = lock_of(&[], &[(CODE, oid("c"))]);
+        let ops = [accept("telos/telos.toml")];
+
+        assert!(require_no_coverage_shrink(&previous, &model_binding(&[CODE]), &ops).is_ok());
+    }
+
+    #[test]
+    fn a_coverage_that_grew_is_no_shrink_either() {
+        // Only `previous.code` is the obligation; a binding the delta adds
+        // is nothing to answer for.
+        let previous = lock_of(&[], &[]);
+
+        assert!(require_no_coverage_shrink(&previous, &model_binding(&[CODE]), &[]).is_ok());
+    }
+
+    // --- gate 6's in-flight exemption (T5) --------------------------------
+
+    fn info(id: u32, claims: &[&str]) -> OpenChangeInfo {
+        OpenChangeInfo {
+            id: crate::ids::ChangeId(id),
+            status: ChangeStatus::Implementing,
+            claims: claims.iter().map(|p| RepoPath::new(*p)).collect(),
+            obligations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn in_flight_paths_are_this_journals_and_every_other_changes_claims() {
+        // The op's own target is *not* in flight: this transaction is about
+        // to write it, so rule 5 judges the state it produces.
+        let change = Change {
+            id: crate::ids::ChangeId(1),
+            motivation: "x".to_string(),
+            status: ChangeStatus::Implementing,
+            approved_digest: None,
+            ops: vec![StagedOp::RemoveIntent(IntentId(42))],
+            journal: vec![JournalEntry::Bind {
+                path: RepoPath::new(CODE),
+                intent: IntentId(42),
+            }],
+        };
+
+        let paths = in_flight_paths(
+            &change,
+            &[info(1, &["telos/intents/INT-0099.tel"]), info(2, &[ROGUE])],
+        );
+
+        // Own journal, plus the *foreign* claims -- the caller's own entry
+        // in `others` contributes nothing, exactly as in gate 1.
+        assert_eq!(paths, carried(&[CODE, ROGUE]));
     }
 
     /// `previous` with the fields a carry-over does not touch taken from

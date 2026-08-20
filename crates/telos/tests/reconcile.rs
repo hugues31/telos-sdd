@@ -3,11 +3,12 @@
 //! and the delta-less reseal that proves a whole project from scratch
 //! (`--full`, D12 -- last section).
 //!
-//! The shape of this file follows the frozen gate order of T10 -- drift,
-//! status, digest, accept OIDs, overlay, rule 5, constraint checks, tests,
-//! and only then the writes (D6). Each gate gets a test that proves it
-//! refuses *and* that the refusal cost nothing: no `.tel` file appeared, the
-//! lock did not move, the change file is still there.
+//! The shape of this file follows the frozen gate order of the module docs
+//! -- drift, status, digest, accept OIDs, overlay, rule 5, the sealed code
+//! coverage, the red witness, constraint checks, tests, and only then the
+//! writes (D6). Each gate gets a test that proves it refuses *and* that the
+//! refusal cost nothing: no `.tel` file appeared, the lock did not move, the
+//! change file is still there.
 //!
 //! Two fixtures are used, deliberately: a freshly `init`ed repository (empty
 //! globs, no constraint, no `[test] cmd`) for the pure transaction, and the
@@ -451,7 +452,174 @@ fn reconcile_refuses_code_no_binding_covers() {
     assert!(tmp.path().join(CHG_0001).exists());
 }
 
-// --- gate 7: constraint checks (D11) -----------------------------------------
+/// A new source file no binding covers -- the shape of in-flight work under
+/// the `[code]` globs.
+const IN_FLIGHT: &str = "src/billing/payment.rs";
+
+/// Opens a change on the corpus, stages one `telos` reword of `intent` into
+/// it, approves it, and hands back its id.
+fn open_and_approve_edit(dir: &Path, intent: &str, telos_text: &str) -> String {
+    let id = ok_result(dir, &["change", "open", MOTIVATION, "--json"])["id"]
+        .as_str()
+        .expect("`change open` answers with the allocated id")
+        .to_string();
+    stage(
+        dir,
+        &["edit", "intent", intent, "--change", &id, "--json"],
+        &json!({ "telos": telos_text }).to_string(),
+    );
+    approve_id(dir, &id);
+    id
+}
+
+/// The in-flight exemption: a file another open change has bound in its
+/// journal is somebody's declared work in progress, not an orphan, so an
+/// unrelated reconcile is not held hostage to it.
+///
+/// And the exemption dies with the claim: abandon that change and the very
+/// same file is rule 5's business again, with the frozen wording.
+#[test]
+fn code_another_open_change_claims_is_no_orphan_until_that_change_is_gone() {
+    let tmp = with_fixture();
+
+    // A binds a brand new source file -- no green needed, a `bind` line is
+    // already a claim.
+    let a = open_and_approve_edit(tmp.path(), "INT-0017", "A's reworded telos.");
+    fs::write(tmp.path().join(IN_FLIGHT), "// A's work in progress\n").unwrap();
+    ok_result(tmp.path(), &["bind", IN_FLIGHT, "INT-0017", "--json"]);
+
+    // B is unrelated, and reconciles even though A's file is unbound *here*:
+    // A's journal is not folded into B's model.
+    let b = open_and_approve_edit(tmp.path(), "INT-0042", "B's reworded telos.");
+    assert_eq!(reconcile_id_ok(tmp.path(), &b)["ops_applied"], json!(1));
+    assert!(
+        !read(tmp.path(), LOCK).contains(IN_FLIGHT),
+        "an exempted file is not sealed by the reconcile that tolerated it"
+    );
+
+    ok_result(tmp.path(), &["change", "abandon", &a, "--json"]);
+    let c = open_and_approve_edit(tmp.path(), "INT-0017", "C's reworded telos.");
+
+    assert_eq!(
+        reconcile_id_err(tmp.path(), &c),
+        json!({
+            "code": "TELOS_ORPHAN_CODE",
+            "message": format!(
+                "`{IN_FLIGHT}` matches the [code] globs but no `implements` binding covers it"
+            ),
+            "hint": ORPHAN_HINT
+        })
+    );
+}
+
+// --- gate 7: the sealed code coverage (D9) -----------------------------------
+
+/// The frozen `TELOS_INTEGRITY_VIOLATION` hint of Annex F, gate 7's row.
+const COVERAGE_HINT: &str = "the bindings shrank outside this change; reconcile or abandon the change that claims telos/bindings.tel, or restore them with `telos revert`";
+
+/// Hand-edits the corpus into the ledger attack's starting position: the
+/// `implements` line dropped from `bindings.tel`, and the `[code]` globs
+/// emptied so that rule 5 has nothing left to say about the file that just
+/// lost its binding. Both are sealed spec files, so both are drift.
+fn stage_the_ledger_attack(dir: &Path) {
+    let bindings = read(dir, BINDINGS);
+    let kept: String = bindings
+        .lines()
+        .filter(|line| !line.starts_with("implements"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_ne!(
+        kept, bindings,
+        "the corpus no longer ships an `implements` line to drop"
+    );
+    fs::write(dir.join(BINDINGS), kept).unwrap();
+
+    let toml = read(dir, "telos/telos.toml");
+    let emptied = toml.replace("globs = [\"src/**/*.rs\"]", "globs = []");
+    assert_ne!(emptied, toml, "the corpus no longer ships the [code] globs");
+    fs::write(dir.join("telos/telos.toml"), emptied).unwrap();
+}
+
+/// The attack, captured: the hand-edits adopted into change A (two `accept`
+/// ops, one of them on `telos/bindings.tel`), and an unrelated change B
+/// approved next to it.
+fn ledger_attack() -> (tempfile::TempDir, String, String) {
+    let tmp = with_fixture();
+    stage_the_ledger_attack(tmp.path());
+
+    let adopted = ok_result(tmp.path(), &["adopt", "--json"]);
+    assert_eq!(
+        adopted["ops"],
+        json!(2),
+        "adopt must capture both hand-edits: {adopted}"
+    );
+    let a = adopted["change"]
+        .as_str()
+        .expect("`adopt` answers with the change that captured the drift")
+        .to_string();
+
+    let b = open_and_approve_edit(tmp.path(), "INT-0017", "B's reworded telos.");
+    (tmp, a, b)
+}
+
+/// D9, the M2 residual: B never touched the bindings, but sealing its delta
+/// would quietly drop a code path the previous seal held -- so it is refused,
+/// with the frozen wording naming the path.
+#[test]
+fn reconcile_refuses_a_shrink_of_the_sealed_code_coverage() {
+    let (tmp, _a, b) = ledger_attack();
+
+    assert_eq!(
+        reconcile_id_err(tmp.path(), &b),
+        json!({
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": "sealing would drop `src/billing/invoice.rs` from the code table: \
+                        no binding covers it and this change does not stage telos/bindings.tel",
+            "hint": COVERAGE_HINT
+        })
+    );
+    assert!(
+        read(tmp.path(), LOCK).contains("src/billing/invoice.rs"),
+        "a refused reconcile must not move the seal"
+    );
+}
+
+/// The other half: the change that *stages* `telos/bindings.tel` is the one
+/// that was reviewed for the shrink, so it goes through -- and B, whose
+/// refusal was about a coverage nobody had approved dropping, goes through
+/// right after it.
+#[test]
+fn the_change_that_stages_the_bindings_file_may_shrink_the_coverage() {
+    let (tmp, a, b) = ledger_attack();
+
+    approve_id(tmp.path(), &a);
+    assert_eq!(reconcile_id_ok(tmp.path(), &a)["ops_applied"], json!(2));
+
+    let lock = read(tmp.path(), LOCK);
+    assert!(
+        !lock.contains("src/billing/invoice.rs"),
+        "the reviewed shrink must really drop the path:\n{lock}"
+    );
+    assert_eq!(reconcile_id_ok(tmp.path(), &b)["ops_applied"], json!(1));
+}
+
+/// §7.4: `--full` is total proof of the tree on disk and reads no previous
+/// lock at all, so there is no coverage to compare against and nothing for
+/// this gate to refuse -- on the very tree that refuses B.
+#[test]
+fn a_full_reseal_is_exempt_from_the_coverage_gate() {
+    let (tmp, _a, _b) = ledger_attack();
+
+    assert_eq!(reconcile_full_ok(tmp.path())["full"], json!(true));
+
+    let lock = read(tmp.path(), LOCK);
+    assert!(
+        !lock.contains("src/billing/invoice.rs"),
+        "a full reseal seals the tree as it stands:\n{lock}"
+    );
+}
+
+// --- gate 9: constraint checks (D11) -----------------------------------------
 
 /// A constraint staged by this very change is in scope for its own reconcile:
 /// the check runs, fails, and names both the constraint and the command.
@@ -502,7 +670,7 @@ fn a_failing_constraint_check_refuses_the_reconcile_until_it_passes() {
     );
 }
 
-// --- gate 8: tests (D10) ------------------------------------------------------
+// --- gate 10: tests (D10) -----------------------------------------------------
 
 /// `{filter}` is substituted with the `proves` binding's test *name*, one
 /// invocation per distinct `TestRef` of the impacted scenarios. The corpus'
@@ -1099,7 +1267,7 @@ fn a_reconcile_with_no_journal_leaves_the_bindings_file_byte_identical() {
     assert_eq!(read(tmp.path(), BINDINGS), before);
 }
 
-// --- gate 7: the sealed red witness (D7), strict ----------------------------
+// --- gate 8: the sealed red witness (D7), strict ----------------------------
 
 /// The scenario is brand new and nothing was ever run for it: the frozen
 /// `TELOS_SCENARIO_RED_EXPECTED` of Annex F, and not one byte written.
@@ -1131,6 +1299,43 @@ fn a_scenario_with_no_run_at_all_is_refused_and_nothing_is_written() {
         "a refused reconcile must write nothing"
     );
     assert_eq!(read(tmp.path(), BINDINGS), "", "and derive nothing");
+}
+
+/// The red-only state, and the convergent answer it must get.
+///
+/// A change that has journalled a red run and nothing else owns a test file
+/// under the `[tests]` globs that no `proves` binding covers yet -- a red run
+/// asserts none, by construction (D2). Rule 5 would call that an orphan and
+/// send the caller off to `telos bind`, which is exactly the wrong next step:
+/// the honest verdict is the witness gate's, one gate later, and it names the
+/// green that is missing. So a path this change's own journal declares is
+/// exempt from rule 5, and the refusal is the one the caller can act on.
+#[test]
+fn a_red_only_change_is_told_about_its_missing_green_not_about_an_orphan() {
+    let tmp = configured("strict");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+    write_test_file(tmp.path(), &[feature.scenario()], "");
+    witness(tmp.path(), feature.scenario(), "red");
+
+    let error = reconcile_id_err(tmp.path(), &feature.change);
+
+    assert_eq!(
+        error,
+        json!({
+            "code": "TELOS_SCENARIO_RED_EXPECTED",
+            "message": format!(
+                "scenario {} has a red witness but no green run on the same bytes",
+                feature.scenario()
+            ),
+            "hint": format!(
+                "run `telos test {}` again once the implementation is in place",
+                feature.scenario()
+            ),
+        })
+    );
 }
 
 /// A red witness with no green on the same bytes -- and, with it, the

@@ -235,7 +235,60 @@ fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosErr
     Err(io_error("publish", destination, error))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+/// Windows' `MoveFileW` has no replacement flag: it fails when the target
+/// exists, so the staging directory cannot overwrite a concurrent owner.
+#[cfg(windows)]
+fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosError> {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, GetLastError};
+    use windows_sys::Win32::Storage::FileSystem::MoveFileW;
+
+    let staging = wide_path(staging)?;
+    let destination_wide = wide_path(destination)?;
+
+    // SAFETY: the buffers are NUL-terminated UTF-16 paths and remain alive
+    // for the duration of the Win32 call.
+    let result = unsafe { MoveFileW(staging.as_ptr(), destination_wide.as_ptr()) };
+    if result != 0 {
+        return Ok(());
+    }
+
+    // SAFETY: `MoveFileW` just failed on this thread, so the Win32 last-error
+    // value identifies that call's failure.
+    let error = unsafe { GetLastError() };
+    if error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS {
+        return Err(existing_destination(destination));
+    }
+    Err(io_error(
+        "publish",
+        destination,
+        io::Error::from_raw_os_error(error as i32),
+    ))
+}
+
+#[cfg(windows)]
+fn wide_path(path: &Path) -> Result<Vec<u16>, TelosError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    nul_terminated_wide(path.as_os_str().encode_wide(), path)
+}
+
+#[cfg(any(windows, test))]
+fn nul_terminated_wide(
+    units: impl IntoIterator<Item = u16>,
+    path: &Path,
+) -> Result<Vec<u16>, TelosError> {
+    let mut wide: Vec<u16> = units.into_iter().collect();
+    if wide.contains(&0) {
+        return Err(TelosError::new(
+            ErrorCode::TelosInternal,
+            format!("export path contains a NUL code unit: {}", path.display()),
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios", windows)))]
 fn publish_no_replace(_staging: &Path, destination: &Path) -> Result<(), TelosError> {
     Err(TelosError::new(
         ErrorCode::TelosInternal,
@@ -294,7 +347,10 @@ mod tests {
     use telos_core::state::{ProjectStateKind, StateReport};
     use telos_core::workspace::Workspace;
 
-    use super::{export_with_writer, export_with_writer_and_before_publish, staging_prefix};
+    use super::{
+        export_with_writer, export_with_writer_and_before_publish, nul_terminated_wide,
+        staging_prefix,
+    };
     use crate::view::model::ViewSnapshot;
 
     fn fixture_snapshot() -> ViewSnapshot {
@@ -383,5 +439,14 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(&prefix)
         }));
+    }
+
+    #[test]
+    fn utf16_paths_reject_an_embedded_nul_before_the_terminator() {
+        let path = PathBuf::from("site");
+        let error = nul_terminated_wide([b's' as u16, 0, b't' as u16], &path).unwrap_err();
+
+        assert_eq!(error.code, telos_core::error::ErrorCode::TelosInternal);
+        assert_eq!(error.message, "export path contains a NUL code unit: site");
     }
 }

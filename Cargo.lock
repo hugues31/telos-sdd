@@ -488,6 +488,7 @@ dependencies = [
  "serde_json",
  "telos-core",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

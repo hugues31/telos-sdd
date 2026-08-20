@@ -1,7 +1,7 @@
 use super::assets::SKILLS;
 use super::{
-    PlannedWrite, merge_command_hook, merge_owned_block, planned_json, planned_text,
-    read_optional_object, read_optional_text,
+    PlannedWrite, merge_command_hook, merge_owned_block, planned_json, planned_merged_text,
+    planned_text, read_optional_object, read_optional_text,
 };
 use crate::safe_fs::SafeRoot;
 use telos_core::error::TelosError;
@@ -50,22 +50,35 @@ pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
     }
 
     let agents = read_optional_text(root, "AGENTS.md")?;
-    writes.push(planned_text(
-        root,
+    writes.push(planned_merged_text(
         "AGENTS.md",
-        merge_owned_block(&agents, START, END, AGENTS_BLOCK),
-    )?);
+        merge_owned_block(&agents.value, START, END, AGENTS_BLOCK),
+        agents.initial,
+    ));
 
     let mut hooks = read_optional_object(root, ".codex/hooks.json")?;
     merge_command_hook(
-        &mut hooks,
+        &mut hooks.value,
         super::matcher(super::AgentHost::Codex),
         super::guard_command(super::AgentHost::Codex),
     )?;
-    writes.push(planned_json(root, ".codex/hooks.json", &hooks)?);
+    writes.push(planned_json(
+        ".codex/hooks.json",
+        &hooks.value,
+        hooks.initial,
+    )?);
 
     let rules = read_optional_text(root, ".codex/rules/telos.rules")?;
-    let merged = merge_owned_block(&rules, "# telos-sdd:start", "# telos-sdd:end", RULES_BLOCK);
-    writes.push(planned_text(root, ".codex/rules/telos.rules", merged)?);
+    let merged = merge_owned_block(
+        &rules.value,
+        "# telos-sdd:start",
+        "# telos-sdd:end",
+        RULES_BLOCK,
+    );
+    writes.push(planned_merged_text(
+        ".codex/rules/telos.rules",
+        merged,
+        rules.initial,
+    ));
     Ok(writes)
 }

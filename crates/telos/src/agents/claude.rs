@@ -15,10 +15,14 @@ pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
 
     let mut settings = read_optional_object(root, ".claude/settings.json")?;
     merge_command_hook(
-        &mut settings,
+        &mut settings.value,
         super::matcher(super::AgentHost::Claude),
         super::guard_command(super::AgentHost::Claude),
     )?;
-    writes.push(planned_json(root, ".claude/settings.json", &settings)?);
+    writes.push(planned_json(
+        ".claude/settings.json",
+        &settings.value,
+        settings.initial,
+    )?);
     Ok(writes)
 }

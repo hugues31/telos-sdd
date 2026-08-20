@@ -6,13 +6,13 @@ mod codex;
 pub mod guard;
 
 use std::collections::BTreeSet;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 use telos_core::error::{ErrorCode, TelosError};
 
-use crate::safe_fs::SafeRoot;
+use crate::safe_fs::{SafeRoot, StagedWrite};
 
 pub use telos_core::config::AgentHost;
 
@@ -40,10 +40,28 @@ pub fn normalize(hosts: &[AgentHost]) -> Vec<AgentHost> {
         .collect()
 }
 
-/// A deterministic write whose complete bytes were built before init writes.
-pub(crate) struct PlannedWrite {
-    relative: PathBuf,
-    bytes: Vec<u8>,
+/// A deterministic publication whose complete bytes and initial target state
+/// were captured before init writes.
+pub(crate) enum PlannedWrite {
+    CreateOnly {
+        relative: PathBuf,
+        bytes: Vec<u8>,
+    },
+    MergeExisting {
+        relative: PathBuf,
+        expected: Vec<u8>,
+        bytes: Vec<u8>,
+    },
+}
+
+pub(crate) enum InitialState {
+    Absent,
+    Existing(Vec<u8>),
+}
+
+pub(crate) struct ReadValue<T> {
+    pub(crate) value: T,
+    initial: InitialState,
 }
 
 /// All requested host artifacts, including parsed and merged user content.
@@ -76,19 +94,104 @@ fn render_with_before_write<H>(plan: &InstallPlan, hook: H) -> Result<(), TelosE
 where
     H: FnOnce() -> io::Result<()>,
 {
-    let mut hook = Some(hook);
+    render_with_hooks(
+        plan,
+        |_relative, file, bytes| file.write_all(bytes),
+        hook,
+        |_relative| Ok(()),
+    )
+}
+
+fn render_with_hooks<S, V, P>(
+    plan: &InstallPlan,
+    mut stage_write: S,
+    before_validation: V,
+    mut before_publish: P,
+) -> Result<(), TelosError>
+where
+    S: FnMut(&Path, &mut cap_std::fs::File, &[u8]) -> io::Result<()>,
+    V: FnOnce() -> io::Result<()>,
+    P: FnMut(&Path) -> io::Result<()>,
+{
+    let mut staged = Vec::with_capacity(plan.writes.len());
     for write in &plan.writes {
-        if let Some(hook) = hook.take() {
-            plan.root
-                .write_cached_with(&write.relative, &write.bytes, hook)
-                .map_err(|error| safe_error("write", &write.relative, error))?;
-        } else {
-            plan.root
-                .write_cached(&write.relative, &write.bytes)
-                .map_err(|error| safe_error("write", &write.relative, error))?;
+        let relative = write.relative();
+        let staged_write = plan
+            .root
+            .stage_with(relative, write.bytes(), |file, bytes| {
+                stage_write(relative, file, bytes)
+            })
+            .map_err(|error| safe_error("stage", relative, error))?;
+        staged.push(staged_write);
+    }
+
+    before_validation().map_err(|error| {
+        io_error(
+            "prepare publication for",
+            Path::new("agent host artifacts"),
+            error,
+        )
+    })?;
+
+    // This global compare happens before the first final name is published.
+    // It closes deterministic preflight-to-render changes without exposing a
+    // partially staged file at any owned target.
+    for (write, staging) in plan.writes.iter().zip(&staged) {
+        validate_expected(&plan.root, write, staging)?;
+    }
+
+    for (write, staging) in plan.writes.iter().zip(staged) {
+        let relative = write.relative();
+        before_publish(relative)
+            .map_err(|error| io_error("prepare publication for", relative, error))?;
+        // Recheck merges next to their replacement too. There is no portable
+        // filesystem-wide multi-file CAS; the seal's non-adversarial model
+        // therefore permits only the syscall-sized check/rename gap here.
+        validate_expected(&plan.root, write, &staging)?;
+        match write {
+            PlannedWrite::CreateOnly { .. } => staging.publish_create_only(),
+            PlannedWrite::MergeExisting { .. } => staging.publish_replace(),
         }
+        .map_err(|error| safe_error("publish", relative, error))?;
     }
     Ok(())
+}
+
+fn validate_expected(
+    root: &SafeRoot,
+    write: &PlannedWrite,
+    staging: &StagedWrite,
+) -> Result<(), TelosError> {
+    let relative = write.relative();
+    staging
+        .validate_parent_path(root)
+        .map_err(|error| safe_error("inspect", relative, error))?;
+    let actual = staging
+        .read_target()
+        .map_err(|error| safe_error("inspect", relative, error))?;
+    let matches = match write {
+        PlannedWrite::CreateOnly { .. } => actual.is_none(),
+        PlannedWrite::MergeExisting { expected, .. } => actual.as_deref() == Some(expected),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(target_collision(relative))
+    }
+}
+
+impl PlannedWrite {
+    fn relative(&self) -> &Path {
+        match self {
+            Self::CreateOnly { relative, .. } | Self::MergeExisting { relative, .. } => relative,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::CreateOnly { bytes, .. } | Self::MergeExisting { bytes, .. } => bytes,
+        }
+    }
 }
 
 pub(crate) fn planned_text(
@@ -100,9 +203,9 @@ pub(crate) fn planned_text(
 }
 
 pub(crate) fn planned_json(
-    root: &SafeRoot,
     relative: &str,
     object: &Map<String, Value>,
+    initial: InitialState,
 ) -> Result<PlannedWrite, TelosError> {
     let mut bytes = serde_json::to_vec_pretty(object).map_err(|error| {
         TelosError::new(
@@ -111,7 +214,7 @@ pub(crate) fn planned_json(
         )
     })?;
     bytes.push(b'\n');
-    planned_bytes(root, relative, bytes)
+    Ok(planned_from_initial(relative, bytes, initial))
 }
 
 fn planned_bytes(
@@ -120,9 +223,43 @@ fn planned_bytes(
     bytes: Vec<u8>,
 ) -> Result<PlannedWrite, TelosError> {
     let relative = PathBuf::from(relative);
-    root.validate_target(&relative)
-        .map_err(|error| safe_error("inspect", &relative, error))?;
-    Ok(PlannedWrite { relative, bytes })
+    let initial = initial_state(root, &relative)?;
+    Ok(planned_from_initial_path(relative, bytes, initial))
+}
+
+pub(crate) fn planned_merged_text(
+    relative: &str,
+    content: String,
+    initial: InitialState,
+) -> PlannedWrite {
+    planned_from_initial(relative, content.into_bytes(), initial)
+}
+
+fn planned_from_initial(relative: &str, bytes: Vec<u8>, initial: InitialState) -> PlannedWrite {
+    planned_from_initial_path(PathBuf::from(relative), bytes, initial)
+}
+
+fn planned_from_initial_path(
+    relative: PathBuf,
+    bytes: Vec<u8>,
+    initial: InitialState,
+) -> PlannedWrite {
+    match initial {
+        InitialState::Absent => PlannedWrite::CreateOnly { relative, bytes },
+        InitialState::Existing(expected) => PlannedWrite::MergeExisting {
+            relative,
+            expected,
+            bytes,
+        },
+    }
+}
+
+fn initial_state(root: &SafeRoot, relative: &Path) -> Result<InitialState, TelosError> {
+    match root.read_optional(relative) {
+        Ok(Some(bytes)) => Ok(InitialState::Existing(bytes)),
+        Ok(None) => Ok(InitialState::Absent),
+        Err(error) => Err(safe_error("inspect", relative, error)),
+    }
 }
 
 fn target_collision(path: &Path) -> TelosError {
@@ -137,17 +274,25 @@ fn target_collision(path: &Path) -> TelosError {
 pub(crate) fn read_optional_object(
     root: &SafeRoot,
     relative: &str,
-) -> Result<Map<String, Value>, TelosError> {
+) -> Result<ReadValue<Map<String, Value>>, TelosError> {
     let path = Path::new(relative);
-    let content = match root.read_optional(path) {
-        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|error| {
-            io_error(
-                "read",
-                path,
-                io::Error::new(io::ErrorKind::InvalidData, error),
-            )
-        })?,
-        Ok(None) => return Ok(Map::new()),
+    let (content, initial) = match root.read_optional(path) {
+        Ok(Some(bytes)) => {
+            let content = String::from_utf8(bytes.clone()).map_err(|error| {
+                io_error(
+                    "read",
+                    path,
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?;
+            (content, InitialState::Existing(bytes))
+        }
+        Ok(None) => {
+            return Ok(ReadValue {
+                value: Map::new(),
+                initial: InitialState::Absent,
+            });
+        }
         Err(error) => return Err(safe_error("read", path, error)),
     };
     let value: Value = serde_json::from_str(&content).map_err(|e| {
@@ -157,13 +302,14 @@ pub(crate) fn read_optional_object(
         )
         .hint("repair the existing host configuration and rerun `telos init`")
     })?;
-    value.as_object().cloned().ok_or_else(|| {
+    let value = value.as_object().cloned().ok_or_else(|| {
         TelosError::new(
             ErrorCode::TelosParseError,
             format!("{}: expected a JSON object", path.display()),
         )
         .hint("repair the existing host configuration and rerun `telos init`")
-    })
+    })?;
+    Ok(ReadValue { value, initial })
 }
 
 /// Installs exactly one owned command hook while retaining every unrelated
@@ -257,17 +403,29 @@ pub(crate) fn merge_owned_block(existing: &str, start: &str, end: &str, block: &
     merged
 }
 
-pub(crate) fn read_optional_text(root: &SafeRoot, relative: &str) -> Result<String, TelosError> {
+pub(crate) fn read_optional_text(
+    root: &SafeRoot,
+    relative: &str,
+) -> Result<ReadValue<String>, TelosError> {
     let path = Path::new(relative);
     match root.read_optional(path) {
-        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|error| {
-            io_error(
-                "read",
-                path,
-                io::Error::new(io::ErrorKind::InvalidData, error),
-            )
+        Ok(Some(bytes)) => {
+            let value = String::from_utf8(bytes.clone()).map_err(|error| {
+                io_error(
+                    "read",
+                    path,
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?;
+            Ok(ReadValue {
+                value,
+                initial: InitialState::Existing(bytes),
+            })
+        }
+        Ok(None) => Ok(ReadValue {
+            value: String::new(),
+            initial: InitialState::Absent,
         }),
-        Ok(None) => Ok(String::new()),
         Err(error) => Err(safe_error("read", path, error)),
     }
 }
@@ -296,9 +454,165 @@ fn display(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{self, Write};
+    use std::path::Path;
     use std::sync::{Arc, Barrier};
 
-    use super::{AgentHost, ErrorCode, preflight, render_with_before_write};
+    use super::{AgentHost, ErrorCode, preflight, render_with_before_write, render_with_hooks};
+
+    fn assert_no_staging_files(root: &Path) {
+        fn walk(directory: &Path) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                assert!(
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".telos-staging-"),
+                    "leaked staging entry {}",
+                    path.display()
+                );
+                if metadata.is_dir() {
+                    walk(&path);
+                }
+            }
+        }
+
+        walk(root);
+    }
+
+    #[test]
+    fn late_regular_owners_of_absent_agent_targets_are_never_overwritten() {
+        for (host, target) in [
+            (AgentHost::Claude, ".claude/skills/telos/SKILL.md"),
+            (AgentHost::Claude, ".claude/settings.json"),
+            (AgentHost::Codex, ".agents/skills/telos/SKILL.md"),
+            (AgentHost::Codex, "AGENTS.md"),
+            (AgentHost::Codex, ".codex/hooks.json"),
+            (AgentHost::Codex, ".codex/rules/telos.rules"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let plan = preflight(tmp.path(), &[host]).unwrap();
+            let target_path = tmp.path().join(target);
+
+            let error = render_with_hooks(
+                &plan,
+                |_relative, file, bytes| file.write_all(bytes),
+                || Ok(()),
+                |relative| {
+                    if relative == Path::new(target) {
+                        fs::create_dir_all(target_path.parent().unwrap())?;
+                        fs::write(&target_path, b"late owner\n")?;
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid, "{target}");
+            assert_eq!(fs::read(&target_path).unwrap(), b"late owner\n", "{target}");
+            assert_no_staging_files(tmp.path());
+        }
+    }
+
+    #[test]
+    fn existing_merge_targets_changed_after_preflight_abort_before_publication() {
+        for (host, target, initial, changed) in [
+            (
+                AgentHost::Claude,
+                ".claude/settings.json",
+                b"{\"env\":{\"OWNER\":\"initial\"}}\n".as_slice(),
+                b"{\"env\":{\"OWNER\":\"changed\"}}\n".as_slice(),
+            ),
+            (
+                AgentHost::Codex,
+                "AGENTS.md",
+                b"# initial owner\n".as_slice(),
+                b"# changed owner\n".as_slice(),
+            ),
+            (
+                AgentHost::Codex,
+                ".codex/hooks.json",
+                b"{\"description\":\"initial owner\"}\n".as_slice(),
+                b"{\"description\":\"changed owner\"}\n".as_slice(),
+            ),
+            (
+                AgentHost::Codex,
+                ".codex/rules/telos.rules",
+                b"# initial owner\n".as_slice(),
+                b"# changed owner\n".as_slice(),
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let target_path = tmp.path().join(target);
+            fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+            fs::write(&target_path, initial).unwrap();
+            let plan = preflight(tmp.path(), &[host]).unwrap();
+
+            let error = render_with_hooks(
+                &plan,
+                |_relative, file, bytes| file.write_all(bytes),
+                || fs::write(&target_path, changed),
+                |_relative| Ok(()),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid, "{target}");
+            assert_eq!(fs::read(&target_path).unwrap(), changed, "{target}");
+            for generated in [
+                ".claude/skills/telos/SKILL.md",
+                ".agents/skills/telos/SKILL.md",
+                ".codex/hooks.json",
+            ] {
+                if generated != target {
+                    assert!(
+                        !tmp.path().join(generated).is_file(),
+                        "{target}: {generated}"
+                    );
+                }
+            }
+            assert_no_staging_files(tmp.path());
+        }
+    }
+
+    #[test]
+    fn partial_staging_write_publishes_no_agent_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), b"original owner\n").unwrap();
+        let plan = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+
+        let error = render_with_hooks(
+            &plan,
+            |relative, file, bytes| {
+                if relative == Path::new("AGENTS.md") {
+                    file.write_all(&bytes[..bytes.len() / 2])?;
+                    return Err(io::Error::other("forced partial staging write"));
+                }
+                file.write_all(bytes)
+            },
+            || Ok(()),
+            |_relative| Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("forced partial staging write"));
+        for target in [
+            ".agents/skills/telos/SKILL.md",
+            ".agents/skills/telos-challenger/SKILL.md",
+            ".agents/skills/telos-implementer/SKILL.md",
+            ".codex/hooks.json",
+            ".codex/rules/telos.rules",
+        ] {
+            assert!(!tmp.path().join(target).is_file(), "published {target}");
+        }
+        assert_eq!(
+            fs::read(tmp.path().join("AGENTS.md")).unwrap(),
+            b"original owner\n"
+        );
+        assert_no_staging_files(tmp.path());
+    }
 
     #[cfg(unix)]
     #[test]

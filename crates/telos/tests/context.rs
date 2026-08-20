@@ -233,6 +233,69 @@ fn stage_new_scenario(dir: &std::path::Path) -> String {
         .to_owned()
 }
 
+fn open_change_with_id(dir: &std::path::Path, motivation: &str) -> String {
+    let out = telos(dir, &["change", "open", motivation, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "opening a change failed: {out:?}");
+    json_stdout(&out)["result"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn seed_draft_intent(dir: &std::path::Path) -> String {
+    let change = open_change_with_id(dir, "Seed a removable draft");
+    let out = telos(dir, &["add", "intent", "--change", &change, "--json"])
+        .write_stdin(
+            json!({
+                "title": "A removable draft",
+                "status": "draft",
+                "telos": "Exercise removal from a final overlay.",
+                "statement": {"template": "ubiquitous", "action": "record the draft"},
+                "refines": [],
+                "requires": [],
+                "excludes": [],
+                "scenarios": [],
+            })
+            .to_string(),
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "seeding the draft failed: {out:?}");
+    let id = json_stdout(&out)["result"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let out = telos(dir, &["change", "approve", &change, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "approving the seed failed: {out:?}");
+    let out = telos(dir, &["change", "reconcile", &change, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "reconciling the seed failed: {out:?}");
+    id
+}
+
+fn assert_unknown_context(dir: &std::path::Path, target: &str, kind: &str) {
+    let out = telos(dir, &["context", target, "--json"]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "context {target} unexpectedly succeeded: {out:?}"
+    );
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["ok"], json!(false));
+    assert_eq!(envelope["command"], json!("context"));
+    assert_eq!(envelope["result"], serde_json::Value::Null);
+    assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert_eq!(
+        envelope["error"]["message"],
+        json!(format!("unknown {kind} `{target}`"))
+    );
+}
+
 #[test]
 fn rejects_non_intent_and_non_scenario_targets() {
     let tmp = with_fixture();
@@ -319,6 +382,52 @@ fn context_reads_an_added_intent_from_its_owning_post_overlay_model() {
             .contains("Invoices can be cancelled"),
         "context did not read the staged intent: {pack}"
     );
+}
+
+#[test]
+fn context_rejects_an_intent_removed_after_an_edit_in_its_owning_change() {
+    let tmp = with_fixture();
+    let intent = seed_draft_intent(tmp.path());
+    let change = open_change_with_id(tmp.path(), "Edit then remove the draft");
+
+    let out = telos(
+        tmp.path(),
+        &["edit", "intent", &intent, "--change", &change, "--json"],
+    )
+    .write_stdin(r#"{"telos":"This edit is superseded by removal."}"#)
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "editing the draft failed: {out:?}");
+    let out = telos(
+        tmp.path(),
+        &["remove", "intent", &intent, "--change", &change, "--json"],
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "removing the draft failed: {out:?}");
+
+    assert_unknown_context(tmp.path(), &intent, "intent");
+}
+
+#[test]
+fn context_rejects_a_scenario_removed_from_an_edited_intent() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    let out = telos(
+        tmp.path(),
+        &[
+            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+        ],
+    )
+    .write_stdin(r#"{"status":"draft","scenarios":[]}"#)
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "removing the scenario failed: {out:?}"
+    );
+
+    assert_unknown_context(tmp.path(), "SCN-0091", "scenario");
 }
 
 #[test]

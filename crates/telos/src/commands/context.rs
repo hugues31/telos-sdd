@@ -70,16 +70,16 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
     let project = project(ctx)?;
     let disk = project.ws.load_model().map_err(diagnostics_to_error)?;
 
-    let intent_id = resolve_intent(&project, &disk, &entity_ref)?;
+    let (intent_id, owner) = resolve_intent(&project, &disk, &entity_ref)?;
 
-    let (model, change) = match owner_of(&project.parsed, intent_id) {
+    let (model, change) = match owner {
         Some(change) => (post_model(&project, change)?, Some(change.id)),
         None => (disk, None),
     };
     let intent = model
         .intents
         .get(&intent_id)
-        .expect("an id `resolve_intent` returned always names an intent of its own pack's model");
+        .ok_or_else(|| unknown_intent(&project, &model, intent_id))?;
 
     let pack = build_pack(&model, intent, change);
     Ok(Outcome {
@@ -111,29 +111,43 @@ fn not_applicable() -> TelosError {
 /// disk model, and every open change's staged intents -- an intent or
 /// scenario `add`/`edit intent` allocated a moment ago is precisely the one
 /// `telos context` is about to be pointed at.
-fn resolve_intent(
-    project: &Project,
+fn resolve_intent<'a>(
+    project: &'a Project,
     disk: &TelosModel,
     entity_ref: &EntityRef,
-) -> Result<IntentId, TelosError> {
+) -> Result<(IntentId, Option<&'a Change>), TelosError> {
     match entity_ref {
         EntityRef::Intent(id) => {
-            if disk.intents.contains_key(id) || staged_anywhere(project, *id) {
-                Ok(*id)
-            } else {
-                Err(unknown_intent(project, disk, *id))
+            if let Some(change) = change_touching_intent(&project.parsed, *id) {
+                if staged_intents(change).contains_key(id) {
+                    return Ok((*id, Some(change)));
+                }
+                return Err(unknown_intent(project, disk, *id));
             }
+            disk.intents
+                .contains_key(id)
+                .then_some((*id, None))
+                .ok_or_else(|| unknown_intent(project, disk, *id))
         }
         EntityRef::Scenario(id) => {
             if let Some((intent, _)) = disk.scenario(*id) {
-                return Ok(intent.id);
+                if let Some(change) = change_touching_intent(&project.parsed, intent.id) {
+                    if staged_intents(change)
+                        .get(&intent.id)
+                        .is_some_and(|staged| staged.scenarios.iter().any(|s| s.id == *id))
+                    {
+                        return Ok((intent.id, Some(change)));
+                    }
+                    return Err(unknown_scenario(project, disk, *id));
+                }
+                return Ok((intent.id, None));
             }
             for change in &project.parsed {
                 if let Some(intent) = staged_intents(change)
                     .values()
                     .find(|intent| intent.scenarios.iter().any(|s| s.id == *id))
                 {
-                    return Ok(intent.id);
+                    return Ok((intent.id, Some(change)));
                 }
             }
             Err(unknown_scenario(project, disk, *id))
@@ -164,13 +178,6 @@ fn staged_intents(change: &Change) -> std::collections::BTreeMap<IntentId, Inten
         }
     }
     intents
-}
-
-fn staged_anywhere(project: &Project, id: IntentId) -> bool {
-    project
-        .parsed
-        .iter()
-        .any(|change| staged_intents(change).contains_key(&id))
 }
 
 /// Every intent id the disk model or any open change's overlay declares --
@@ -210,18 +217,17 @@ fn unknown_scenario(project: &Project, disk: &TelosModel, id: ScenarioId) -> Tel
 
 // --- which model the pack is built on (D10) ---------------------------------
 
-/// D5's ownership rule, restated once more (`bind.rs`, `test.rs` each keep
-/// their own copy too, for the same reason: each reads it for a different
-/// purpose, and a shared helper would tie three unrelated commands to one
-/// signature). Only `Add`/`EditIntent` can make a change the intent's
-/// *owner* -- a change whose only op on the intent *removes* it is never
-/// treated as the change to read the pack from; there is nothing being
-/// implemented there for `context` to hand an agent.
-fn owner_of(changes: &[Change], intent: IntentId) -> Option<&Change> {
+/// The change that controls an intent's effective existence. A final
+/// `RemoveIntent` masks the disk copy just as an `AddIntent` or `EditIntent`
+/// replaces it, so resolution must select this change before it falls back to
+/// the sealed model.
+fn change_touching_intent(changes: &[Change], intent: IntentId) -> Option<&Change> {
     changes.iter().find(|change| {
-        change.ops.iter().any(
-            |op| matches!(op, StagedOp::AddIntent(i) | StagedOp::EditIntent(i) if i.id == intent),
-        )
+        change.ops.iter().any(|op| match op {
+            StagedOp::AddIntent(staged) | StagedOp::EditIntent(staged) => staged.id == intent,
+            StagedOp::RemoveIntent(id) => *id == intent,
+            _ => false,
+        })
     })
 }
 

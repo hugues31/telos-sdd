@@ -455,6 +455,9 @@ fn reapproving_after_implementation_refreshes_the_digest_but_keeps_implementing(
         fresh["next_actions"],
         json!(["telos change reconcile CHG-0001"])
     );
+
+    let reconciled = run_json(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"]);
+    assert_eq!(reconciled["ok"], json!(true), "{reconciled}");
 }
 
 // --- the gates, in the order D6 freezes them --------------------------------

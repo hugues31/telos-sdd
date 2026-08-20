@@ -7,6 +7,7 @@
 //! than a command that answers with something meaningless.
 
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -56,6 +57,15 @@ enum Command {
     },
     /// Report the project's state against its seal and its spec coverage.
     Status,
+    /// View Telos documentation locally or export a sealed static snapshot.
+    View {
+        /// Loopback server port (implemented in the next milestone).
+        #[arg(long, default_value_t = 3000, conflicts_with = "export")]
+        port: u16,
+        /// Write a self-contained static site to this new directory.
+        #[arg(long, value_name = "DIR")]
+        export: Option<PathBuf>,
+    },
     /// Parse the spec and check its integrity.
     Check {
         /// Also require the project to be sealed and unmodified.
@@ -168,6 +178,7 @@ impl Command {
             Command::AgentGuard { .. } => "agent-guard",
             Command::Config { .. } => "config",
             Command::Status => "status",
+            Command::View { .. } => "view",
             Command::Check { .. } => "check",
             Command::Show { .. } => "show",
             Command::List { .. } => "list",
@@ -229,6 +240,14 @@ fn execute(command: &Command) -> CmdResult {
             commands::config::run(&ctx()?, change.as_deref(), payload.as_deref())
         }
         Command::Status => commands::status::run(&ctx()?),
+        Command::View {
+            export: Some(destination),
+            ..
+        } => commands::view::run(&ctx()?, destination),
+        Command::View { export: None, .. } => Err(TelosError::new(
+            ErrorCode::TelosInternal,
+            "the live view server is not available yet; pass `--export DIR`",
+        )),
         Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
         Command::Show { target } => commands::show::run(&ctx()?, target),
         Command::List { kind } => commands::list::run(&ctx()?, *kind),

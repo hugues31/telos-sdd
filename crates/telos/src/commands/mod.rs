@@ -20,6 +20,7 @@ pub mod revert;
 pub mod show;
 pub mod status;
 pub mod test;
+pub mod view;
 
 use std::path::PathBuf;
 

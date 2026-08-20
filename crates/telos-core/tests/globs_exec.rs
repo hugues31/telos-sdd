@@ -95,6 +95,25 @@ fn glob_matches_result_is_sorted() {
 }
 
 #[test]
+fn glob_matches_a_bare_star_does_not_cross_a_path_separator() {
+    // Regression: globset's *default* (`Glob::new`, no `literal_separator`)
+    // lets a bare `*` match across `/`, so `"src/*.rs"` would also match a
+    // nested `"src/sub/deep.rs"`. `build_glob_set` must build with
+    // `literal_separator(true)` so `*` stays within one path component,
+    // matching gitignore-style semantics; `**` is the one that spans
+    // directories.
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(tmp.path(), "src/top.rs");
+    write_file(tmp.path(), "src/sub/deep.rs");
+
+    let star = glob_matches(tmp.path(), &["src/*.rs".to_string()]).unwrap();
+    assert_eq!(star, repo_paths(&["src/top.rs"]));
+
+    let globstar = glob_matches(tmp.path(), &["src/**/*.rs".to_string()]).unwrap();
+    assert_eq!(globstar, repo_paths(&["src/sub/deep.rs", "src/top.rs"]));
+}
+
+#[test]
 fn glob_matches_skips_dot_git_directories_entirely() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "src/a.rs");

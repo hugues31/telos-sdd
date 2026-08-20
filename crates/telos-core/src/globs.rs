@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::error::{ErrorCode, TelosError};
 use crate::ids::RepoPath;
@@ -87,15 +87,24 @@ pub fn orphan_code(ws: &Workspace, model: &TelosModel) -> Result<Vec<RepoPath>, 
 
 /// Compiles `patterns` into one [`GlobSet`]. A pattern `globset` rejects is
 /// reported as `TelosParseError`, naming it.
+///
+/// Every pattern is built with `literal_separator(true)`: `globset`'s
+/// *default* (`Glob::new`) lets a bare `*` cross a `/`, so `"src/*.rs"`
+/// would also match `"src/deeply/nested/file.rs"` -- the opposite of the
+/// gitignore-style semantics this engine wants, where `*` stays within one
+/// path component and only `**` spans directories.
 fn build_glob_set(patterns: &[String]) -> Result<GlobSet, TelosError> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        let glob = Glob::new(pattern).map_err(|e| {
-            TelosError::new(
-                ErrorCode::TelosParseError,
-                format!("invalid glob pattern `{pattern}`: {e}"),
-            )
-        })?;
+        let glob = GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| {
+                TelosError::new(
+                    ErrorCode::TelosParseError,
+                    format!("invalid glob pattern `{pattern}`: {e}"),
+                )
+            })?;
         builder.add(glob);
     }
     builder.build().map_err(|e| {

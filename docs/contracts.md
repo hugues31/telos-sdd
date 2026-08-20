@@ -6,8 +6,10 @@ shape, the 17 error codes and their canonical hints, the `status --json`
 schema, `check`'s semantics, and — as of M2 — the whole change/transaction
 surface (`show`, `change open|list|abandon|diff|approve|reconcile`,
 `add`/`edit`/`remove`, `adopt`, `revert`), including the JSON payload
-schemas `add`/`edit` read from stdin. Nothing here is prose to be summarized
-by an LLM — it is matched on literally (`error.code ==
+schemas `add`/`edit` read from stdin. The 0.7 freeze also includes typed
+configuration, live/export view, rebuild planning/progress, and resumable
+GitHub CI initialization. Nothing here is prose to be summarized by an LLM —
+it is matched on literally (`error.code ==
 "TELOS_DRIFT_DETECTED"`, `result.state == "drifted"`), the same way a
 compiler's exit code is.
 
@@ -32,9 +34,9 @@ five keys, in this order:
 
 - `ok` — `true` on success, `false` on failure.
 - `command` — the invoked command's name: one of `"version"`, `"init"`,
-  `"status"`, `"check"`, `"show"`, `"list"`, `"query"`, `"impact"`,
-  `"context"`, `"change"`, `"add"`, `"edit"`, `"remove"`, `"adopt"`,
-  `"revert"`, `"test"`, `"bind"`. All six
+  `"config"`, `"status"`, `"view"`, `"check"`, `"show"`, `"list"`,
+  `"query"`, `"impact"`, `"context"`, `"rebuild"`, `"change"`, `"add"`,
+  `"edit"`, `"remove"`, `"adopt"`, `"revert"`, `"test"`, `"bind"`. All six
   `change` subcommands (`open|list|abandon|diff|approve|reconcile`) answer
   under the single `"change"` value — the envelope names the command a
   caller invoked, and `telos change …` is one command with subcommands, the
@@ -50,6 +52,37 @@ five keys, in this order:
 No key is ever omitted (no `skip_serializing_if` anywhere in the
 implementation): a consumer indexes every key unconditionally instead of
 checking whether it is there.
+
+### Canonical `command` values
+
+This table is the complete public set in 0.7. Subcommands share their parent
+value: both `rebuild plan` and `rebuild status` answer as `"rebuild"`, and
+every `change` subcommand answers as `"change"`. The hidden `agent-guard`
+host-hook entry point is intentionally excluded: it is not a public JSON
+envelope surface.
+
+| Value | CLI surface |
+|---|---|
+| `version` | `telos version` |
+| `init` | `telos init` |
+| `config` | `telos config [--change CHG-NNNN]` |
+| `status` | `telos status` |
+| `view` | `telos view [--port N] [--export DIR]` |
+| `check` | `telos check [--sealed]` |
+| `show` | `telos show` |
+| `list` | `telos list` |
+| `query` | `telos query` |
+| `impact` | `telos impact` |
+| `context` | `telos context` |
+| `rebuild` | `telos rebuild plan` or `telos rebuild status` |
+| `change` | `telos change ...` |
+| `add` | `telos add` |
+| `edit` | `telos edit` |
+| `remove` | `telos remove` |
+| `adopt` | `telos adopt` |
+| `revert` | `telos revert` |
+| `test` | `telos test` |
+| `bind` | `telos bind` |
 
 ### The error body
 
@@ -161,14 +194,13 @@ null hint.
 ## `status`
 
 Reports the project's state against its seal, and a coverage snapshot of the
-spec. Always answers — `status` reports, it never fails because the *spec*
-happens to be drifted or unparseable. It can still fail on three things
-outside that: `TELOS_NOT_INITIALIZED` (no workspace, or a workspace with no
-lock), `TELOS_GIT_ERROR` (not a git repository), and `TELOS_PARSE_ERROR` —
-a `telos.lock` that is not readable TOML, most commonly one a `git merge`
-left conflicted. The lock is what `status` compares *against*, so an
-unreadable one leaves nothing to answer with; the exit is
-`telos change reconcile --full`, which never reads the lock at all.
+spec. `status` still reports drift and parse-broken drift rather than failing
+on those conditions. It can fail on `TELOS_NOT_INITIALIZED` (no workspace or
+lock), `TELOS_GIT_ERROR`, an unreadable lock, invalid sealed configuration,
+or a lock produced by an older Telos whose otherwise matching model is not
+sealable. In that last coherent-only case it returns the same first
+`TELOS_INTEGRITY_VIOLATION`/`TELOS_TEST_NOT_FOUND` as current reconcile; it
+never labels active scenarios without proofs and a runner `coherent`.
 
 Order of operations, and why it matters: [`compute_state`] runs *first* and
 never parses a `.tel` file — it only compares git blob OIDs — so a corrupted
@@ -278,11 +310,14 @@ Order:
    unclaimed drift outranks an open change — because a project that is
    somehow both reports the more urgent diagnosis: drift is damage, an open
    change is only work in progress.
-5. Only once state is confirmed `coherent`: parse + integrity, exactly as
-   without `--sealed`.
+5. Only once state is confirmed `coherent`: validate configuration, parse +
+   integrity exactly as without `--sealed`, then require sealable structure:
+   each active scenario has at least one `proves` and any active obligation
+   has a nonblank runner.
 
-`telos init --ci github` wires `telos check --sealed` into CI: a merge to
-main requires a coherent, integral, sealed state.
+`telos init --ci github` wires `telos check --sealed` into CI. GitHub makes
+that job merge-required only when repository branch protection separately
+requires job `sealed`.
 
 ## `show <id|Name>`
 
@@ -534,9 +569,9 @@ project from the files on disk and reseals it regardless of what
 construction for an id invocation (clap refuses an id and `--full`
 together). `next_actions`: always `["telos status"]`.
 
-#### The ten gates, frozen order
+#### The eleven gates, frozen order
 
-`change reconcile <id>` runs ten gates, in this order, before writing a
+`change reconcile <id>` runs eleven gates, in this order, before writing a
 single byte — an agent fixing what reconcile complains about must converge,
 which only happens if the complaint is always the *first* thing wrong:
 
@@ -546,14 +581,15 @@ which only happens if the complaint is always the *first* thing wrong:
 | 2 | status (`approved`/`implementing` only) | `TELOS_CHANGE_STATE_INVALID`, `` change CHG-0001 is not approved; approve it first `` |
 | 3 | digest (the delta must still be the one that was approved) | `TELOS_APPROVAL_STALE`, `` re-approve with `telos change approve CHG-0001` `` |
 | 4 | accepted bytes (each `accept` op's blob OID must still match) | `TELOS_INTEGRITY_VIOLATION`, `` `<path>` changed since it was accepted `` / `` `<path>` was accepted but no longer exists `` |
-| 5 | the overlay (the delta's post-spec must parse and resolve — rules 1/2/3/4 of §3.3) | whatever `TELOS_*` diagnostic the semantic pass raises first (same collapsing rule as `check`) |
+| 5 | effective configuration validation, then the overlay (the delta's post-spec must parse and resolve — rules 1/2/3/4 of §3.3) | invalid globs/configuration use their exact `TELOS_PARSE_ERROR` or `TELOS_INTEGRITY_VIOLATION`; otherwise whatever `TELOS_*` diagnostic the semantic pass raises first |
 | 6 | rule 5, no code without telos, over the post model | `TELOS_ORPHAN_CODE` |
 | 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages `telos/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`, `` sealing would drop `<path>` from the code table: no binding covers it and this change does not stage telos/bindings.tel ``; hint `` the bindings shrank outside this change; reconcile or abandon the change that claims telos/bindings.tel, or restore them with `telos revert` `` |
 | 8 | sealed red/green witness for every new or changed scenario | `TELOS_SCENARIO_RED_EXPECTED` or `TELOS_TEST_SEALED` under strict policy; warnings under advisory policy |
-| 9 | constraint checks, for the constraints this delta puts in scope | `TELOS_CONSTRAINT_FAILED` |
-| 10 | tests, one run per distinct `proves` target of the impacted scenarios | `TELOS_INTEGRITY_VIOLATION`, `` the test run for `<target>` failed `` |
+| 9 | sealable structure: every active scenario has at least one `proves`, and any active obligation has a nonblank runner | `TELOS_INTEGRITY_VIOLATION`, ``active scenario SCN-NNNN has no `proves` binding``; then `TELOS_TEST_NOT_FOUND` for no runner |
+| 10 | constraint checks, for the constraints this delta puts in scope | `TELOS_CONSTRAINT_FAILED` |
+| 11 | tests, one run per distinct `proves` target of the impacted scenarios | `TELOS_INTEGRITY_VIOLATION`, `` the test run for `<target>` failed `` |
 
-Only once gate 10 passes does anything reach disk: the spec `.tel` files
+Only once gate 11 passes does anything reach disk: the spec `.tel` files
 (through the emitter, in staged order), then the canonical folded
 `telos/bindings.tel`, then `telos.lock`, then the change file's deletion.
 `counters.toml` is never touched by reconcile — every id a transaction spends
@@ -564,7 +600,7 @@ Gate 8 is strict versus advisory: `policy.tdd = "strict"` refuses on the
 first missing red witness, missing green witness, or changed witness bytes;
 `"advisory"` reconciles and returns each same frozen verdict in
 `result.witness_warnings`. Both `approved` and `implementing` changes owe
-reconciliation, and a journal is folded into the post-model before gates 5–10.
+reconciliation, and a journal is folded into the post-model before gates 5–11.
 
 #### The carry-over: drift another open change claims is never sealed here
 
@@ -595,12 +631,12 @@ Structurally skips gates 1–4, 7, and 8 rather than passing them vacuously: the
 no change, so no drift/status/digest/accept-OID judgement to make, and
 `--full` deliberately never reads `telos.lock` at all — a lock left
 conflicted by a merge, or a spec tree that was never sealed, is exactly what
-it exists for. Gates 5, 6, 9, and 10 run, but adapted to having no delta to filter
-against: 5's overlay is simply `load_model` of the spec on disk; 6 (orphan
-code) is unchanged; 9 runs the `check` of **every** constraint that has one,
-not just the ones a delta puts in scope (there is no delta to narrow
-against); 10 is **one** invocation of `[test] cmd` with `{filter}` substituted
-empty — the whole suite, once, rather than one run per impacted scenario.
+it exists for. Gates 5, 6, 9, 10, and 11 run, but adapted to having no delta
+to filter against: configuration validates before 5's disk model; 6 (orphan
+code) is unchanged; 9 requires all active proof bindings and a runner; 10
+runs the `check` of **every** constraint that has one. Gate 11 invokes
+`[test] cmd` with `{filter}` empty exactly once when the model contains at
+least one active intent, and zero times when all intents are draft/deprecated.
 `result.ops_applied` is always `0` under `--full` (no ops — nothing was
 staged, the state was simply found and re-proved). Open changes are
 tolerated and left untouched (their files, still open), and the seal this
@@ -789,7 +825,7 @@ silently restoring nothing.
 `result`: `{"restored": ["telos/notions/Invoice.tel"], "deleted": []}`.
 `next_actions`: `["telos status"]`.
 
-## `init [--agents claude,codex]`
+## `init [--agents claude,codex] [--ci github]`
 
 `init` still creates and seals the empty Telos tree. With `--agents`, its
 comma-delimited host list is sorted and deduplicated, then it installs the
@@ -831,3 +867,440 @@ contract rejects `permissionDecision: "ask"`; it does accept top-level
 Codex guard returns no unsupported `ask`: it sends the same repository-derived
 context through those supported fields and the generated static `.rules` entry
 owns the native `prompt`.
+
+## Configuration and M4–M5 surfaces (0.7)
+
+The sections above remain the frozen M1–M3 contract. This section adds the
+configuration, view, rebuild, and GitHub CI surfaces shipped by M4–M5. Every
+success and failure still uses the same five-key envelope; the parent command,
+not its mode or subcommand, is the `command` value.
+
+### M4–M5 result schema registry
+
+Object keys listed here are exact and always present for the named success
+mode. Their nested schemas are defined below.
+
+| Invocation | command | Exact result keys |
+|---|---|---|
+| `config` | `config` | `code, tests, test, policy, agents` |
+| `config --change` | `config` | `change, path, config` |
+| `view --export` | `view` | `mode, destination, files` |
+| `view --port` | `view` | `mode, url` |
+| `rebuild plan` | `rebuild` | `steps` |
+| `rebuild status` | `rebuild` | `scenarios_green, scenarios_total, scenarios` |
+| `init --ci github` | `init` | `root, sealed` |
+
+### State admission matrix
+
+`Spec-only` means a parseable `telos/telos.toml` and validated Telos model
+with no `telos.lock`. For `config read`, only the TOML must be readable; no
+model or lock is loaded. A `changing` project with any unclaimed drift is
+classified and handled as `drifted`, so damage wins over work in progress.
+The `coherent` column assumes valid configuration and sealable structure;
+sealed consumers refuse legacy locks that fail either predicate.
+
+| Surface | Spec-only | coherent | changing | drifted |
+|---|---|---|---|---|
+| `config read` | allow | allow | allow | allow |
+| `config write` | refuse: TELOS_NOT_INITIALIZED | n/a: needs an open change | allow: target open/drafted | refuse: TELOS_DRIFT_DETECTED |
+| `view live` | refuse: TELOS_NOT_INITIALIZED | allow | allow | allow |
+| `view export` | refuse: TELOS_NOT_INITIALIZED | allow | refuse: TELOS_CHANGE_STATE_INVALID | refuse: TELOS_DRIFT_DETECTED |
+| `rebuild plan` | allow | allow | allow | refuse: TELOS_DRIFT_DETECTED |
+| `rebuild status` | allow | allow | allow | refuse: TELOS_DRIFT_DETECTED |
+
+### `config [--change CHG-NNNN]`
+
+Read mode starts as soon as `telos/telos.toml` can be discovered and parsed.
+It deliberately does not require or inspect `telos.lock`, project state, the
+model, or open changes. Human output is the canonical TOML in section order
+`code`, `tests`, `test`, `policy`, `agents`, with exactly one final newline.
+JSON output is the complete typed configuration:
+
+```json
+{
+  "ok": true,
+  "command": "config",
+  "result": {
+    "code": {"globs": ["src/**/*.rs"]},
+    "tests": {"globs": ["tests/**/*.rs"]},
+    "test": {"cmd": "cargo test {filter}"},
+    "policy": {"tdd": "strict"},
+    "agents": {"hosts": ["claude", "codex"]}
+  },
+  "error": null,
+  "next_actions": []
+}
+```
+
+Write mode reads one complete JSON object of that same nested shape from
+stdin. Partial objects, unknown fields, an invalid `policy.tdd`, or an invalid
+glob are `TELOS_PARSE_ERROR`. `policy.tdd` is exactly `"strict"` or
+`"advisory"`. The normalized, sorted/deduplicated `agents.hosts` must equal
+the current value: `telos config` preserves this `init --agents` project
+metadata and never installs or deletes host artifacts.
+
+The target change must exist and be `open` or `drafted`. The ordinary
+unclaimed-drift and one-file/one-change claim gates run first. Success stages
+one typed `edit config` operation claiming `telos/telos.toml`, moves an open
+change to `drafted`, and changes the operation digest. It does not write the
+base configuration. Only approval followed by reconcile writes the canonical
+TOML and seals it; the effective staged config already controls that
+reconcile's globs, test runner, and TDD policy.
+
+```json
+{
+  "ok": true,
+  "command": "config",
+  "result": {
+    "change": "CHG-0001",
+    "path": "telos/telos.toml",
+    "config": {
+      "code": {"globs": ["src/**/*.rs"]},
+      "tests": {"globs": ["tests/**/*.rs"]},
+      "test": {"cmd": "cargo test {filter}"},
+      "policy": {"tdd": "advisory"},
+      "agents": {"hosts": ["claude", "codex"]}
+    }
+  },
+  "error": null,
+  "next_actions": ["telos change diff CHG-0001"]
+}
+```
+
+### Configuration validation matrix
+
+The same canonical validators are authoritative at every trust boundary; a
+hand-edited change cannot bypass the CLI staging checks.
+
+| Boundary | Glob validation | agents.hosts validation | Refusal effect |
+|---|---|---|---|
+| `config --change` | compile with runtime walker semantics | normalized value must equal base | config/change/counters unchanged |
+| `change approve` | revalidate effective config | revalidate transition from base | change stays drafted and gains no digest |
+| change approve again | revalidate effective config | revalidate transition from base | existing approved digest is preserved |
+| ordinary change reconcile | revalidate before checks/tests/writes | revalidate transition from base | config/change/lock unchanged |
+| `change reconcile --full` | validate persisted config | validate normalized persisted value | no checks/tests/write before refusal |
+| sealed consumers | validate persisted config | validate normalized persisted value | never report/publish an invalid coherent seal |
+
+An approved, fresh `EditConfig` is global: its effective runner, globs, and
+policy are used by reconcile, `telos test`, and `rebuild status`. At ordinary
+reconcile it marks every intent and scenario impacted, so all applicable
+constraint checks and every distinct `proves` target run once before the
+configuration is written. A configuration edit cannot narrow its own proof
+or constraint gate.
+
+### `view [--port N] [--export DIR]`
+
+Live and export consume the same immutable `ViewSnapshot` and the same HTML
+renderer. The five page families and their exact mappings are:
+
+### Live routes and export files
+
+| Page | Live route | Export file |
+|---|---|---|
+| Dashboard | `/` | `index.html` |
+| Graph | `/graph` | `graph.html` |
+| Intent | `/intent/INT-NNNN` | `intents/INT-NNNN.html` |
+| Glossary | `/glossary` | `glossary.html` |
+| Coverage | `/coverage` | `coverage.html` |
+
+The Dashboard exposes state, open changes, and drift; Graph exposes all eight
+relation filters; Intent exposes canonical statement, scenarios, applicable
+constraints, `implements`, and `proves`; Glossary exposes notions; Coverage
+is the intent × scenario × test matrix. All pages cross-link through the
+mapping above. An unknown or malformed intent route is HTTP 404.
+
+#### Static export
+
+`telos view --export DIR` admits only `coherent` with valid sealed
+configuration and sealable active proof/runner structure. Drift returns the existing
+`TELOS_DRIFT_DETECTED` form. Open changes return
+`TELOS_CHANGE_STATE_INVALID`, message `open changes; reconcile or abandon
+them`, hint ``run `telos change list```; drift is checked first. The
+destination must be valid UTF-8 and must not exist in any form, including a
+file, directory, live symlink, or dangling symlink. A collision returns
+`TELOS_CHANGE_STATE_INVALID`, message ``export destination `DIR` already
+exists``, hint `choose an empty path that does not exist`.
+
+Every page is rendered in memory before publication. The exporter writes a
+unique sibling staging directory and promotes it atomically with a
+no-replacement primitive; a late owner is never overwritten, and failures do
+not publish a partial destination. `files` is sorted by repository-style `/`
+path. HTML is byte-deterministic and self-contained: CSS and JavaScript are
+inline and no page contains an external URL, font, image, stylesheet, script,
+or network request.
+
+### Export publication matrix
+
+| Condition | Final destination | Existing owner | Staging cleanup |
+|---|---|---|---|
+| success | one complete atomic publication | n/a | staging consumed |
+| destination exists before start | absent from Telos | preserved byte-for-byte | no staging published |
+| destination appears before publish | absent from Telos | preserved byte-for-byte | authenticated Telos staging cleaned |
+| render/write/finalization error | absent | n/a | authenticated Telos staging cleaned |
+| staging identity mismatch | absent | replacement preserved | foreign/replaced entry never cleaned |
+
+```json
+{
+  "ok": true,
+  "command": "view",
+  "result": {
+    "mode": "export",
+    "destination": "site",
+    "files": [
+      "coverage.html",
+      "glossary.html",
+      "graph.html",
+      "index.html",
+      "intents/INT-0017.html",
+      "intents/INT-0042.html"
+    ]
+  },
+  "error": null,
+  "next_actions": []
+}
+```
+
+#### Live lifecycle
+
+`telos view` is a foreground, read-only local server. It requires a readable
+lock and model but admits `coherent`, `changing`, and `drifted`. It binds only
+IPv4 loopback `127.0.0.1`; `--port 0` asks the OS for a free port. After the
+listener, watcher, and initial snapshot are ready, it prints and flushes
+exactly one startup line, then serves until Ctrl-C or process termination:
+
+```json
+{"ok":true,"command":"view","result":{"mode":"server","url":"http://127.0.0.1:<allocated>/"},"error":null,"next_actions":[]}
+```
+
+The recursive watcher ignores `.git`, `target`, `.superpowers`, and exporter
+staging paths. It coalesces bursts, rebuilds the complete state/model off the
+read lock, and atomically replaces the snapshot only after successful
+validation. An invalid edit retains the last good pages and adds an escaped
+reload-error banner; a later valid reload clears it. Watcher errors are
+reported in the banner rather than terminating the server. Serving and
+reloading never write project or Telos bytes.
+
+### `rebuild plan|status`
+
+Both subcommands are read-only, have `command: "rebuild"`, make no LLM call,
+and never generate application code. They alone admit spec-only mode. If a
+lock entry exists, it must be readable and the project may be `coherent` or
+`changing`; `drifted` returns `TELOS_DRIFT_DETECTED`. In `changing`, every
+parseable open change is folded by ascending change ID, journals are folded,
+cross-change claims and semantic integrity are revalidated, and each context
+pack still follows the exact public `telos context` owner resolution.
+
+#### Plan
+
+`result.steps` contains every intent, including draft and deprecated intents.
+The order is a deterministic topological order over `requires`: each direct
+prerequisite precedes its dependent, and ready ties use ascending intent ID.
+Each row has exactly `n` (one-based), `intent`, `requires` (sorted direct
+prerequisites), and `context`. `context` is the complete frozen `telos context
+INT-NNNN` result: `id`, `change`, `canonical`, `scenarios`, `notions`,
+`constraints`, `bindings`, and one-hop `neighbors`.
+
+```json
+{
+  "ok": true,
+  "command": "rebuild",
+  "result": {
+    "steps": [
+      {"n": 1, "intent": "INT-0017", "requires": [], "context": {"id": "INT-0017", "change": null, "canonical": "...", "scenarios": [{"id": "SCN-0091", "title": "a newly issued invoice is open", "proved": false}], "notions": ["..."], "constraints": ["..."], "bindings": {"implements": [], "proves": []}, "neighbors": ["..."]}},
+      {"n": 2, "intent": "INT-0042", "requires": ["INT-0017"], "context": {"id": "INT-0042", "change": null, "canonical": "...", "scenarios": [{"id": "SCN-0107", "title": "full payment settles the invoice", "proved": false}], "notions": ["..."], "constraints": ["..."], "bindings": {"implements": [], "proves": []}, "neighbors": ["..."]}}
+    ]
+  },
+  "error": null,
+  "next_actions": []
+}
+```
+
+The `"..."` entries above denote values with the exact nested `telos context`
+schema, not omitted response keys; executable contract tests compare every
+real step to the full public context result.
+
+#### Status and real measurement
+
+`rebuild status` executes the configured `[test] cmd` once for every distinct
+`proves` target, in structural `(path, optional test name)` order, with the
+target substituted for `{filter}`. A scenario is green iff it has at least
+one proof and **all** proof targets are safe, present, resolvable, and exit
+zero. No proof, a missing/unsafe file, a stale named test, or any non-zero
+runner exit produces an explanatory red row, not a command failure. A
+missing or blank runner is `TELOS_TEST_NOT_FOUND` because progress cannot be
+measured. Each test row has exactly `test`, `green`, and the literal
+substituted `command`; each scenario row has `id`, aggregate `green`, and
+`tests`.
+
+```json
+{
+  "ok": true,
+  "command": "rebuild",
+  "result": {
+    "scenarios_green": 1,
+    "scenarios_total": 2,
+    "scenarios": [
+      {"id": "SCN-0091", "green": false, "tests": []},
+      {"id": "SCN-0107", "green": true, "tests": [{"test": "tests/billing.rs::scn_0107_full_payment_settles_the_invoice", "green": true, "command": "git hash-object .green-scn_0107_full_payment_settles_the_invoice"}]}
+    ]
+  },
+  "error": null,
+  "next_actions": []
+}
+```
+
+The configured runner is trusted project code and can have effects; Telos
+only contains its filter as data and reports its exit status. `check` and
+`status` do not execute scenario proofs or constraint `check` commands.
+`rebuild status` executes scenario proofs only. Constraint checks execute
+during ordinary reconcile when impacted and during full reconcile for every
+configured constraint. `tests_run` counts runner invocations, not scenario
+declarations.
+
+### Proof and constraint execution matrix
+
+| Surface | Scenario/test execution | Constraint check execution |
+|---|---|---|
+| `status` | none | none |
+| `check` | none | none |
+| `check --sealed` | none | none |
+| `rebuild plan` | none | none |
+| `rebuild status` | every distinct bound proof target | none |
+| ordinary reconcile without EditConfig | distinct impacted proof targets | impacted applicable constraints |
+| ordinary reconcile with EditConfig | every distinct proof target | every applicable constraint |
+| full reconcile, all intents draft/deprecated | none (tests_run: 0) | every configured constraint check |
+| full reconcile, at least one active intent | whole suite once (tests_run: 1) | every configured constraint check |
+
+### Sealability matrix
+
+| Effective model/config | Seal verdict |
+|---|---|
+| no active intent | proof bindings and runner not required |
+| active scenario without proves | refuse TELOS_INTEGRITY_VIOLATION before checks/tests/writes |
+| all active scenarios proved, runner blank/whitespace | refuse TELOS_TEST_NOT_FOUND before checks/tests/writes |
+| all active scenarios proved, runner nonblank | admit the later constraint/test gates |
+
+### `init [--agents ...] [--ci github]`
+
+`--ci github` participates in one preflight with every requested agent host.
+All target bytes, parent directories, JSON/text merges, path types, and
+collisions are validated before the first initialization write. A preflight
+failure leaves `telos/`, `.gitattributes`, counters, agent artifacts,
+workflow, and init marker absent or byte-for-byte unchanged.
+
+After preflight, `.telos-init.json` records a versioned transaction, normalized
+agent/CI options, exact core snapshots, and an authenticated phase. Persisted
+CAS transitions authorize core publication and then integrations. Every
+created artifact is fully staged and synced under a random sibling before a
+no-replace publish; user configuration merges are recomputed/compared before
+atomic replacement. No final file is opened with truncate, and a late file,
+directory, live symlink, dangling symlink, parent replacement, or staging-name
+owner is never overwritten or removed.
+
+If publication fails after the marker exists, a retry is allowed only with
+the same normalized `--agents`/`--ci` options and only while the marker,
+phase, core bytes, directory identities, and already-published Telos artifacts
+remain exact. Exact artifacts are safe no-ops, user merges are idempotent, and
+the retry completes the missing agents/workflow before removing the marker.
+Different options or any foreign byte/path owner are refused without further
+publication. Once the marker is gone, ordinary repeat init remains
+`TELOS_ALREADY_INITIALIZED`.
+
+### Init publication and resume matrix
+
+| Starting condition | Result | Overwrite policy |
+|---|---|---|
+| clean, all preflights valid | seal core, publish requested agents/CI, remove marker | create-only or validated atomic merge |
+| preflight error/collision | refuse before marker/core writes | every owner preserved |
+| authenticated incomplete init, same options | resume exact phase and finish | exact artifacts are no-ops; missing artifacts no-replace |
+| authenticated incomplete init, different options | refuse | partial authenticated state preserved |
+| marker/core/parent changed or foreign owner appears | refuse | foreign and prior bytes preserved |
+| completed init, no marker | TELOS_ALREADY_INITIALIZED | completed project preserved |
+
+The success envelope remains the frozen init envelope, independent of agent
+hosts or CI:
+
+```json
+{"ok":true,"command":"init","result":{"root":"telos","sealed":true},"error":null,"next_actions":["telos status"]}
+```
+
+An occupied workflow target returns exactly:
+
+```json
+{"ok":false,"command":"init","result":null,"error":{"code":"TELOS_CHANGE_STATE_INVALID","message":"`.github/workflows/telos.yml` already exists","hint":"preserve or move the existing workflow before retrying"},"next_actions":[]}
+```
+
+The generated file is exactly:
+
+```yaml
+name: Telos
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sealed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Telos v0.7.0
+        run: cargo install --git https://github.com/hugues31/telos-sdd --tag v0.7.0 --locked telos
+      - name: Verify sealed Telos state
+        run: telos check --sealed
+```
+
+The install tag is derived from the CLI package version. Shipping 0.7.0
+therefore requires publishing repository tag `v0.7.0`; without that tag the
+generated install step cannot succeed. The workflow reports a check but does
+not itself make GitHub treat it as required: repository branch protection
+must separately require job `sealed` before merges.
+
+### Spec-only bootstrap and public reconstruction
+
+Spec-only mode is intentionally narrow: `rebuild plan` and `rebuild status`
+can inspect it, while live/export and ordinary sealed-project commands still
+require a lock. The public Billing base contains only README and Telos files:
+no lock, Cargo manifest/lock, source, tests, generated checker/site, journal,
+binding, build artifact, hidden solution, or LLM call. Both intents are
+`draft`; the architecture constraint is declarative; the future runner is
+already configured as `cargo test {filter}`.
+
+On the untouched copy, `rebuild plan` orders `INT-0017` before `INT-0042` and
+`rebuild status` returns `0/2` without launching a process because neither
+scenario has a proof target. The first seal uses the real CLI spelling
+`telos change reconcile --full --json`. With no active intent and no
+constraint `check`, it returns `tests_run: 0`, `checks_run: 0`, creates the
+lock, and leaves measured progress `0/2`.
+
+An external `telos-implementer` then executes ordinary prerequisite-ordered
+batches. CHG-0001 stages a real complete `INT-0017` `draft` → `active` edit
+and adds the machine `CON-0003.check`. Outside `telos/`, the implementer
+creates the exact Cargo/source/test bytes from the demo README. The
+architecture function shares the covered `SCN-0091` test target. The batch
+records an unchanged red-to-green witness, binds `Cargo.toml`, generated
+`Cargo.lock`, and every `src/**/*.rs` file to the intent, records the canonical
+`proves`, and reconciles to `1/2`.
+
+CHG-0002 stages the real `INT-0042` `draft` → `active` edit and follows the
+same red/green/bind/reconcile lifecycle. Real forbidden `crate::adapters`
+imports make the constraint return exact `TELOS_CONSTRAINT_FAILED`; removing
+only those imports lets the same approved change reconcile to `2/2`.
+Every `[tests]` file has a canonical proof binding, both changes disappear,
+and final `telos check --sealed` plus `rebuild status` prove the reconstructed
+tree. Rebuild proves behavioral conformity; source-byte identity depends on
+how fully constraints capture architecture.
+
+### Billing reconstruction checkpoints
+
+| Checkpoint | Intent statuses | tests_run | checks_run | Rebuild status |
+|---|---|---|---|---|
+| untouched spec-only | draft, draft | no process | no process | 0/2 |
+| change reconcile --full bootstrap | draft, draft | 0 | 0 | 0/2 |
+| CHG-0001 reconciled | active, draft | one distinct scenario proof | staged architecture check | 1/2 |
+| CHG-0002 reconciled | active, active | one distinct scenario proof | architecture check | 2/2 |

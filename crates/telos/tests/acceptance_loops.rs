@@ -3,12 +3,13 @@
 //! `bind`, `adopt`, `reconcile --full`, and friends — by spawning the `telos`
 //! binary. They have no compile-time coupling to the command implementation.
 //!
-//! All three loops now run in the ordinary suite. `loop_feature` proves M3
+//! All three specification loops now run in the ordinary suite. `loop_feature` proves M3
 //! end to end, including a discoverable scenario test and sealed red/green
 //! witnesses; `loop_drift` proves an out-of-protocol edit can be adopted and
 //! reconciled; and `loop_merge` proves a lock-only merge conflict is resolved
 //! by `reconcile --full`. Together they are the roadmap's executable
-//! done-criterion.
+//! done-criterion. `loop_projection` adds the one M4 acceptance projection
+//! without duplicating the M5 reconstruction owned by `rebuild_demo`.
 //!
 //! Payload JSON shapes fed to `add`/`edit` on stdin follow Annex D, frozen
 //! by T13 into `docs/contracts.md`. `loop_feature` uses the real,
@@ -16,12 +17,25 @@
 mod common;
 
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
 use serde_json::{Value, json};
 
 use common::{repo, telos, with_fixture};
+
+struct ProjectionServer(Option<Child>);
+
+impl Drop for ProjectionServer {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 // --- shared harness: run a step, assert its envelope ------------------------
 //
@@ -716,11 +730,12 @@ fn loop_merge() {
             "full": true,
             "id": null,
             "ops_applied": 0,
-            "tests_run": 0,
+            "tests_run": 1,
             "witness_warnings": [],
         }),
         "--full applies no ops, belongs to no change, and re-checks every \
-         constraint (the corpus has one, and ships no test runner -- D13)"
+         constraint; this fixture has active proved scenarios, so its \
+         configured whole-suite runner executes exactly once"
     );
 
     let status = assert_state(dir, "coherent");
@@ -738,4 +753,84 @@ fn loop_merge() {
         "the merge must be fully resolved once `--full` has re-derived the lock"
     );
     assert_state(dir, "coherent");
+}
+
+/// M4 closes the observe step of the roadmap with one shared projection.
+/// Starting from the same coherent project, static export and every live page
+/// must expose that projection without changing project state. The separate
+/// `rebuild_demo` acceptance remains the sole owner of the much longer M5
+/// spec-only reconstruction lifecycle.
+#[test]
+fn loop_projection() {
+    let tmp = with_fixture();
+    assert_state(tmp.path(), "coherent");
+
+    let exported = run_ok(tmp.path(), &["view", "--export", "site", "--json"]);
+    assert_eq!(
+        exported["result"],
+        json!({
+            "mode": "export",
+            "destination": "site",
+            "files": [
+                "coverage.html",
+                "glossary.html",
+                "graph.html",
+                "index.html",
+                "intents/INT-0017.html",
+                "intents/INT-0042.html",
+            ]
+        })
+    );
+
+    let args = ["view", "--port", "0", "--json"];
+    assert_args_never_mention_a_hash(&args);
+    let mut server = ProjectionServer(Some(
+        Command::new(env!("CARGO_BIN_EXE_telos"))
+            .args(args)
+            .current_dir(tmp.path())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn live projection"),
+    ));
+    let stdout = server.0.as_mut().unwrap().stdout.take().unwrap();
+    let mut startup = String::new();
+    BufReader::new(stdout).read_line(&mut startup).unwrap();
+    let envelope: Value = serde_json::from_str(startup.trim_end()).unwrap();
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "live projection startup failed: {envelope}"
+    );
+    let url = envelope["result"]["url"]
+        .as_str()
+        .expect("a successful live projection has result.url");
+    assert!(url.starts_with("http://127.0.0.1:"));
+    assert_eq!(envelope["command"], "view");
+    assert_eq!(envelope["result"]["mode"], "server");
+
+    for (route, marker) in [
+        ("/", "Telos dashboard"),
+        ("/graph", "requires"),
+        ("/intent/INT-0042", "SCN-0107"),
+        ("/glossary", "Invoice"),
+        ("/coverage", "Intent × scenario × test"),
+    ] {
+        let address = url
+            .strip_prefix("http://")
+            .and_then(|url| url.strip_suffix('/'))
+            .unwrap();
+        let mut stream = TcpStream::connect(address).unwrap();
+        write!(
+            stream,
+            "GET {route} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 "), "{route}: {response}");
+        assert!(response.contains(marker), "{route}: {response}");
+    }
+
+    drop(server);
+    assert_state(tmp.path(), "coherent");
 }

@@ -57,7 +57,7 @@ checking whether it is there.
 { "code": "TELOS_DRIFT_DETECTED", "message": "...", "hint": "..." }
 ```
 
-- `code` — one of the 16 [error codes](#error-codes) below, as
+- `code` — one of the 17 [error codes](#error-codes) below, as
   `SCREAMING_SNAKE_CASE`.
 - `message` — a human-readable, non-localized description. Correctional
   where possible (e.g. `` unknown notion `invoice`; closest is `Invoice` ``)
@@ -93,7 +93,7 @@ routes on.
 | `TELOS_REFERENCE_UNKNOWN` | (M2) `show`/`change abandon`/`change diff`/`change approve`/`change reconcile <id>`/`add\|edit\|remove --change`/`adopt --into` name a well-formed `CHG-NNNN` id the store does not hold (message `` unknown change `CHG-9999` ``). | `closest is CHG-0001` (numeric distance) — present only when another change exists; `null` otherwise. |
 | `TELOS_SCENARIO_RED_EXPECTED` | (M3) `reconcile` under `policy.tdd = "strict"` requires an intact sealed red witness for a scenario before its green run; none exists. | Run `telos test SCN-…` to record a red witness before implementing. |
 | `TELOS_TEST_SEALED` | (M3) The bytes of a test file sealed as a red witness changed before the scenario went green — the witness no longer proves anything. | The red witness is invalid; run `telos test SCN-…` again on the current bytes before reconciling. |
-| `TELOS_TEST_NOT_FOUND` | (M3) No `[test] cmd` is configured, or discovery finds zero or more than one file containing the scenario's `scn_NNNN` convention. | For no runner: `` set [test] cmd, e.g. `cargo test {filter}` ``; for ambiguity: `` pass `--file <path>` to pick one ``. |
+| `TELOS_TEST_NOT_FOUND` | (M3) No `[test] cmd` is configured; discovery finds zero or more than one file containing the scenario's `scn_NNNN` convention; or `--file` names no file. | The exact cases follow this table. |
 | `TELOS_ORPHAN_CODE` | (M2) `change reconcile`'s no-code-without-telos gate (rule §3.3 №5, over the delta's post model): a file matched by `[code]`/`[tests]` globs in `telos.toml` is not covered by any `implements`/`proves` binding (message names which of the two families and the binding relation it's missing). | Bind it with `telos bind <path> <INT-id>`, or remove it from the `telos.toml` globs if it isn't spec-governed. |
 | `TELOS_CONSTRAINT_FAILED` | (M2) `change reconcile`'s constraint-checks gate: a constraint's `check` shell command exited non-zero, or could not even be spawned (message `` CON-0001 check failed: `<cmd>` ``). The command's own output is deliberately *not* included — it is not reproducible across machines (a git version, a locale, `$PATH`), so it cannot be frozen contract. | Run the constraint's `check` command directly to see its output. |
 | `TELOS_CHANGE_STATE_INVALID` | (M2) `change reconcile <id>` on a change whose status is not `approved`/`implementing` (message `` change CHG-0001 is not approved; approve it first ``). | `` run `telos change diff CHG-0001` then `telos change approve CHG-0001` `` |
@@ -119,6 +119,17 @@ routes on.
 | `TELOS_GIT_ERROR` | The `git` binary itself could not be spawned (missing from `PATH`). | None — `message` names the underlying I/O error. |
 | `TELOS_GIT_ERROR` | (M2) `revert`'s `git cat-file blob <oid>` fails — the sealed OID names a blob the object store does not hold (a project sealed but never committed; message `` `git cat-file blob <oid>` failed: <stderr> ``). **Not** `TELOS_INTEGRITY_VIOLATION` — a seal records OIDs, it never writes objects, so a missing blob is git's own diagnosis, not a spec integrity one. | the frozen `MISSING_BLOB_HINT`: `` the sealed content is not in the git object store; commit the sealed state or restore the file by hand `` |
 | `TELOS_INTERNAL` | An internal invariant broke — a bug, not a spec or usage problem. | None. |
+
+`TELOS_TEST_NOT_FOUND` has four exact M3 forms. No runner is
+`` no `[test] cmd` is configured in telos/telos.toml `` with hint
+`` set [test] cmd, e.g. `cargo test {filter}` ``. Zero discovery matches is
+`` no file matched by the [tests] globs contains `scn_NNNN` `` with hint
+`` name the test after the scenario id (`scn_NNNN_…`) in a file the [tests] globs cover, or pass `--file <path>` ``
+(substituting the requested scenario id, for example `scn_0108`). Multiple
+matches list their sorted paths and hint `` pass `--file <path>` to pick one ``.
+Finally, an explicit absent file is
+`` the file passed with --file does not exist: `<path>` `` with a present,
+null hint.
 
 ## `status`
 
@@ -506,7 +517,7 @@ which only happens if the complaint is always the *first* thing wrong:
 | 4 | accepted bytes (each `accept` op's blob OID must still match) | `TELOS_INTEGRITY_VIOLATION`, `` `<path>` changed since it was accepted `` / `` `<path>` was accepted but no longer exists `` |
 | 5 | the overlay (the delta's post-spec must parse and resolve — rules 1/2/3/4 of §3.3) | whatever `TELOS_*` diagnostic the semantic pass raises first (same collapsing rule as `check`) |
 | 6 | rule 5, no code without telos, over the post model | `TELOS_ORPHAN_CODE` |
-| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages `telos/bindings.tel` | `TELOS_ORPHAN_CODE` |
+| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages `telos/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`, `` sealing would drop `<path>` from the code table: no binding covers it and this change does not stage telos/bindings.tel ``; hint `` the bindings shrank outside this change; reconcile or abandon the change that claims telos/bindings.tel, or restore them with `telos revert` `` |
 | 8 | sealed red/green witness for every new or changed scenario | `TELOS_SCENARIO_RED_EXPECTED` or `TELOS_TEST_SEALED` under strict policy; warnings under advisory policy |
 | 9 | constraint checks, for the constraints this delta puts in scope | `TELOS_CONSTRAINT_FAILED` |
 | 10 | tests, one run per distinct `proves` target of the impacted scenarios | `TELOS_INTEGRITY_VIOLATION`, `` the test run for `<target>` failed `` |
@@ -762,7 +773,8 @@ It merges one owned `PreToolUse` command hook without deleting unrelated
 hooks. The guard refuses direct agent writes to the repository `telos/` tree
 and accepts only CLI-mediated mutations. Generated Codex rules request native
 human confirmation for `telos change approve`, `telos adopt`, and
-`telos revert`; the installed skill displays the current digest immediately
-before that static prompt. The generated context deliberately remains a
-portable bounded `telos context` pack, never a whole-spec or host-specific
-prompt dump.
+`telos revert`. Before approval, the challenger presents `change diff`’s
+`result.digest`; before adopt/revert, the router presents the relevant drift
+paths. The rules themselves are static prompts and carry neither value. The
+generated context deliberately remains a portable bounded `telos context`
+pack, never a whole-spec or host-specific prompt dump.

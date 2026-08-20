@@ -551,6 +551,36 @@ fn test_without_a_matching_test_function_names_the_convention() {
         error["message"],
         json!("no file matched by the [tests] globs contains `scn_0108`")
     );
+    assert_eq!(
+        error["hint"],
+        json!(
+            "name the test after the scenario id (`scn_0108_…`) in a file the [tests] \
+             globs cover, or pass `--file <path>`"
+        )
+    );
+}
+
+/// An explicit path bypasses convention discovery, but it never turns a
+/// missing file into a runner error. Its no-hint form is part of the frozen
+/// `TELOS_TEST_NOT_FOUND` family.
+#[test]
+fn test_with_an_absent_explicit_file_is_the_exact_no_hint_error() {
+    let tmp = fixture_with_runner();
+    open_change(tmp.path());
+    assert_eq!(stage_new_scenario(tmp.path()), SCN);
+    approve(tmp.path());
+
+    let error = error_of(
+        tmp.path(),
+        &["test", SCN, "--file", "tests/missing.rs", "--json"],
+    );
+
+    assert_eq!(error["code"], json!("TELOS_TEST_NOT_FOUND"));
+    assert_eq!(
+        error["message"],
+        json!("the file passed with --file does not exist: `tests/missing.rs`")
+    );
+    assert_eq!(error["hint"], Value::Null);
 }
 
 /// D4: two files hold the convention, so discovery refuses rather than

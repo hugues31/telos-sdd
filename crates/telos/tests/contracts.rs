@@ -172,6 +172,136 @@ fn checks_error_body_stays_the_frozen_triple_even_with_several_diagnostics() {
     );
 }
 
+/// M3's three agent-facing verbs are no exception to Annex B. `context`
+/// exposes its bounded pack as a successful envelope, while an unowned
+/// `test` or `bind` still produces a complete, precisely routable failure.
+/// These assertions deliberately use the shared sealed corpus instead of
+/// recreating a transaction fixture: this test owns the envelope contract,
+/// not the commands' lifecycle fixtures.
+#[test]
+fn context_test_and_bind_freeze_their_real_json_envelopes() {
+    let tmp = with_fixture();
+
+    let context_out = telos(tmp.path(), &["context", "INT-0042", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        context_out.status.success(),
+        "context failed: {context_out:?}"
+    );
+    let context = envelope(&context_out);
+    assert_exactly_the_five_keys(&context);
+    assert_eq!(context["ok"], json!(true));
+    assert_eq!(context["command"], json!("context"));
+    assert_eq!(context["error"], Value::Null);
+    assert_eq!(context["next_actions"], json!([]));
+    let result = context["result"]
+        .as_object()
+        .expect("context result is an object");
+    assert_eq!(
+        result.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "bindings",
+            "canonical",
+            "change",
+            "constraints",
+            "id",
+            "neighbors",
+            "notions",
+            "scenarios",
+        ]
+    );
+    assert_eq!(result["id"], json!("INT-0042"));
+    assert_eq!(result["change"], Value::Null);
+    let bindings = result["bindings"]
+        .as_object()
+        .expect("context bindings is an object");
+    assert_eq!(
+        bindings.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["implements", "proves"]
+    );
+
+    for (args, expected) in [
+        (
+            ["test", "SCN-0107", "--json"].as_slice(),
+            json!({
+                "ok": false,
+                "command": "test",
+                "result": null,
+                "error": {
+                    "code": "TELOS_CHANGE_STATE_INVALID",
+                    "message": "no open change is implementing SCN-0107",
+                    "hint": "stage it into a change and approve it first",
+                },
+                "next_actions": [],
+            }),
+        ),
+        (
+            ["bind", "src/billing/invoice.rs", "INT-0017", "--json"].as_slice(),
+            json!({
+                "ok": false,
+                "command": "bind",
+                "result": null,
+                "error": {
+                    "code": "TELOS_CHANGE_STATE_INVALID",
+                    "message": "no open change is implementing INT-0017",
+                    "hint": "stage it into a change and approve it first",
+                },
+                "next_actions": [],
+            }),
+        ),
+    ] {
+        let out = telos(tmp.path(), args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "expected domain error: {args:?}"
+        );
+        let actual: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            actual,
+            expected,
+            "unexpected `telos {}` envelope",
+            args.join(" ")
+        );
+    }
+}
+
+/// Host integration changes files outside `telos/`, never the frozen `init`
+/// result an agent routes on. Test the ordinary and `--agents` forms through
+/// the real binary so a future installer cannot accidentally grow a
+/// host-specific result shape.
+#[test]
+fn init_and_init_agents_keep_the_same_exact_envelope() {
+    let expected = json!({
+        "ok": true,
+        "command": "init",
+        "result": {"root": "telos", "sealed": true},
+        "error": null,
+        "next_actions": ["telos status"],
+    });
+
+    for args in [
+        ["init", "--json"].as_slice(),
+        ["init", "--agents", "codex", "--json"].as_slice(),
+    ] {
+        let tmp = repo();
+        let out = telos(tmp.path(), args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "`telos {}` failed: {out:?}",
+            args.join(" ")
+        );
+        let actual: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            actual,
+            expected,
+            "`telos {}` changed init's contract",
+            args.join(" ")
+        );
+    }
+}
+
 /// M3 extends the public surface with bounded context, red/green witnesses,
 /// journalled bindings, and the two reconciliation gates that enforce them.
 /// Keep the published contract at least as explicit as the executable one:
@@ -191,8 +321,12 @@ fn published_contract_freezes_the_m3_surface() {
         "`open → drafted → approved → implementing → reconciled`",
         "journal records are digest-inert",
         "The ten gates, frozen order",
+        "| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages `telos/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`",
         "strict versus advisory",
         "Structurally skips gates 1–4, 7, and 8",
+        "the file passed with --file does not exist: `<path>`",
+        "no file matched by the [tests] globs contains `scn_NNNN`",
+        "name the test after the scenario id (`scn_NNNN_…`) in a file the [tests] globs cover, or pass `--file <path>`",
         "`TELOS_DRIFT_DETECTED`",
         "`TELOS_APPROVAL_STALE`",
         "`TELOS_REFERENCE_UNKNOWN`",

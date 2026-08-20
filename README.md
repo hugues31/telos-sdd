@@ -26,8 +26,7 @@ loop → `coherent`), **merge** (two sealed branches → lock conflict →
 `reconcile --full` → `coherent`). They live in
 [`crates/telos/tests/acceptance_loops.rs`](crates/telos/tests/acceptance_loops.rs)
 and are un-ignored one at a time as the milestone implementing their last
-command lands. **merge** is green as of M2; **feature** and **drift** wait
-on M3's `test`/`bind`. List what is still ignored:
+command lands. List what is still ignored:
 
 ```sh
 cargo test --workspace -- --ignored --list
@@ -83,8 +82,9 @@ approved change and leave its reviewed delta digest fresh.
 `telos init --agents claude,codex` installs the same `telos`,
 `telos-challenger`, and `telos-implementer` skills for the selected hosts and
 their preventive guards. The guard blocks direct agent edits under `telos/`;
-use the CLI for spec mutations. Approval, adopting drift, and reverting stay
-native human-confirmed actions, with the current diff digest shown first.
+use the CLI for spec mutations. Before approval, the challenger presents the
+`change diff` digest; for adopting or reverting, the router presents the
+relevant drift paths. The native prompts themselves are static confirmations.
 
 ## Docs
 

@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 
 use telos_core::error::{ErrorCode, TelosError};
 
+use crate::ci::CiProvider;
 use crate::commands::{
     self, Ctx, agents::AgentHost, change::ChangeCommand, list::EntityType, mutate::EntityKind,
     query::QueryCommand, rebuild::RebuildCommand,
@@ -42,6 +43,9 @@ enum Command {
         /// Install integrations for these comma-delimited agent hosts.
         #[arg(long, value_delimiter = ',', value_parser = parse_agent_host)]
         agents: Vec<AgentHost>,
+        /// Install a sealed-state CI workflow.
+        #[arg(long, value_enum)]
+        ci: Option<CiProvider>,
     },
     /// Internal entry point invoked by generated synchronous host hooks.
     #[command(hide = true)]
@@ -246,7 +250,7 @@ pub fn run() -> ExitCode {
 fn execute(command: &Command) -> CmdResult {
     match command {
         Command::Version => commands::version(),
-        Command::Init { agents } => commands::init::run(&ctx()?, agents),
+        Command::Init { agents, ci } => commands::init::run(&ctx()?, agents, *ci),
         Command::AgentGuard { .. } => unreachable!("agent guard returned before dispatch"),
         Command::Config { change } => {
             let payload = change.as_ref().map(|_| stdin_payload()).transpose()?;

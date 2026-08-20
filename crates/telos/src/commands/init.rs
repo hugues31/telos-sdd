@@ -25,6 +25,7 @@ use telos_core::git::GitRepo;
 use telos_core::lock::seal;
 use telos_core::workspace::Workspace;
 
+use crate::ci::{self, CiProvider};
 use crate::commands::Ctx;
 use crate::commands::agents::{self, AgentHost};
 use crate::envelope::{CmdResult, Outcome};
@@ -37,7 +38,7 @@ const GITATTRIBUTES_LINE: &str = "telos/** text eol=lf";
 /// The spec subdirectories a project always has, created empty.
 const SUBDIRS: [&str; 4] = ["notions", "intents", "constraints", "changes"];
 
-pub fn run(ctx: &Ctx, hosts: &[AgentHost]) -> CmdResult {
+pub fn run(ctx: &Ctx, hosts: &[AgentHost], ci: Option<CiProvider>) -> CmdResult {
     let git = GitRepo::discover(&ctx.cwd)?;
     let root = git.root().to_path_buf();
     let telos_dir = root.join("telos");
@@ -55,6 +56,7 @@ pub fn run(ctx: &Ctx, hosts: &[AgentHost]) -> CmdResult {
     // requested file before the first project write so malformed config can
     // never leave a partial Telos tree behind.
     agents::preflight(&root, hosts)?;
+    ci::preflight(&root, ci)?;
 
     for subdir in SUBDIRS {
         let path = telos_dir.join(subdir);
@@ -92,6 +94,7 @@ pub fn run(ctx: &Ctx, hosts: &[AgentHost]) -> CmdResult {
     let lock = seal(&ws, &model, &git, None)?;
     lock.write(&ws.lock_path())?;
     agents::render(&root, hosts)?;
+    ci::render(&root, ci)?;
 
     Ok(Outcome {
         result: json!({ "root": "telos", "sealed": true }),

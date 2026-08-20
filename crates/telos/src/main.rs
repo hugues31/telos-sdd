@@ -3,6 +3,7 @@
 //! work itself in [`commands`] -- which is really `telos-core`'s work,
 //! arranged for a command line.
 
+mod ci;
 mod cli;
 mod commands;
 mod envelope;

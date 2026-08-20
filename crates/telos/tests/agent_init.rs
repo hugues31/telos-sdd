@@ -333,6 +333,208 @@ fn guard_fails_closed_on_ambiguous_shell_syntax() {
     }
 }
 
+#[test]
+fn guard_round_two_denies_shell_wrapper_options_before_c() {
+    let tmp = repo();
+    assert_eq!(
+        bash_decision(
+            tmp.path(),
+            "claude",
+            "bash --norc -c \"touch telos/bindings.tel\"",
+        ),
+        "deny"
+    );
+}
+
+#[test]
+fn guard_round_two_denies_clobber_redirect_operator() {
+    let tmp = repo();
+    for command in [
+        "echo x >| telos/bindings.tel",
+        "telos status --json >| telos/status.json",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "deny",
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn guard_round_two_denies_unproven_shell_path_expansions() {
+    let tmp = repo();
+    for command in [
+        "touch ~+/telos/bindings.tel",
+        "rm -rf telo?",
+        "rm -rf telo[s]",
+        "rm -rf telo*",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "deny",
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn guard_round_two_qualifies_find_read_only_flags() {
+    let tmp = repo();
+    assert_eq!(
+        bash_decision(tmp.path(), "claude", "find telos -delete"),
+        "deny"
+    );
+}
+
+#[test]
+fn guard_round_two_finds_git_subcommand_after_global_options() {
+    let tmp = repo();
+    assert_eq!(
+        bash_decision(tmp.path(), "claude", "git -C telos clean -fd"),
+        "deny"
+    );
+}
+
+#[test]
+fn guard_round_two_extracts_key_value_paths() {
+    let tmp = repo();
+    assert_eq!(
+        bash_decision(
+            tmp.path(),
+            "claude",
+            "dd if=/dev/null of=telos/bindings.tel",
+        ),
+        "deny"
+    );
+}
+
+#[test]
+fn guard_round_two_extracts_long_option_paths() {
+    let tmp = repo();
+    assert_eq!(
+        bash_decision(
+            tmp.path(),
+            "claude",
+            "cp Cargo.toml --target-directory=telos",
+        ),
+        "deny"
+    );
+}
+
+#[test]
+fn guard_round_two_codex_denies_human_actions_not_covered_by_native_rules() {
+    let tmp = repo();
+    for command in [
+        "bash -c \"telos revert\"",
+        "command telos adopt",
+        "rtk telos change approve CHG-0001",
+        "telos --json adopt",
+        "telos adopt;",
+    ] {
+        let out = hook(
+            tmp.path(),
+            "codex",
+            json!({
+                "cwd": tmp.path(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            }),
+        );
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            out["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("retry direct canonical command"),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() {
+    let tmp = repo();
+    telos(tmp.path(), &["init", "--agents", "codex"])
+        .assert()
+        .success();
+    let rules = read(tmp.path(), ".codex/rules/telos.rules");
+
+    for command in [
+        "telos change approve CHG-0001",
+        "telos adopt",
+        "telos revert",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "codex", command),
+            "allow",
+            "{command}"
+        );
+        assert_eq!(
+            rendered_rule_decision_for_shell(&rules, command),
+            Some("prompt"),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn guard_round_two_fails_closed_on_combined_directory_changes() {
+    let tmp = repo();
+    for command in [
+        "cd crates && touch ../telos/bindings.tel",
+        "bash -c \"cd crates; touch ../telos/bindings.tel\"",
+        "pushd crates; rm ../telos/bindings.tel",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "deny",
+            "{command}"
+        );
+    }
+    assert_eq!(bash_decision(tmp.path(), "claude", "cd crates"), "allow");
+}
+
+#[cfg(unix)]
+#[test]
+fn guard_round_two_resolves_existing_symlink_parents_for_new_paths() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = repo();
+    fs::create_dir_all(tmp.path().join("telos")).unwrap();
+    symlink("telos", tmp.path().join("spec-link")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), tmp.path().join("outside-link")).unwrap();
+
+    for (tool_name, tool_input) in [
+        ("Edit", json!({"file_path": "spec-link/bindings.tel"})),
+        (
+            "apply_patch",
+            json!({"command": "*** Add File: spec-link/new-intent.tel"}),
+        ),
+    ] {
+        assert_eq!(
+            tool_decision(tmp.path(), tmp.path(), "claude", tool_name, tool_input,),
+            "deny"
+        );
+    }
+    assert_eq!(
+        bash_decision(tmp.path(), "claude", "touch spec-link/new-binding.tel"),
+        "deny"
+    );
+    assert_eq!(
+        tool_decision(
+            tmp.path(),
+            tmp.path(),
+            "claude",
+            "Edit",
+            json!({"file_path": "outside-link/new-source.rs"}),
+        ),
+        "deny"
+    );
+}
+
 fn tool_decision(
     root: &Path,
     cwd: &Path,
@@ -510,6 +712,11 @@ fn rendered_rule_decision<'a>(rules: &'a str, argv: &[&str]) -> Option<&'a str> 
             .find(|line| line.trim().starts_with("decision ="))?;
         decision_line.split('"').nth(1)
     })
+}
+
+fn rendered_rule_decision_for_shell<'a>(rules: &'a str, command: &str) -> Option<&'a str> {
+    let argv: Vec<&str> = command.split_ascii_whitespace().collect();
+    rendered_rule_decision(rules, &argv)
 }
 
 #[test]

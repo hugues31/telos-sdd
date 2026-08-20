@@ -1,6 +1,8 @@
 //! Shared preventive policy for Claude Code and Codex hooks.
 
-use std::io::Read;
+use std::ffi::OsString;
+use std::fs;
+use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -19,6 +21,18 @@ pub enum Decision {
 pub struct GuardDecision {
     pub decision: Decision,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SimpleCommand {
+    argv: Vec<String>,
+    native_rule_covered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HumanAction {
+    name: &'static str,
+    native_rule_covered: bool,
 }
 
 /// Reads one official hook event from stdin and prints the host's structured
@@ -77,7 +91,7 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
     if matches!(tool.as_str(), "edit" | "write") {
         if input_paths(input)
             .iter()
-            .any(|path| is_telos_path(path, &cwd, &root))
+            .any(|path| path_requires_denial(path, &cwd, &root))
         {
             return deny_manual_write();
         }
@@ -92,7 +106,7 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
             .unwrap_or("");
         if patch_paths(patch)
             .iter()
-            .any(|path| is_telos_path(path, &cwd, &root))
+            .any(|path| path_requires_denial(path, &cwd, &root))
         {
             return deny_manual_write();
         }
@@ -116,7 +130,8 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
                     .and_then(Value::as_str)
                     .filter(|text| !text.trim().is_empty());
                 let mut reason = format!(
-                    "Human approval required for `{action}`; review the current Telos diff and digest"
+                    "Human approval required for `{}`; review the current Telos diff and digest",
+                    action.name
                 );
                 if let Some(context) = context {
                     reason.push_str(": ");
@@ -125,6 +140,15 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
                 return GuardDecision {
                     decision: Decision::Ask,
                     reason,
+                };
+            }
+            if !action.native_rule_covered {
+                return GuardDecision {
+                    decision: Decision::Deny,
+                    reason: format!(
+                        "Codex native rules cannot prompt for this wrapped or noncanonical action; retry direct canonical command `{}`",
+                        action.name
+                    ),
                 };
             }
             return allow("Codex native rules own the human approval prompt");
@@ -172,7 +196,7 @@ fn absolute_cwd(cwd: &Path) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(cwd)
     };
-    lexical_normalize(&absolute)
+    fs::canonicalize(&absolute).unwrap_or_else(|_| lexical_normalize(&absolute))
 }
 
 fn repo_root(cwd: &Path) -> PathBuf {
@@ -182,7 +206,14 @@ fn repo_root(cwd: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-fn is_telos_path(raw: &str, cwd: &Path, root: &Path) -> bool {
+/// Returns true when a prospective path is not proven safe for a write.
+///
+/// The hook supplies paths relative to its own cwd.  Resolve the nearest
+/// existing ancestor so directory symlinks cannot disguise telos/, then put
+/// back the not-yet-created suffix.  A write target outside the repository or
+/// a shell-expanded target is also unsafe: the guard must not guess where the
+/// shell will send it.
+fn path_requires_denial(raw: &str, cwd: &Path, root: &Path) -> bool {
     let cleaned = raw
         .trim()
         .trim_matches(|c: char| matches!(c, '\'' | '"' | ',' | ';' | ':' | '(' | ')'))
@@ -190,18 +221,55 @@ fn is_telos_path(raw: &str, cwd: &Path, root: &Path) -> bool {
     if cleaned.is_empty() {
         return false;
     }
-    let path = Path::new(&cleaned);
-    let joined = if path.is_absolute() {
-        lexical_normalize(path)
-    } else {
-        lexical_normalize(&cwd.join(path))
-    };
-    let root = lexical_normalize(root);
-    if !joined.starts_with(&root) {
-        return false;
+    if cleaned
+        .chars()
+        .any(|character| matches!(character, '~' | '?' | '[' | ']' | '$' | '*'))
+    {
+        return true;
     }
-    let telos = lexical_normalize(&root.join("telos"));
-    joined == telos || joined.starts_with(&telos)
+    let path = Path::new(&cleaned);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    let Ok(root) = fs::canonicalize(root) else {
+        return true;
+    };
+    let Ok(candidate) = resolve_nearest_existing_parent(&candidate) else {
+        return true;
+    };
+    if !candidate.starts_with(&root) {
+        return true;
+    }
+
+    let telos_candidate = root.join("telos");
+    let telos = resolve_nearest_existing_parent(&telos_candidate)
+        .unwrap_or_else(|_| lexical_normalize(&telos_candidate));
+    candidate == telos || candidate.starts_with(&telos)
+}
+
+fn resolve_nearest_existing_parent(path: &Path) -> Result<PathBuf, ()> {
+    let mut parent = path.to_path_buf();
+    let mut suffix = Vec::<OsString>::new();
+    loop {
+        match fs::symlink_metadata(&parent) {
+            Ok(_) => break,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let name = parent.file_name().ok_or(())?.to_os_string();
+                suffix.push(name);
+                parent = parent.parent().ok_or(())?.to_path_buf();
+            }
+            Err(_) => return Err(()),
+        }
+    }
+
+    let mut resolved = fs::canonicalize(parent).map_err(|_| ())?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(lexical_normalize(&resolved))
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -218,33 +286,61 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     normalized
 }
 
-fn simple_commands(command: &str) -> Result<Vec<Vec<String>>, ()> {
+fn simple_commands(command: &str) -> Result<Vec<SimpleCommand>, ()> {
     let tokens = shell_tokens(command)?;
+    let has_separator = tokens.iter().any(|token| is_separator(token));
     let mut commands = Vec::new();
     for slice in tokens.split(|token| is_separator(token)) {
-        expand_command(slice, &mut commands)?;
+        expand_command(slice, &mut commands, false)?;
+    }
+
+    if commands.len() > 1
+        && commands.iter().any(|command| {
+            command
+                .argv
+                .first()
+                .is_some_and(|word| matches!(program_name(word), "cd" | "pushd" | "popd"))
+        })
+    {
+        return Err(());
+    }
+    if has_separator || commands.len() != 1 {
+        for command in &mut commands {
+            command.native_rule_covered = false;
+        }
     }
     Ok(commands)
 }
 
-fn expand_command(tokens: &[String], commands: &mut Vec<Vec<String>>) -> Result<(), ()> {
+fn expand_command(
+    tokens: &[String],
+    commands: &mut Vec<SimpleCommand>,
+    inherited_wrapper: bool,
+) -> Result<(), ()> {
     if tokens.is_empty() {
         return Ok(());
     }
 
     let mut command = tokens;
     let mut wrappers = 0;
+    let mut wrapped = inherited_wrapper;
     loop {
         wrappers += 1;
         if wrappers > 8 {
             return Err(());
         }
         match command.first().map(|word| program_name(word)) {
-            Some("rtk") => command = &command[1..],
+            Some("rtk") => {
+                wrapped = true;
+                command = &command[1..];
+            }
             Some("command") => {
+                wrapped = true;
                 command = &command[1..];
                 if command.first().map(String::as_str) == Some("--") {
                     command = &command[1..];
+                } else if command.first().is_some_and(|word| word.starts_with('-')) {
+                    return Err(());
                 }
             }
             _ => break,
@@ -257,11 +353,15 @@ fn expand_command(tokens: &[String], commands: &mut Vec<Vec<String>>) -> Result<
     let program = program_name(command.first().ok_or(())?);
     if matches!(program, "bash" | "sh" | "zsh") {
         let option = command.get(1).map(String::as_str).ok_or(())?;
-        if !option.starts_with('-') || !option.chars().skip(1).any(|ch| ch == 'c') {
+        if !matches!(option, "-c" | "-lc" | "-cl") || command.len() != 3 {
             return Err(());
         }
         let nested = command.get(2).ok_or(())?;
-        commands.extend(simple_commands(nested)?);
+        let mut nested_commands = simple_commands(nested)?;
+        for nested_command in &mut nested_commands {
+            nested_command.native_rule_covered = false;
+        }
+        commands.extend(nested_commands);
         return Ok(());
     }
 
@@ -284,7 +384,10 @@ fn expand_command(tokens: &[String], commands: &mut Vec<Vec<String>>) -> Result<
         return Err(());
     }
 
-    commands.push(command.to_vec());
+    commands.push(SimpleCommand {
+        argv: command.to_vec(),
+        native_rule_covered: !wrapped,
+    });
     Ok(())
 }
 
@@ -315,16 +418,28 @@ fn shell_tokens(command: &str) -> Result<Vec<String>, ()> {
             }
             '\\' => current.push(chars.next().ok_or(())?),
             '$' | '`' | '(' | ')' | '{' | '}' => return Err(()),
-            '>' | '<' => {
+            '>' => {
                 push_token(&mut tokens, &mut current);
-                let mut op = ch.to_string();
-                if chars.peek() == Some(&ch) {
-                    op.push(chars.next().expect("peeked character exists"));
-                }
-                if op == "<<" {
+                let op = match chars.peek() {
+                    Some('>') => {
+                        chars.next();
+                        ">>"
+                    }
+                    Some('|') => {
+                        chars.next();
+                        ">|"
+                    }
+                    Some('&') => return Err(()),
+                    _ => ">",
+                };
+                tokens.push(op.into());
+            }
+            '<' => {
+                push_token(&mut tokens, &mut current);
+                if matches!(chars.peek(), Some('<' | '>' | '&')) {
                     return Err(());
                 }
-                tokens.push(op);
+                tokens.push("<".into());
             }
             ';' => {
                 push_token(&mut tokens, &mut current);
@@ -365,72 +480,185 @@ fn program_name(program: &str) -> &str {
         .unwrap_or(program)
 }
 
-fn directly_mutates_telos(commands: &[Vec<String>], cwd: &Path, root: &Path) -> bool {
+fn directly_mutates_telos(commands: &[SimpleCommand], cwd: &Path, root: &Path) -> bool {
     commands.iter().any(|command| {
-        let Some(program) = command.first().map(String::as_str) else {
+        let Some(program) = command.argv.first().map(String::as_str) else {
             return false;
         };
         let program = program_name(program);
+
+        for pair in command.argv.windows(2) {
+            if matches!(pair[0].as_str(), ">" | ">>" | ">|")
+                && path_requires_denial(&pair[1], cwd, root)
+            {
+                return true;
+            }
+        }
         if program == "telos" {
             return false;
         }
 
-        for pair in command.windows(2) {
-            if matches!(pair[0].as_str(), ">" | ">>") && is_telos_path(&pair[1], cwd, root) {
-                return true;
-            }
-        }
-
-        let any_telos = command
+        let any_unsafe_path = command
+            .argv
             .iter()
             .skip(1)
-            .any(|arg| is_telos_path(arg, cwd, root));
+            .any(|arg| argument_requires_denial(arg, cwd, root));
         match program {
             "touch" | "mkdir" | "rm" | "rmdir" | "unlink" | "truncate" | "mv" | "cp"
-            | "install" | "tee" | "chmod" | "chown" => any_telos,
+            | "install" | "tee" | "chmod" | "chown" => any_unsafe_path,
             "sed" => {
                 command
+                    .argv
                     .iter()
                     .any(|arg| arg == "-i" || arg.starts_with("-i"))
-                    && any_telos
+                    && any_unsafe_path
             }
-            "perl" => command.iter().any(|arg| arg.contains('i')) && any_telos,
-            "git" => {
-                matches!(
-                    command.get(1).map(String::as_str),
-                    Some("checkout" | "restore" | "clean")
-                ) && any_telos
-            }
-            _ => any_telos && !is_proven_read_only(program, command),
+            "perl" => command.argv.iter().any(|arg| arg.contains('i')) && any_unsafe_path,
+            "git" => match git_subcommand(&command.argv) {
+                Some(subcommand) if is_read_only_git_subcommand(subcommand) => false,
+                Some(_) => any_unsafe_path,
+                None => true,
+            },
+            _ => any_unsafe_path && !is_proven_read_only(program, &command.argv),
         }
     })
 }
 
+fn argument_requires_denial(argument: &str, cwd: &Path, root: &Path) -> bool {
+    if path_requires_denial(argument, cwd, root) {
+        return true;
+    }
+    if let Some((_, value)) = argument.split_once('=')
+        && !value.is_empty()
+        && path_requires_denial(value, cwd, root)
+    {
+        return true;
+    }
+    if let Some(value) = argument
+        .strip_prefix("-C")
+        .filter(|value| !value.is_empty())
+    {
+        return path_requires_denial(value, cwd, root);
+    }
+    false
+}
+
 fn is_proven_read_only(program: &str, command: &[String]) -> bool {
     match program {
-        "cat" | "head" | "tail" | "less" | "more" | "rg" | "grep" | "find" | "ls" | "stat"
-        | "wc" | "file" | "diff" | "cmp" | "echo" | "printf" => true,
-        "git" => matches!(
-            command.get(1).map(String::as_str),
-            Some("diff" | "status" | "show" | "log" | "grep" | "ls-files")
-        ),
+        "cat" | "head" | "tail" | "less" | "more" | "rg" | "grep" | "ls" | "stat" | "wc"
+        | "file" | "diff" | "cmp" | "echo" | "printf" => true,
+        "find" => !command.iter().any(|argument| {
+            matches!(
+                argument.as_str(),
+                "-delete"
+                    | "-exec"
+                    | "-execdir"
+                    | "-ok"
+                    | "-okdir"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+                    | "-fls"
+            )
+        }),
+        "git" => git_subcommand(command).is_some_and(is_read_only_git_subcommand),
         _ => false,
     }
 }
 
-fn human_action(commands: &[Vec<String>]) -> Option<&'static str> {
+fn git_subcommand(command: &[String]) -> Option<&str> {
+    let mut index = 1;
+    while let Some(argument) = command.get(index).map(String::as_str) {
+        if argument == "--" {
+            return command.get(index + 1).map(String::as_str);
+        }
+        if matches!(
+            argument,
+            "-C" | "-c"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--exec-path"
+                | "--config-env"
+        ) {
+            command.get(index + 1)?;
+            index += 2;
+            continue;
+        }
+        if argument.starts_with("-C") && argument.len() > 2 {
+            index += 1;
+            continue;
+        }
+        if [
+            "--git-dir=",
+            "--work-tree=",
+            "--namespace=",
+            "--exec-path=",
+            "--config-env=",
+        ]
+        .iter()
+        .any(|prefix| argument.starts_with(prefix))
+        {
+            index += 1;
+            continue;
+        }
+        if matches!(
+            argument,
+            "-p" | "-P"
+                | "--paginate"
+                | "--no-pager"
+                | "--bare"
+                | "--literal-pathspecs"
+                | "--glob-pathspecs"
+                | "--noglob-pathspecs"
+                | "--icase-pathspecs"
+        ) {
+            index += 1;
+            continue;
+        }
+        if argument.starts_with('-') {
+            return None;
+        }
+        return Some(argument);
+    }
+    None
+}
+
+fn is_read_only_git_subcommand(subcommand: &str) -> bool {
+    matches!(
+        subcommand,
+        "diff" | "status" | "show" | "log" | "grep" | "ls-files"
+    )
+}
+
+fn human_action(commands: &[SimpleCommand]) -> Option<HumanAction> {
     commands.iter().find_map(|command| {
         let words: Vec<&str> = command
+            .argv
             .iter()
             .filter(|word| word.as_str() != "--json")
             .map(|word| program_name(word))
             .collect();
-        match words.as_slice() {
-            ["telos", "change", "approve", ..] => Some("telos change approve"),
-            ["telos", "adopt", ..] => Some("telos adopt"),
-            ["telos", "revert", ..] => Some("telos revert"),
-            _ => None,
-        }
+        let name = match words.as_slice() {
+            ["telos", "change", "approve", ..] => "telos change approve",
+            ["telos", "adopt", ..] => "telos adopt",
+            ["telos", "revert", ..] => "telos revert",
+            _ => return None,
+        };
+        let literal_prefix_covered = match name {
+            "telos change approve" => {
+                command
+                    .argv
+                    .starts_with(&["telos".into(), "change".into(), "approve".into()])
+            }
+            "telos adopt" => command.argv.starts_with(&["telos".into(), "adopt".into()]),
+            "telos revert" => command.argv.starts_with(&["telos".into(), "revert".into()]),
+            _ => false,
+        };
+        Some(HumanAction {
+            name,
+            native_rule_covered: command.native_rule_covered && literal_prefix_covered,
+        })
     })
 }
 

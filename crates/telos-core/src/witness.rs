@@ -62,9 +62,12 @@ pub fn scenario_pattern(id: ScenarioId) -> String {
 /// every path [`glob_matches`] returns for `[tests] globs` is scanned for
 /// the scenario's `scn_NNNN` pattern as a raw byte substring (CRLF-
 /// insensitive by construction, since the pattern itself holds no `\r` or
-/// `\n`); zero or more than one match is `TelosTestNotFound`, worded exactly
-/// as Annex F freezes it. Note that a configured runner is *not* checked
-/// here -- that gate belongs to the caller (`telos test`, T3).
+/// `\n`) that starts an identifier -- `descn_0001x` does not count, only an
+/// occurrence not itself preceded by an `[A-Za-z0-9_]` byte does (see
+/// [`identifier_at`]); zero or more than one match is `TelosTestNotFound`,
+/// worded exactly as Annex F freezes it. Note that a configured runner is
+/// *not* checked here -- that gate belongs to the caller (`telos test`,
+/// T3).
 pub fn find_test_for(
     ws: &Workspace,
     id: ScenarioId,
@@ -123,19 +126,36 @@ fn read_bytes(ws: &Workspace, path: &RepoPath) -> Result<Vec<u8>, TelosError> {
     })
 }
 
-/// Finds `pattern` as a raw byte substring of `bytes` and, if found, returns
-/// the longest `[A-Za-z0-9_]*` run starting at the match -- the identifier
-/// the pattern is a prefix of (e.g. `scn_0001_settles` out of `fn
-/// scn_0001_settles()`). `None` when the pattern does not occur at all.
+/// Finds `pattern` as a raw byte substring of `bytes`, at an *identifier
+/// boundary* -- the byte immediately before the match, if any, must not
+/// itself be `[A-Za-z0-9_]` -- and, if found, returns the longest
+/// `[A-Za-z0-9_]*` run starting at the match: the identifier the pattern is
+/// a prefix of (e.g. `scn_0001_settles` out of `fn scn_0001_settles()`).
+///
+/// The boundary check is what keeps `descn_0001x` or `xscn_0001` from
+/// counting as a match: the pattern occurs inside those bytes, but not at
+/// the start of an identifier, so neither discovery nor name extraction may
+/// treat it as one -- the two are one decision, not two. `None` when no
+/// boundary-respecting occurrence exists.
 fn identifier_at(bytes: &[u8], pattern: &[u8]) -> Option<String> {
-    let start = bytes
-        .windows(pattern.len())
-        .position(|window| window == pattern)?;
-    let mut end = start;
-    while end < bytes.len() && is_identifier_byte(bytes[end]) {
-        end += 1;
+    if pattern.is_empty() || bytes.len() < pattern.len() {
+        return None;
     }
-    Some(String::from_utf8_lossy(&bytes[start..end]).into_owned())
+    for start in 0..=(bytes.len() - pattern.len()) {
+        if bytes[start..start + pattern.len()] != *pattern {
+            continue;
+        }
+        let preceded_by_identifier_byte = start > 0 && is_identifier_byte(bytes[start - 1]);
+        if preceded_by_identifier_byte {
+            continue;
+        }
+        let mut end = start + pattern.len();
+        while end < bytes.len() && is_identifier_byte(bytes[end]) {
+            end += 1;
+        }
+        return Some(String::from_utf8_lossy(&bytes[start..end]).into_owned());
+    }
+    None
 }
 
 fn is_identifier_byte(b: u8) -> bool {
@@ -177,13 +197,18 @@ fn multiple_match_error(pattern: &str, hits: &[(RepoPath, String)]) -> TelosErro
 /// `current`'s oid for its test path (an absent path means the file is
 /// gone). No red at all is [`WitnessVerdict::MissingRed`]; reds exist but
 /// none matches `current` is [`WitnessVerdict::Sealed`], reported against
-/// the most recent red attempt. Once a current red is found, the first
-/// later green run on the *same path* decides the rest: none is
-/// [`WitnessVerdict::MissingGreen`] (this is also what a red-green-red cycle
-/// collapses to, since the second red becomes the current one and nothing
-/// follows it); the same oid as the red is [`WitnessVerdict::Intact`]; any
-/// other oid is [`WitnessVerdict::Sealed`] -- the green was taken on bytes
-/// the current red does not stand for.
+/// the most recent red attempt. Once a current red is found, every later
+/// green run on the *same path* is considered together, not just the first:
+/// if any of them shares the red's oid, that pair proves the current bytes
+/// and the verdict is [`WitnessVerdict::Intact`] regardless of what other,
+/// differently-`oid`'d greens sit between the red and it (a green re-run on
+/// bytes that later moved back to the red's does not un-prove the pair).
+/// Only when *no* later green shares the red's oid does an earlier,
+/// different-oid one count: [`WitnessVerdict::Sealed`], since it was taken
+/// on bytes the current red does not stand for. No later green at all on
+/// that path is [`WitnessVerdict::MissingGreen`] -- also what a
+/// red-green-red cycle collapses to, since the second red becomes the
+/// current one and nothing follows it.
 pub fn witness_verdict(
     journal: &[JournalEntry],
     scenario: ScenarioId,
@@ -220,14 +245,21 @@ pub fn witness_verdict(
     };
 
     let red = runs[red_idx];
-    let later_green = runs[red_idx + 1..]
+    let later_same_path_greens: Vec<&TestRun> = runs[red_idx + 1..]
         .iter()
-        .find(|run| run.witness == Witness::Green && run.test.path == red.test.path);
+        .copied()
+        .filter(|run| run.witness == Witness::Green && run.test.path == red.test.path)
+        .collect();
 
-    match later_green {
-        None => WitnessVerdict::MissingGreen,
-        Some(green) if green.oid == red.oid => WitnessVerdict::Intact,
-        Some(_) => WitnessVerdict::Sealed(sealed_message(scenario, &red.test.path, current)),
+    if later_same_path_greens
+        .iter()
+        .any(|green| green.oid == red.oid)
+    {
+        WitnessVerdict::Intact
+    } else if later_same_path_greens.is_empty() {
+        WitnessVerdict::MissingGreen
+    } else {
+        WitnessVerdict::Sealed(sealed_message(scenario, &red.test.path, current))
     }
 }
 
@@ -417,6 +449,36 @@ mod tests {
     }
 
     #[test]
+    fn find_test_for_does_not_match_the_pattern_embedded_in_a_longer_identifier() {
+        // "descn_0001x" contains the pattern as a substring, but not at an
+        // identifier boundary on either side -- neither discovery nor name
+        // extraction may count it (controller ruling).
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        fs::write(tmp.path().join("tests/only.rs"), "descn_0001x\n").unwrap();
+        let ws = workspace(tmp.path(), &["tests/**/*.rs"]);
+
+        let err = find_test_for(&ws, ScenarioId(1), None).unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::TelosTestNotFound);
+        assert_eq!(
+            err.message,
+            "no file matched by the [tests] globs contains `scn_0001`"
+        );
+    }
+
+    #[test]
+    fn find_test_for_a_bare_pattern_with_no_suffix_is_its_own_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("chosen.rs"), "scn_0001").unwrap();
+        let ws = workspace(tmp.path(), &[]);
+
+        let found = find_test_for(&ws, ScenarioId(1), Some(&RepoPath::new("chosen.rs"))).unwrap();
+
+        assert_eq!(found.name.as_deref(), Some("scn_0001"));
+    }
+
+    #[test]
     fn find_test_for_with_file_and_pattern_present_extracts_the_name() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("chosen.rs"), "fn scn_0001_x() {}\n").unwrap();
@@ -526,6 +588,56 @@ mod tests {
             run(Witness::Red, "tests/billing.rs", "bbb"),
         ];
         let current = current(&[("tests/billing.rs", "bbb")]);
+
+        assert_eq!(
+            witness_verdict(&journal, ScenarioId(1), &current),
+            WitnessVerdict::MissingGreen
+        );
+    }
+
+    #[test]
+    fn witness_verdict_is_intact_when_a_same_oid_green_follows_a_different_oid_one() {
+        // A green re-run on bytes that later moved back to the red's must
+        // not mask the same-oid green that follows it: git diff shows
+        // nothing wrong, so the verdict must not claim it does.
+        let journal = vec![
+            run(Witness::Red, "tests/billing.rs", "aaa"),
+            run(Witness::Green, "tests/billing.rs", "bbb"),
+            run(Witness::Green, "tests/billing.rs", "aaa"),
+        ];
+        let current = current(&[("tests/billing.rs", "aaa")]);
+
+        assert_eq!(
+            witness_verdict(&journal, ScenarioId(1), &current),
+            WitnessVerdict::Intact
+        );
+    }
+
+    #[test]
+    fn witness_verdict_is_missing_green_when_the_later_green_is_on_a_different_path() {
+        let journal = vec![
+            run(Witness::Red, "tests/x.rs", "aaa"),
+            run(Witness::Green, "tests/y.rs", "ccc"),
+        ];
+        let current = current(&[("tests/x.rs", "aaa"), ("tests/y.rs", "ccc")]);
+
+        assert_eq!(
+            witness_verdict(&journal, ScenarioId(1), &current),
+            WitnessVerdict::MissingGreen
+        );
+    }
+
+    #[test]
+    fn witness_verdict_picks_the_red_matching_current_even_when_it_is_not_the_last_red() {
+        // Two reds, no green at all: the earlier red (oid `aaa`) is the one
+        // that matches `current`, the later one (oid `bbb`) does not -- the
+        // verdict follows whichever red is valid against the current
+        // bytes, and since no green was ever recorded, it is MissingGreen.
+        let journal = vec![
+            run(Witness::Red, "tests/billing.rs", "aaa"),
+            run(Witness::Red, "tests/billing.rs", "bbb"),
+        ];
+        let current = current(&[("tests/billing.rs", "aaa")]);
 
         assert_eq!(
             witness_verdict(&journal, ScenarioId(1), &current),
@@ -680,11 +792,14 @@ mod tests {
     }
 
     #[test]
-    fn required_witnesses_is_sorted_and_deduplicated_across_ops() {
+    fn required_witnesses_is_sorted_across_multiple_intents() {
         // Intent 17 gains a new scenario 95; intent 5 is brand new (absent
         // from base entirely) with a lower-numbered scenario 10. The merged
         // result must come back ascending regardless of staging order, and
-        // scenario 91 (unchanged) must not appear.
+        // scenario 91 (unchanged) must not appear. Each scenario id here is
+        // distinct, so this pins ordering, not deduplication -- see
+        // `required_witnesses_dedupes_two_ops_on_the_same_intent_id` for
+        // the latter.
         let mut intent_a_post = int_0017();
         let mut new_a = intent_a_post.scenarios[0].clone();
         new_a.id = ScenarioId(95);
@@ -708,5 +823,27 @@ mod tests {
             required_witnesses(&base, &post, &ops),
             vec![ScenarioId(10), ScenarioId(95)]
         );
+    }
+
+    #[test]
+    fn required_witnesses_dedupes_two_ops_on_the_same_intent_id() {
+        // Two ops in one change's staged list both target intent 17 (the
+        // type system permits it even though the grammar discourages it):
+        // the scenario they both make required must collapse to one entry,
+        // not appear once per op.
+        let base = base_with(int_0017());
+
+        let mut post_intent = int_0017();
+        let mut new_scenario = post_intent.scenarios[0].clone();
+        new_scenario.id = ScenarioId(92);
+        post_intent.scenarios.push(new_scenario);
+        let post = post_with(post_intent.clone());
+
+        let ops = vec![
+            StagedOp::AddIntent(post_intent.clone()),
+            StagedOp::EditIntent(post_intent),
+        ];
+
+        assert_eq!(required_witnesses(&base, &post, &ops), vec![ScenarioId(92)]);
     }
 }

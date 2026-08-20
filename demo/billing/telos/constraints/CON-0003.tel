@@ -1,5 +1,5 @@
 constraint CON-0003 architecture "Hexagonal boundaries" {
   rule  "Domain code must not import adapter modules."
   scope global
-  check "git --version"
+  check "cargo test --test architecture"
 }

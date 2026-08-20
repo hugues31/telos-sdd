@@ -24,29 +24,7 @@ const ISSUED_TEST: &str = "tests/invoice_issued.rs";
 const ISSUED_FN: &str = "scn_0091_new_invoice_is_open";
 const PAYMENT_TEST: &str = "tests/payment_received.rs";
 const PAYMENT_FN: &str = "scn_0107_full_payment_settles_invoice";
-
-const BOOTSTRAP_MANIFEST: &str = r#"[package]
-name = "billing-rebuild"
-version = "0.1.0"
-edition = "2024"
-
-[features]
-application = []
-
-[[bin]]
-name = "application"
-path = "src/main.rs"
-required-features = ["application"]
-"#;
-
-const APPLICATION_MANIFEST: &str = r#"[package]
-name = "billing-rebuild"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-path = "src/lib.rs"
-"#;
+const ARCHITECTURE_TEST: &str = "architecture/hexagonal.rs";
 
 const ISSUED_TEST_SOURCE: &str = r#"use billing_rebuild::{Invoice, InvoiceState};
 
@@ -144,6 +122,58 @@ impl Invoice {
 }
 "#;
 
+const CONSTRAINT_VIOLATING_IMPLEMENTATION: &str = r#"pub mod adapters {
+    pub struct LedgerAdapter;
+}
+
+use crate::adapters::LedgerAdapter;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceState {
+    Open,
+    Settled,
+}
+
+pub struct Invoice {
+    customer: String,
+    balance_cents: u64,
+    state: InvoiceState,
+}
+
+impl Invoice {
+    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
+        Self {
+            customer: customer.to_owned(),
+            balance_cents,
+            state: InvoiceState::Open,
+        }
+    }
+
+    pub fn receive_payment(&mut self, amount_cents: u64) {
+        if amount_cents >= self.balance_cents {
+            self.balance_cents = 0;
+            self.state = InvoiceState::Settled;
+        }
+    }
+
+    pub fn state(&self) -> InvoiceState {
+        self.state
+    }
+
+    pub fn customer(&self) -> &str {
+        &self.customer
+    }
+
+    pub fn balance_cents(&self) -> u64 {
+        self.balance_cents
+    }
+
+    pub fn adapter_type_name(&self) -> &'static str {
+        std::any::type_name::<LedgerAdapter>()
+    }
+}
+"#;
+
 #[derive(Debug, PartialEq)]
 struct Observations {
     plan: Value,
@@ -156,6 +186,29 @@ struct Observations {
 
 fn demo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/billing")
+}
+
+fn documented_block(root: &Path, marker: &str, language: &str) -> String {
+    let readme = fs::read_to_string(root.join("README.md")).expect("read demo README");
+    let start = format!("<!-- {marker}:start -->\n```{language}\n");
+    let end = format!("\n```\n<!-- {marker}:end -->");
+    let (_, after_start) = readme
+        .split_once(&start)
+        .unwrap_or_else(|| panic!("README is missing executable `{marker}` start marker"));
+    let (block, _) = after_start
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("README is missing executable `{marker}` end marker"));
+    format!("{block}\n")
+}
+
+fn documented_heredoc(root: &Path, marker: &str, target: &str) -> String {
+    let command = documented_block(root, marker, "sh");
+    let prefix = format!("cat > {target} <<'TELOS_EOF'\n");
+    command
+        .strip_prefix(&prefix)
+        .and_then(|body| body.strip_suffix("TELOS_EOF\n"))
+        .unwrap_or_else(|| panic!("README `{marker}` is not an executable heredoc for `{target}`"))
+        .to_owned()
 }
 
 fn copy_dir(src: &Path, dst: &Path) {
@@ -180,7 +233,12 @@ fn fresh_demo() -> tempfile::TempDir {
     tmp
 }
 
-fn run(root: &Path, target_dir: &Path, args: &[&str], stdin: Option<&str>) -> Value {
+fn execute(
+    root: &Path,
+    target_dir: &Path,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> (std::process::ExitStatus, Value, String) {
     let mut command = telos(root, args);
     command.env("CARGO_TARGET_DIR", target_dir);
     if let Some(stdin) = stdin {
@@ -195,14 +253,30 @@ fn run(root: &Path, target_dir: &Path, args: &[&str], stdin: Option<&str>) -> Va
             String::from_utf8_lossy(&output.stderr),
         )
     });
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    (output.status, envelope, stderr)
+}
+
+fn run(root: &Path, target_dir: &Path, args: &[&str], stdin: Option<&str>) -> Value {
+    let (status, envelope, stderr) = execute(root, target_dir, args, stdin);
     assert!(
-        output.status.success(),
-        "telos {} failed: {envelope:#}\nstderr: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr),
+        status.success(),
+        "telos {} failed: {envelope:#}\nstderr: {stderr}",
+        args.join(" ")
     );
     assert_eq!(envelope["ok"], json!(true));
     envelope
+}
+
+fn error(root: &Path, target_dir: &Path, args: &[&str]) -> Value {
+    let (status, envelope, stderr) = execute(root, target_dir, args, None);
+    assert!(
+        !status.success(),
+        "telos {} unexpectedly succeeded: {envelope:#}\nstderr: {stderr}",
+        args.join(" ")
+    );
+    assert_eq!(envelope["ok"], json!(false));
+    envelope["error"].clone()
 }
 
 fn result(root: &Path, target_dir: &Path, args: &[&str]) -> Value {
@@ -285,7 +359,11 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
     assert_eq!(approved["digest"], diff["digest"]);
 
     if batch.intent == INT_0017 {
-        fs::write(root.join("Cargo.toml"), APPLICATION_MANIFEST).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            documented_heredoc(root, "application-manifest", "Cargo.toml"),
+        )
+        .unwrap();
     }
     fs::create_dir_all(root.join("tests")).unwrap();
     fs::write(root.join(batch.test_path), batch.test_source).unwrap();
@@ -313,6 +391,24 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
     let green = result(root, target_dir, &["test", batch.scenario, "--json"]);
     assert_eq!(green["witness"], json!("green"));
     assert_eq!(green["test"], red["test"]);
+
+    if batch.intent == INT_0042 {
+        let constraint_error = error(
+            root,
+            target_dir,
+            &["change", "reconcile", &change, "--json"],
+        );
+        assert_eq!(
+            constraint_error,
+            json!({
+                "code": "TELOS_CONSTRAINT_FAILED",
+                "message": "CON-0003 check failed: `cargo test --test architecture`",
+                "hint": "Run the constraint's `check` command directly to see its output."
+            })
+        );
+        assert!(root.join(format!("telos/changes/{change}.tel")).exists());
+        fs::write(root.join(CODE), FINAL_IMPLEMENTATION).unwrap();
+    }
 
     let reconciled = result(
         root,
@@ -506,10 +602,20 @@ fn reconstruct(target_dir: &Path) -> Observations {
     assert_eq!(initial_status["scenarios"][0]["tests"], json!([]));
     assert_eq!(initial_status["scenarios"][1]["tests"], json!([]));
 
-    // Cargo can execute the configured future runner before any application
-    // source or test exists. This generated, target-less manifest is not part
-    // of the public demo and is replaced by the implementer before the red.
-    fs::write(root.join("Cargo.toml"), BOOTSTRAP_MANIFEST).unwrap();
+    // Cargo can execute the configured future runner before application source
+    // or scenario tests exist. This generated checker manifest is not part of
+    // the public demo and is replaced by the implementer before the red.
+    fs::create_dir_all(root.join("architecture")).unwrap();
+    fs::write(
+        root.join(ARCHITECTURE_TEST),
+        documented_heredoc(root, "architecture-check", ARCHITECTURE_TEST),
+    )
+    .unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        documented_heredoc(root, "bootstrap-manifest", "Cargo.toml"),
+    )
+    .unwrap();
     let bootstrapped = result(
         root,
         target_dir,
@@ -550,7 +656,7 @@ fn reconstruct(target_dir: &Path) -> Observations {
             test_path: PAYMENT_TEST,
             test_name: PAYMENT_FN,
             test_source: PAYMENT_TEST_SOURCE,
-            implementation: FINAL_IMPLEMENTATION,
+            implementation: CONSTRAINT_VIOLATING_IMPLEMENTATION,
             expected_green: 2,
         },
     );
@@ -572,17 +678,13 @@ fn reconstruct(target_dir: &Path) -> Observations {
     );
 
     let bindings = fs::read_to_string(root.join("telos/bindings.tel")).unwrap();
-    for expected in [
-        format!("implements \"{CODE}\" -> {INT_0017}"),
-        format!("implements \"{CODE}\" -> {INT_0042}"),
-        format!("proves     \"{ISSUED_TEST}::{ISSUED_FN}\" -> {SCN_0091}"),
-        format!("proves     \"{PAYMENT_TEST}::{PAYMENT_FN}\" -> {SCN_0107}"),
-    ] {
-        assert!(
-            bindings.contains(&expected),
-            "missing `{expected}` in:\n{bindings}"
-        );
-    }
+    assert_eq!(
+        bindings,
+        "implements \"src/lib.rs\" -> INT-0017\n\
+         implements \"src/lib.rs\" -> INT-0042\n\
+         proves     \"tests/invoice_issued.rs::scn_0091_new_invoice_is_open\" -> SCN-0091\n\
+         proves     \"tests/payment_received.rs::scn_0107_full_payment_settles_invoice\" -> SCN-0107\n"
+    );
     assert!(
         fs::read_dir(root.join("telos/changes"))
             .unwrap()
@@ -593,6 +695,7 @@ fn reconstruct(target_dir: &Path) -> Observations {
         "Cargo.lock".to_owned(),
         "Cargo.toml".to_owned(),
         "README.md".to_owned(),
+        ARCHITECTURE_TEST.to_owned(),
         CODE.to_owned(),
         ISSUED_TEST.to_owned(),
         PAYMENT_TEST.to_owned(),

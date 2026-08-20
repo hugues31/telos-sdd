@@ -57,9 +57,9 @@ pub(crate) struct CoverageView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CoverageRowView {
-    pub(crate) subject: String,
-    pub(crate) covered: Option<u32>,
-    pub(crate) total: u32,
+    pub(crate) intent: String,
+    pub(crate) scenario: String,
+    pub(crate) test: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -121,18 +121,60 @@ pub(crate) struct ProofView {
     pub(crate) scenario: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(tag = "kind", content = "id", rename_all = "lowercase")]
+pub(crate) enum GraphKey {
+    Notion(String),
+    Intent(String),
+    Scenario(String),
+    Constraint(String),
+    Code(String),
+    Test(String),
+}
+
+impl GraphKey {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            Self::Notion(id)
+            | Self::Intent(id)
+            | Self::Scenario(id)
+            | Self::Constraint(id)
+            | Self::Code(id)
+            | Self::Test(id) => id,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Notion(_) => "notion",
+            Self::Intent(_) => "intent",
+            Self::Scenario(_) => "scenario",
+            Self::Constraint(_) => "constraint",
+            Self::Code(_) => "code",
+            Self::Test(_) => "test",
+        }
+    }
+
+    pub(crate) fn dom_key(&self) -> String {
+        format!("{}:{}", self.kind(), self.id())
+    }
+
+    pub(crate) fn dom_id(&self) -> String {
+        format!("{}-{}", self.kind(), self.id())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct GraphNodeView {
-    pub(crate) id: String,
-    pub(crate) kind: String,
+    pub(crate) key: GraphKey,
     pub(crate) label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct GraphEdgeView {
-    pub(crate) from: String,
+    pub(crate) from: GraphKey,
     pub(crate) relation: String,
-    pub(crate) to: String,
+    pub(crate) to: GraphKey,
 }
 
 impl ViewSnapshot {
@@ -149,7 +191,7 @@ impl ViewSnapshot {
             .collect();
 
         let mut scenarios = Vec::new();
-        let intents = model
+        let intents: Vec<IntentView> = model
             .intents
             .values()
             .map(|intent| {
@@ -256,13 +298,31 @@ impl ViewSnapshot {
         let edges = graph_edges
             .into_iter()
             .map(|(from, relation, to)| GraphEdgeView {
-                from: from.to_string(),
+                from: GraphKey::from(&from),
                 relation: relation.as_str().to_string(),
-                to: to.to_string(),
+                to: GraphKey::from(&to),
             })
             .collect();
 
         let raw_coverage = model_coverage(model);
+        let mut rows = Vec::new();
+        for intent in &intents {
+            for scenario in &intent.scenarios {
+                if scenario.proves.is_empty() {
+                    rows.push(CoverageRowView {
+                        intent: intent.id.clone(),
+                        scenario: scenario.id.clone(),
+                        test: None,
+                    });
+                } else {
+                    rows.extend(scenario.proves.iter().map(|test| CoverageRowView {
+                        intent: intent.id.clone(),
+                        scenario: scenario.id.clone(),
+                        test: Some(test.clone()),
+                    }));
+                }
+            }
+        }
         let coverage = CoverageView {
             notions: raw_coverage.notions,
             constraints: raw_coverage.constraints,
@@ -271,28 +331,7 @@ impl ViewSnapshot {
             intents_implemented: raw_coverage.intents_implemented,
             scenarios_total: raw_coverage.scenarios_total,
             scenarios_proved: raw_coverage.scenarios_proved,
-            rows: vec![
-                CoverageRowView {
-                    subject: "notions".to_string(),
-                    covered: None,
-                    total: raw_coverage.notions,
-                },
-                CoverageRowView {
-                    subject: "constraints".to_string(),
-                    covered: None,
-                    total: raw_coverage.constraints,
-                },
-                CoverageRowView {
-                    subject: "intents implemented".to_string(),
-                    covered: Some(raw_coverage.intents_implemented),
-                    total: raw_coverage.intents_total,
-                },
-                CoverageRowView {
-                    subject: "scenarios proved".to_string(),
-                    covered: Some(raw_coverage.scenarios_proved),
-                    total: raw_coverage.scenarios_total,
-                },
-            ],
+            rows,
         };
 
         Self {
@@ -334,6 +373,19 @@ impl ViewSnapshot {
     }
 }
 
+impl From<&NodeRef> for GraphKey {
+    fn from(node: &NodeRef) -> Self {
+        match node {
+            NodeRef::Notion(name) => Self::Notion(name.to_string()),
+            NodeRef::Intent(id) => Self::Intent(id.to_string()),
+            NodeRef::Scenario(id) => Self::Scenario(id.to_string()),
+            NodeRef::Constraint(id) => Self::Constraint(id.to_string()),
+            NodeRef::Code(path) => Self::Code(path.to_string()),
+            NodeRef::Test(test) => Self::Test(test.clone()),
+        }
+    }
+}
+
 fn model_nodes(model: &TelosModel) -> BTreeSet<NodeRef> {
     let mut nodes = BTreeSet::new();
     nodes.extend(model.notions.keys().cloned().map(NodeRef::Notion));
@@ -354,44 +406,31 @@ fn model_nodes(model: &TelosModel) -> BTreeSet<NodeRef> {
 }
 
 fn graph_node(model: &TelosModel, node: &NodeRef) -> GraphNodeView {
-    let (kind, label) = match node {
-        NodeRef::Notion(name) => (
-            "notion",
-            model
-                .notions
-                .get(name)
-                .map(|notion| notion.def.as_str())
-                .unwrap_or(name.as_str()),
-        ),
-        NodeRef::Intent(id) => (
-            "intent",
-            model
-                .intents
-                .get(id)
-                .map(|intent| intent.title.as_str())
-                .unwrap_or(""),
-        ),
-        NodeRef::Scenario(id) => (
-            "scenario",
-            model
-                .scenario(*id)
-                .map(|(_, scenario)| scenario.title.as_str())
-                .unwrap_or(""),
-        ),
-        NodeRef::Constraint(id) => (
-            "constraint",
-            model
-                .constraints
-                .get(id)
-                .map(|constraint| constraint.title.as_str())
-                .unwrap_or(""),
-        ),
-        NodeRef::Code(path) => ("code", path.as_str()),
-        NodeRef::Test(test) => ("test", test.as_str()),
+    let label = match node {
+        NodeRef::Notion(name) => model
+            .notions
+            .get(name)
+            .map(|notion| notion.def.as_str())
+            .unwrap_or(name.as_str()),
+        NodeRef::Intent(id) => model
+            .intents
+            .get(id)
+            .map(|intent| intent.title.as_str())
+            .unwrap_or(""),
+        NodeRef::Scenario(id) => model
+            .scenario(*id)
+            .map(|(_, scenario)| scenario.title.as_str())
+            .unwrap_or(""),
+        NodeRef::Constraint(id) => model
+            .constraints
+            .get(id)
+            .map(|constraint| constraint.title.as_str())
+            .unwrap_or(""),
+        NodeRef::Code(path) => path.as_str(),
+        NodeRef::Test(test) => test.as_str(),
     };
     GraphNodeView {
-        id: node.to_string(),
-        kind: kind.to_string(),
+        key: GraphKey::from(node),
         label: label.to_string(),
     }
 }
@@ -453,22 +492,75 @@ fn constraint_kind(kind: ConstraintKind) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) fn all_relations_fixture_model() -> TelosModel {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use telos_core::workspace::Workspace;
+
+    let source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telos-core/tests/corpus/billing");
+    let fixture = tempfile::tempdir().expect("temporary relation fixture");
+    for directory in ["telos/notions", "telos/intents", "telos/constraints"] {
+        fs::create_dir_all(fixture.path().join(directory)).unwrap();
+    }
+    for relative in [
+        "telos/telos.toml",
+        "telos/notions/Customer.tel",
+        "telos/notions/Invoice.tel",
+        "telos/notions/InvoiceIssued.tel",
+        "telos/notions/PaymentReceived.tel",
+        "telos/intents/INT-0017.tel",
+        "telos/bindings.tel",
+    ] {
+        fs::copy(source.join(relative), fixture.path().join(relative)).unwrap();
+    }
+    let intent = fs::read_to_string(source.join("telos/intents/INT-0042.tel"))
+        .unwrap()
+        .replace(
+            "  requires INT-0017",
+            "  refines INT-0017\n  requires INT-0017\n  excludes INT-0017",
+        );
+    fs::write(fixture.path().join("telos/intents/INT-0042.tel"), intent).unwrap();
+    let constraint = fs::read_to_string(source.join("telos/constraints/CON-0003.tel"))
+        .unwrap()
+        .replace("  scope global", "  scope INT-0042");
+    fs::write(
+        fixture.path().join("telos/constraints/CON-0003.tel"),
+        constraint,
+    )
+    .unwrap();
+
+    Workspace::discover(fixture.path())
+        .unwrap()
+        .load_model()
+        .expect("all-relations fixture passes semantic validation")
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use telos_core::ids::IntentId;
+    use telos_core::graph::{NodeRef, Relation};
+    use telos_core::ids::{IntentId, RepoPath};
+    use telos_core::model::{Binding, TelosModel};
+    use telos_core::span::{Sp, Span};
     use telos_core::state::{ProjectStateKind, StateReport};
     use telos_core::workspace::Workspace;
 
-    use super::ViewSnapshot;
+    use super::{GraphKey, ViewSnapshot};
 
-    fn fixture_snapshot() -> ViewSnapshot {
+    fn fixture_model() -> TelosModel {
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telos-core/tests/corpus/billing");
         let workspace = Workspace::discover(&fixture).expect("Billing workspace is discoverable");
-        let model = workspace
+        workspace
             .load_model()
-            .expect("Billing fixture is a valid model");
+            .expect("Billing fixture is a valid model")
+    }
+
+    fn fixture_snapshot() -> ViewSnapshot {
+        let model = fixture_model();
         let state = StateReport {
             state: ProjectStateKind::Coherent,
             drift: vec![],
@@ -481,9 +573,16 @@ mod tests {
     fn snapshot_contains_graph_relations_and_cross_references() {
         let snapshot = fixture_snapshot();
 
-        assert!(snapshot.nodes.iter().any(|node| node.id == "INT-0042"));
+        assert!(
+            snapshot
+                .nodes
+                .iter()
+                .any(|node| node.key == GraphKey::Intent("INT-0042".to_string()))
+        );
         assert!(snapshot.edges.iter().any(|edge| {
-            edge.from == "INT-0042" && edge.relation == "requires" && edge.to == "INT-0017"
+            edge.from == GraphKey::Intent("INT-0042".to_string())
+                && edge.relation == "requires"
+                && edge.to == GraphKey::Intent("INT-0017".to_string())
         }));
 
         let intent = snapshot.intent(IntentId(42)).unwrap();
@@ -560,7 +659,7 @@ mod tests {
             snapshot
                 .nodes
                 .iter()
-                .map(|node| node.id.as_str())
+                .map(|node| node.key.id())
                 .collect::<Vec<_>>(),
             [
                 "Customer",
@@ -580,7 +679,7 @@ mod tests {
             snapshot
                 .edges
                 .iter()
-                .map(|edge| { (edge.from.as_str(), edge.relation.as_str(), edge.to.as_str(),) })
+                .map(|edge| { (edge.from.id(), edge.relation.as_str(), edge.to.id(),) })
                 .collect::<Vec<_>>(),
             [
                 ("INT-0017", "uses", "Invoice"),
@@ -619,5 +718,183 @@ mod tests {
         assert_eq!(snapshot.coverage.intents_implemented, 1);
         assert_eq!(snapshot.coverage.scenarios_total, 2);
         assert_eq!(snapshot.coverage.scenarios_proved, 1);
+    }
+
+    #[test]
+    fn coverage_rows_include_every_scenario_and_each_literal_proof() {
+        let snapshot = fixture_snapshot();
+
+        assert_eq!(
+            snapshot
+                .coverage
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.intent.as_str(),
+                        row.scenario.as_str(),
+                        row.test.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("INT-0017", "SCN-0091", None),
+                (
+                    "INT-0042",
+                    "SCN-0107",
+                    Some("tests/billing.rs::scn_0107_full_payment_settles_the_invoice"),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn graph_keys_keep_colliding_display_strings_distinct() {
+        let mut model = fixture_model();
+        let path = RepoPath::new("INT-0042");
+        model.bindings.push(Binding::Implements {
+            path: path.clone(),
+            intent: Sp {
+                node: IntentId(17),
+                span: Span::default(),
+            },
+        });
+        model.graph.add_edge(
+            NodeRef::Code(path),
+            Relation::Implements,
+            NodeRef::Intent(IntentId(17)),
+        );
+        let snapshot = ViewSnapshot::build(
+            &StateReport {
+                state: ProjectStateKind::Coherent,
+                drift: vec![],
+                open_changes: vec![],
+            },
+            &model,
+        );
+
+        let intent = GraphKey::Intent("INT-0042".to_string());
+        let code = GraphKey::Code("INT-0042".to_string());
+        assert!(snapshot.nodes.iter().any(|node| node.key == intent));
+        assert!(snapshot.nodes.iter().any(|node| node.key == code));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.from == code
+                && edge.relation == "implements"
+                && edge.to == GraphKey::Intent("INT-0017".to_string())
+        }));
+    }
+
+    #[test]
+    fn validated_model_projects_all_eight_relations_in_graph_order() {
+        let model = super::all_relations_fixture_model();
+        let snapshot = ViewSnapshot::build(
+            &StateReport {
+                state: ProjectStateKind::Coherent,
+                drift: vec![],
+                open_changes: vec![],
+            },
+            &model,
+        );
+
+        assert_eq!(
+            snapshot
+                .edges
+                .iter()
+                .map(|edge| {
+                    (
+                        edge.from.dom_key(),
+                        edge.relation.as_str(),
+                        edge.to.dom_key(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "intent:INT-0017".to_string(),
+                    "uses",
+                    "notion:Invoice".to_string()
+                ),
+                (
+                    "intent:INT-0017".to_string(),
+                    "uses",
+                    "notion:InvoiceIssued".to_string()
+                ),
+                (
+                    "intent:INT-0042".to_string(),
+                    "refines",
+                    "intent:INT-0017".to_string()
+                ),
+                (
+                    "intent:INT-0042".to_string(),
+                    "requires",
+                    "intent:INT-0017".to_string()
+                ),
+                (
+                    "intent:INT-0042".to_string(),
+                    "excludes",
+                    "intent:INT-0017".to_string()
+                ),
+                (
+                    "intent:INT-0042".to_string(),
+                    "uses",
+                    "notion:Invoice".to_string()
+                ),
+                (
+                    "intent:INT-0042".to_string(),
+                    "uses",
+                    "notion:PaymentReceived".to_string()
+                ),
+                (
+                    "scenario:SCN-0091".to_string(),
+                    "verifies",
+                    "intent:INT-0017".to_string()
+                ),
+                (
+                    "scenario:SCN-0091".to_string(),
+                    "uses",
+                    "notion:Customer".to_string()
+                ),
+                (
+                    "scenario:SCN-0091".to_string(),
+                    "uses",
+                    "notion:Invoice".to_string()
+                ),
+                (
+                    "scenario:SCN-0091".to_string(),
+                    "uses",
+                    "notion:InvoiceIssued".to_string()
+                ),
+                (
+                    "scenario:SCN-0107".to_string(),
+                    "verifies",
+                    "intent:INT-0042".to_string()
+                ),
+                (
+                    "scenario:SCN-0107".to_string(),
+                    "uses",
+                    "notion:Invoice".to_string()
+                ),
+                (
+                    "scenario:SCN-0107".to_string(),
+                    "uses",
+                    "notion:PaymentReceived".to_string()
+                ),
+                (
+                    "constraint:CON-0003".to_string(),
+                    "constrains",
+                    "intent:INT-0042".to_string()
+                ),
+                (
+                    "code:src/billing/invoice.rs".to_string(),
+                    "implements",
+                    "intent:INT-0042".to_string()
+                ),
+                (
+                    "test:tests/billing.rs::scn_0107_full_payment_settles_the_invoice".to_string(),
+                    "proves",
+                    "scenario:SCN-0107".to_string(),
+                ),
+            ]
+        );
     }
 }

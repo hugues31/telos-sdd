@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use telos_core::ids::IntentId;
 
-use super::model::{IntentView, ViewSnapshot};
+use super::model::{GraphKey, IntentView, ViewSnapshot};
 
 const RELATIONS: [&str; 9] = [
     "all",
@@ -43,7 +43,7 @@ pub(crate) fn render(snapshot: &ViewSnapshot, page: Page, mode: LinkMode) -> Opt
             )
         }
         Page::Glossary => ("Glossary".to_string(), glossary(snapshot, page, mode)),
-        Page::Coverage => ("Coverage".to_string(), coverage(snapshot)),
+        Page::Coverage => ("Coverage".to_string(), coverage(snapshot, page, mode)),
     };
 
     Some(layout(snapshot, page, mode, &title, &body))
@@ -145,15 +145,15 @@ fn graph(snapshot: &ViewSnapshot, current: Page, mode: LinkMode) -> String {
     }
     out.push_str("</select></section><section><h2>Edges</h2><div class=\"table-wrap\"><table><thead><tr><th>From</th><th>Relation</th><th>To</th></tr></thead><tbody>");
     for (index, edge) in snapshot.edges.iter().enumerate() {
-        let from = snapshot.nodes.iter().find(|node| node.id == edge.from);
-        let to = snapshot.nodes.iter().find(|node| node.id == edge.to);
         write!(
             out,
-            "<tr id=\"edge-{index}\" data-relation=\"{}\"><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+            "<tr id=\"edge-{index}\" data-relation=\"{}\" data-from-key=\"{}\" data-to-key=\"{}\"><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
             escape(&edge.relation),
-            graph_ref(snapshot, from, &edge.from, current, mode),
+            escape(&edge.from.dom_key()),
+            escape(&edge.to.dom_key()),
+            graph_ref(snapshot, &edge.from, current, mode),
             escape(&edge.relation),
-            graph_ref(snapshot, to, &edge.to, current, mode),
+            graph_ref(snapshot, &edge.to, current, mode),
         )
         .unwrap();
     }
@@ -162,9 +162,9 @@ fn graph(snapshot: &ViewSnapshot, current: Page, mode: LinkMode) -> String {
         write!(
             out,
             "<li id=\"node-{}\"><span class=\"pill\">{}</span> {} <small>{}</small></li>",
-            escape(&node.id),
-            escape(&node.kind),
-            graph_ref(snapshot, Some(node), &node.id, current, mode),
+            escape(&node.key.dom_id()),
+            node.key.kind(),
+            graph_ref(snapshot, &node.key, current, mode),
             escape(&node.label),
         )
         .unwrap();
@@ -191,10 +191,11 @@ fn intent_page(
 
     out.push_str("<section><h2>Relations</h2><ul>");
     let mut relation_count = 0;
+    let intent_key = GraphKey::Intent(intent.id.clone());
     for edge in &snapshot.edges {
-        let other = if edge.from == intent.id {
+        let other = if edge.from == intent_key {
             Some((&edge.relation, &edge.to, "out"))
-        } else if edge.to == intent.id {
+        } else if edge.to == intent_key {
             Some((&edge.relation, &edge.from, "in"))
         } else {
             None
@@ -203,13 +204,12 @@ fn intent_page(
             continue;
         };
         relation_count += 1;
-        let node = snapshot.nodes.iter().find(|node| node.id == *id);
         write!(
             out,
             "<li><span class=\"pill\">{} {}</span> {}</li>",
             escape(direction),
             escape(relation),
-            graph_ref(snapshot, node, id, current, mode),
+            graph_ref(snapshot, id, current, mode),
         )
         .unwrap();
     }
@@ -317,20 +317,32 @@ fn glossary(snapshot: &ViewSnapshot, current: Page, mode: LinkMode) -> String {
     out
 }
 
-fn coverage(snapshot: &ViewSnapshot) -> String {
+fn coverage(snapshot: &ViewSnapshot, current: Page, mode: LinkMode) -> String {
     let mut out = format!(
-        "<section><p class=\"eyebrow\">Spec evidence</p><h1>Coverage</h1><p>{} active of {} intents.</p><div class=\"table-wrap\"><table><thead><tr><th>Subject</th><th>Covered</th><th>Total</th></tr></thead><tbody>",
-        snapshot.coverage.intents_active, snapshot.coverage.intents_total
+        "<section><p class=\"eyebrow\">Spec evidence</p><h1>Coverage</h1><div class=\"metrics\"><article><strong>{}</strong><span>notions</span></article><article><strong>{}</strong><span>constraints</span></article><article><strong>{}/{}</strong><span>active intents</span></article><article><strong>{}/{}</strong><span>implemented intents</span></article><article><strong>{}/{}</strong><span>proved scenarios</span></article></div><h2>Intent × scenario × test</h2><div class=\"table-wrap\"><table><thead><tr><th>Intent</th><th>Scenario</th><th>Test</th></tr></thead><tbody>",
+        snapshot.coverage.notions,
+        snapshot.coverage.constraints,
+        snapshot.coverage.intents_active,
+        snapshot.coverage.intents_total,
+        snapshot.coverage.intents_implemented,
+        snapshot.coverage.intents_total,
+        snapshot.coverage.scenarios_proved,
+        snapshot.coverage.scenarios_total,
     );
     for row in &snapshot.coverage.rows {
+        let intent_link = intent_href(current, &row.intent, mode);
         write!(
             out,
-            "<tr><th>{}</th><td>{}</td><td>{}</td></tr>",
-            escape(&row.subject),
-            row.covered
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "—".to_string()),
-            row.total,
+            "<tr><th><a href=\"{}\">{}</a></th><td><a href=\"{}#scenario-{}\">{}</a></td><td>{}</td></tr>",
+            escape(&intent_link),
+            escape(&row.intent),
+            escape(&intent_link),
+            escape(&row.scenario),
+            escape(&row.scenario),
+            row.test
+                .as_ref()
+                .map(|test| format!("<code>{}</code>", escape(test)))
+                .unwrap_or_else(|| "<span class=\"coverage-hole\">No proof</span>".to_string()),
         )
         .unwrap();
     }
@@ -372,22 +384,13 @@ fn coverage(snapshot: &ViewSnapshot) -> String {
     out
 }
 
-fn graph_ref(
-    snapshot: &ViewSnapshot,
-    node: Option<&super::model::GraphNodeView>,
-    id: &str,
-    current: Page,
-    mode: LinkMode,
-) -> String {
-    let Some(node) = node else {
-        return format!("<code>{}</code>", escape(id));
-    };
-    let link = match node.kind.as_str() {
-        "intent" => Some(intent_href(current, &node.id, mode)),
-        "scenario" => snapshot
+fn graph_ref(snapshot: &ViewSnapshot, key: &GraphKey, current: Page, mode: LinkMode) -> String {
+    let link = match key {
+        GraphKey::Intent(id) => Some(intent_href(current, id, mode)),
+        GraphKey::Scenario(id) => snapshot
             .scenarios
             .iter()
-            .find(|scenario| scenario.id == node.id)
+            .find(|scenario| scenario.id == *id)
             .map(|scenario| {
                 format!(
                     "{}#scenario-{}",
@@ -395,16 +398,16 @@ fn graph_ref(
                     scenario.id
                 )
             }),
-        "notion" => Some(format!(
+        GraphKey::Notion(id) => Some(format!(
             "{}#notion-{}",
             href(current, PageTarget::Glossary, mode),
-            node.id
+            id
         )),
         _ => None,
     };
     match link {
-        Some(link) => format!("<a href=\"{}\">{}</a>", escape(&link), escape(&node.id)),
-        None => format!("<code>{}</code>", escape(&node.id)),
+        Some(link) => format!("<a href=\"{}\">{}</a>", escape(&link), escape(key.id())),
+        None => format!("<code>{}</code>", escape(key.id())),
     }
 }
 
@@ -483,7 +486,11 @@ const CSS: &str = "
 mod tests {
     use std::path::PathBuf;
 
+    use telos_core::graph::{NodeRef, Relation};
     use telos_core::ids::IntentId;
+    use telos_core::ids::RepoPath;
+    use telos_core::model::Binding;
+    use telos_core::span::{Sp, Span};
     use telos_core::state::{ProjectStateKind, StateReport};
     use telos_core::workspace::Workspace;
 
@@ -634,6 +641,102 @@ mod tests {
         ] {
             assert!(intent.contains(&format!("href=\"{href}\"")), "{intent}");
         }
+    }
+
+    #[test]
+    fn coverage_matrix_links_intents_and_scenarios_and_shows_proof_holes() {
+        let html = render(&fixture_snapshot(), Page::Coverage, LinkMode::Server).unwrap();
+
+        assert!(
+            html.contains("href=\"/intent/INT-0017\">INT-0017</a>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("href=\"/intent/INT-0017#scenario-SCN-0091\">SCN-0091</a>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"coverage-hole\">No proof</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<code>tests/billing.rs::scn_0107_full_payment_settles_the_invoice</code>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn graph_dom_identity_distinguishes_code_from_an_identically_named_intent() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telos-core/tests/corpus/billing");
+        let workspace = Workspace::discover(&fixture).expect("Billing workspace is discoverable");
+        let mut model = workspace
+            .load_model()
+            .expect("Billing fixture is a valid model");
+        let path = RepoPath::new("INT-0042");
+        model.bindings.push(Binding::Implements {
+            path: path.clone(),
+            intent: Sp {
+                node: IntentId(17),
+                span: Span::default(),
+            },
+        });
+        model.graph.add_edge(
+            NodeRef::Code(path),
+            Relation::Implements,
+            NodeRef::Intent(IntentId(17)),
+        );
+        let snapshot = ViewSnapshot::build(
+            &StateReport {
+                state: ProjectStateKind::Coherent,
+                drift: vec![],
+                open_changes: vec![],
+            },
+            &model,
+        );
+
+        let html = render(&snapshot, Page::Graph, LinkMode::Server).unwrap();
+        assert!(html.contains("id=\"node-intent-INT-0042\""), "{html}");
+        assert!(html.contains("id=\"node-code-INT-0042\""), "{html}");
+        assert!(html.contains("data-from-key=\"code:INT-0042\""), "{html}");
+        assert!(html.contains("data-to-key=\"intent:INT-0017\""), "{html}");
+    }
+
+    #[test]
+    fn validated_all_relation_edges_render_in_snapshot_order() {
+        let model = crate::view::model::all_relations_fixture_model();
+        let snapshot = ViewSnapshot::build(
+            &StateReport {
+                state: ProjectStateKind::Coherent,
+                drift: vec![],
+                open_changes: vec![],
+            },
+            &model,
+        );
+        let html = render(&snapshot, Page::Graph, LinkMode::Server).unwrap();
+        let rows = [
+            "data-relation=\"refines\" data-from-key=\"intent:INT-0042\" data-to-key=\"intent:INT-0017\"",
+            "data-relation=\"requires\" data-from-key=\"intent:INT-0042\" data-to-key=\"intent:INT-0017\"",
+            "data-relation=\"excludes\" data-from-key=\"intent:INT-0042\" data-to-key=\"intent:INT-0017\"",
+            "data-relation=\"verifies\" data-from-key=\"scenario:SCN-0091\" data-to-key=\"intent:INT-0017\"",
+            "data-relation=\"uses\" data-from-key=\"scenario:SCN-0091\" data-to-key=\"notion:Customer\"",
+            "data-relation=\"constrains\" data-from-key=\"constraint:CON-0003\" data-to-key=\"intent:INT-0042\"",
+            "data-relation=\"implements\" data-from-key=\"code:src/billing/invoice.rs\" data-to-key=\"intent:INT-0042\"",
+            "data-relation=\"proves\" data-from-key=\"test:tests/billing.rs::scn_0107_full_payment_settles_the_invoice\" data-to-key=\"scenario:SCN-0107\"",
+        ];
+        let positions: Vec<usize> = rows
+            .iter()
+            .map(|row| {
+                html.find(row)
+                    .unwrap_or_else(|| panic!("missing {row}: {html}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "edge rows are out of order: {positions:?}"
+        );
     }
 
     #[test]

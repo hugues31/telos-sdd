@@ -29,9 +29,11 @@ fn hook(root: &Path, host: &str, input: Value) -> Value {
 fn skill_body(document: &str) -> (&str, &str) {
     let rest = document
         .strip_prefix("---\n")
+        .or_else(|| document.strip_prefix("---\r\n"))
         .expect("skill starts with YAML frontmatter");
     let (frontmatter, body) = rest
         .split_once("\n---\n")
+        .or_else(|| rest.split_once("\r\n---\r\n"))
         .expect("skill closes YAML frontmatter");
     assert!(frontmatter.lines().any(|line| line.starts_with("name: ")));
     assert!(
@@ -40,6 +42,16 @@ fn skill_body(document: &str) -> (&str, &str) {
             .any(|line| line.starts_with("description: "))
     );
     (frontmatter, body)
+}
+
+#[test]
+fn skill_frontmatter_parser_accepts_crlf_checkouts() {
+    let document = "---\r\nname: telos\r\ndescription: Route Telos requests.\r\n---\r\nBody\r\n";
+
+    let (frontmatter, body) = skill_body(document);
+
+    assert!(frontmatter.contains("name: telos"));
+    assert_eq!(body, "Body\r\n");
 }
 
 #[test]

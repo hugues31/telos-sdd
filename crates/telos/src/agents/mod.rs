@@ -43,6 +43,10 @@ pub fn normalize(hosts: &[AgentHost]) -> Vec<AgentHost> {
 /// A deterministic publication whose complete bytes and initial target state
 /// were captured before init writes.
 pub(crate) enum PlannedWrite {
+    AlreadyExact {
+        relative: PathBuf,
+        expected: Vec<u8>,
+    },
     CreateOnly {
         relative: PathBuf,
         bytes: Vec<u8>,
@@ -90,6 +94,22 @@ pub fn render(plan: &InstallPlan) -> Result<(), TelosError> {
     render_with_before_write(plan, || Ok(()))
 }
 
+#[cfg(test)]
+pub(crate) fn render_with_before_publish<H>(
+    plan: &InstallPlan,
+    before_publish: H,
+) -> Result<(), TelosError>
+where
+    H: FnMut(&Path) -> io::Result<()>,
+{
+    render_with_hooks(
+        plan,
+        |_relative, file, bytes| file.write_all(bytes),
+        || Ok(()),
+        before_publish,
+    )
+}
+
 fn render_with_before_write<H>(plan: &InstallPlan, hook: H) -> Result<(), TelosError>
 where
     H: FnOnce() -> io::Result<()>,
@@ -114,15 +134,18 @@ where
     P: FnMut(&Path) -> io::Result<()>,
 {
     let mut staged = Vec::with_capacity(plan.writes.len());
-    for write in &plan.writes {
+    for (index, write) in plan.writes.iter().enumerate() {
+        let Some(bytes) = write.bytes() else {
+            continue;
+        };
         let relative = write.relative();
         let staged_write = plan
             .root
-            .stage_with(relative, write.bytes(), |file, bytes| {
+            .stage_with(relative, bytes, |file, bytes| {
                 stage_write(relative, file, bytes)
             })
             .map_err(|error| safe_error("stage", relative, error))?;
-        staged.push(staged_write);
+        staged.push((index, staged_write));
     }
 
     before_validation().map_err(|error| {
@@ -136,11 +159,14 @@ where
     // This global compare happens before the first final name is published.
     // It closes deterministic preflight-to-render changes without exposing a
     // partially staged file at any owned target.
-    for (write, staging) in plan.writes.iter().zip(&staged) {
+    validate_exact_noops(&plan.root, &plan.writes)?;
+    for (index, staging) in &staged {
+        let write = &plan.writes[*index];
         validate_expected(&plan.root, write, staging)?;
     }
 
-    for (write, staging) in plan.writes.iter().zip(staged) {
+    for (index, staging) in staged {
+        let write = &plan.writes[index];
         let relative = write.relative();
         before_publish(relative)
             .map_err(|error| io_error("prepare publication for", relative, error))?;
@@ -149,10 +175,27 @@ where
         // therefore permits only the syscall-sized check/rename gap here.
         validate_expected(&plan.root, write, &staging)?;
         match write {
+            PlannedWrite::AlreadyExact { .. } => unreachable!("no-op writes are not staged"),
             PlannedWrite::CreateOnly { .. } => staging.publish_create_only(),
             PlannedWrite::MergeExisting { .. } => staging.publish_replace(),
         }
         .map_err(|error| safe_error("publish", relative, error))?;
+    }
+    validate_exact_noops(&plan.root, &plan.writes)?;
+    Ok(())
+}
+
+fn validate_exact_noops(root: &SafeRoot, writes: &[PlannedWrite]) -> Result<(), TelosError> {
+    for write in writes {
+        let PlannedWrite::AlreadyExact { relative, expected } = write else {
+            continue;
+        };
+        let actual = root
+            .read_optional(relative)
+            .map_err(|error| safe_error("inspect", relative, error))?;
+        if actual.as_deref() != Some(expected) {
+            return Err(target_collision(relative));
+        }
     }
     Ok(())
 }
@@ -170,6 +213,7 @@ fn validate_expected(
         .read_target()
         .map_err(|error| safe_error("inspect", relative, error))?;
     let matches = match write {
+        PlannedWrite::AlreadyExact { .. } => true,
         PlannedWrite::CreateOnly { .. } => actual.is_none(),
         PlannedWrite::MergeExisting { expected, .. } => actual.as_deref() == Some(expected),
     };
@@ -183,13 +227,16 @@ fn validate_expected(
 impl PlannedWrite {
     fn relative(&self) -> &Path {
         match self {
-            Self::CreateOnly { relative, .. } | Self::MergeExisting { relative, .. } => relative,
+            Self::AlreadyExact { relative, .. }
+            | Self::CreateOnly { relative, .. }
+            | Self::MergeExisting { relative, .. } => relative,
         }
     }
 
-    fn bytes(&self) -> &[u8] {
+    fn bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::CreateOnly { bytes, .. } | Self::MergeExisting { bytes, .. } => bytes,
+            Self::AlreadyExact { .. } => None,
+            Self::CreateOnly { bytes, .. } | Self::MergeExisting { bytes, .. } => Some(bytes),
         }
     }
 }
@@ -224,7 +271,13 @@ fn planned_bytes(
 ) -> Result<PlannedWrite, TelosError> {
     let relative = PathBuf::from(relative);
     let initial = initial_state(root, &relative)?;
-    Ok(planned_from_initial_path(relative, bytes, initial))
+    match initial {
+        InitialState::Absent => Ok(PlannedWrite::CreateOnly { relative, bytes }),
+        InitialState::Existing(expected) if expected == bytes => {
+            Ok(PlannedWrite::AlreadyExact { relative, expected })
+        }
+        InitialState::Existing(_) => Err(target_collision(&relative)),
+    }
 }
 
 pub(crate) fn planned_merged_text(
@@ -246,6 +299,9 @@ fn planned_from_initial_path(
 ) -> PlannedWrite {
     match initial {
         InitialState::Absent => PlannedWrite::CreateOnly { relative, bytes },
+        InitialState::Existing(expected) if expected == bytes => {
+            PlannedWrite::AlreadyExact { relative, expected }
+        }
         InitialState::Existing(expected) => PlannedWrite::MergeExisting {
             relative,
             expected,
@@ -614,6 +670,69 @@ mod tests {
         assert_no_staging_files(tmp.path());
     }
 
+    #[test]
+    fn exact_agent_artifacts_are_noops_when_replanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+        super::render(&first).unwrap();
+        let retry = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+        let mut staged = 0;
+        let mut published = 0;
+
+        render_with_hooks(
+            &retry,
+            |_relative, file, bytes| {
+                staged += 1;
+                file.write_all(bytes)
+            },
+            || Ok(()),
+            |_relative| {
+                published += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(staged, 0);
+        assert_eq!(published, 0);
+    }
+
+    #[test]
+    fn an_exact_noop_changed_after_replanning_aborts_the_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+        super::render(&first).unwrap();
+        let retry = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+        let agents = tmp.path().join("AGENTS.md");
+
+        let error = render_with_hooks(
+            &retry,
+            |_relative, file, bytes| file.write_all(bytes),
+            || fs::write(&agents, b"late owner change\n"),
+            |_relative| Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
+        assert_eq!(fs::read(agents).unwrap(), b"late owner change\n");
+    }
+
+    #[test]
+    fn a_non_telos_owner_at_a_generated_skill_path_is_not_replanned_as_a_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill = tmp.path().join(".agents/skills/telos/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&skill, b"owner bytes\n").unwrap();
+
+        let error = match preflight(tmp.path(), &[AgentHost::Codex]) {
+            Ok(_) => panic!("non-Telos skill owner was accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
+        assert_eq!(fs::read(skill).unwrap(), b"owner bytes\n");
+    }
+
     #[cfg(unix)]
     #[test]
     fn cached_agent_write_does_not_follow_a_late_parent_swap() {
@@ -643,5 +762,34 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
         assert!(!outside.path().join("skills/telos/SKILL.md").exists());
+    }
+
+    #[test]
+    fn staged_agent_write_rejects_a_real_directory_parent_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let plan = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+        let agents = tmp.path().join(".agents");
+        let moved_agents = outside.path().join("held-agents");
+
+        let error = render_with_before_write(&plan, || {
+            fs::rename(&agents, &moved_agents)?;
+            for parent in [
+                ".agents/skills/telos",
+                ".agents/skills/telos-challenger",
+                ".agents/skills/telos-implementer",
+                ".codex/rules",
+            ] {
+                fs::create_dir_all(tmp.path().join(parent))?;
+            }
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
+        assert!(!agents.join("skills/telos/SKILL.md").exists());
+        assert!(!moved_agents.join("skills/telos/SKILL.md").exists());
+        assert_no_staging_files(tmp.path());
+        assert_no_staging_files(outside.path());
     }
 }

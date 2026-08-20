@@ -38,34 +38,72 @@ const WORKFLOW: &str = concat!(
 /// The fully validated immutable GitHub installation.
 pub struct InstallPlan {
     root: SafeRoot,
+    publish: bool,
 }
 
 pub fn preflight(root: &Path) -> Result<InstallPlan, TelosError> {
+    preflight_with_resume(root, false)
+}
+
+pub fn preflight_resume(root: &Path) -> Result<InstallPlan, TelosError> {
+    preflight_with_resume(root, true)
+}
+
+fn preflight_with_resume(root: &Path, resume: bool) -> Result<InstallPlan, TelosError> {
     let root = SafeRoot::open(root)
         .map_err(|error| io_error("open", Path::new("repository root"), error))?;
     validate_ancestors(&root)?;
     match root.exists_no_follow(Path::new(WORKFLOW_PATH)) {
+        Ok(true) if resume => match root.read_optional(Path::new(WORKFLOW_PATH)) {
+            Ok(Some(bytes)) if bytes == WORKFLOW.as_bytes() => Ok(InstallPlan {
+                root,
+                publish: false,
+            }),
+            Ok(_) | Err(_) => Err(collision(Path::new(WORKFLOW_PATH))),
+        },
         Ok(true) => Err(collision(Path::new(WORKFLOW_PATH))),
-        Ok(false) => Ok(InstallPlan { root }),
+        Ok(false) => Ok(InstallPlan {
+            root,
+            publish: true,
+        }),
         Err(error) => Err(io_error("inspect", Path::new(WORKFLOW_PATH), error)),
     }
 }
 
 impl InstallPlan {
     pub fn render(&self) -> Result<(), TelosError> {
-        self.render_with_before_write(|| Ok(()))
+        self.render_with_writer_and_before_publish(std::io::Write::write_all, || Ok(()))
     }
 
+    #[cfg(test)]
     fn render_with_before_write<H>(&self, before_write: H) -> Result<(), TelosError>
     where
         H: FnOnce() -> io::Result<()>,
     {
+        self.render_with_writer_and_before_publish(std::io::Write::write_all, before_write)
+    }
+
+    fn render_with_writer_and_before_publish<F, H>(
+        &self,
+        write: F,
+        before_publish: H,
+    ) -> Result<(), TelosError>
+    where
+        F: FnOnce(&mut cap_std::fs::File, &[u8]) -> io::Result<()>,
+        H: FnOnce() -> io::Result<()>,
+    {
+        if !self.publish {
+            return match self.root.read_optional(Path::new(WORKFLOW_PATH)) {
+                Ok(Some(bytes)) if bytes == WORKFLOW.as_bytes() => Ok(()),
+                Ok(_) | Err(_) => Err(collision(Path::new(WORKFLOW_PATH))),
+            };
+        }
         self.root
             .create_new_write_with(
                 Path::new(WORKFLOW_PATH),
                 WORKFLOW.as_bytes(),
-                before_write,
-                || Ok(()),
+                write,
+                before_publish,
             )
             .map_err(render_error)
     }
@@ -115,9 +153,119 @@ fn io_error(verb: &str, path: &Path, error: io::Error) -> TelosError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{self, Write};
     use std::sync::{Arc, Barrier};
 
-    use super::{collision, preflight};
+    use super::{WORKFLOW, WORKFLOW_PATH, collision, preflight, preflight_resume};
+
+    #[test]
+    fn exact_workflow_is_a_noop_only_during_init_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = preflight(tmp.path()).unwrap();
+        first.render().unwrap();
+
+        let fresh_error = match preflight(tmp.path()) {
+            Ok(_) => panic!("fresh init accepted an existing workflow"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            fresh_error.code,
+            telos_core::error::ErrorCode::TelosChangeStateInvalid
+        );
+
+        let resumed = preflight_resume(tmp.path()).unwrap();
+        resumed.render().unwrap();
+        assert_eq!(
+            fs::read(tmp.path().join(WORKFLOW_PATH)).unwrap(),
+            WORKFLOW.as_bytes()
+        );
+    }
+
+    #[test]
+    fn resumed_exact_workflow_changed_after_preflight_is_not_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = preflight(tmp.path()).unwrap();
+        first.render().unwrap();
+        let resumed = preflight_resume(tmp.path()).unwrap();
+        let workflow = tmp.path().join(WORKFLOW_PATH);
+        fs::write(&workflow, b"late workflow owner\n").unwrap();
+
+        let error = resumed.render().unwrap_err();
+
+        assert_eq!(
+            error.code,
+            telos_core::error::ErrorCode::TelosChangeStateInvalid
+        );
+        assert_eq!(fs::read(workflow).unwrap(), b"late workflow owner\n");
+    }
+
+    #[test]
+    fn partial_staging_write_never_creates_the_final_workflow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflow = tmp.path().join(WORKFLOW_PATH);
+        let plan = preflight(tmp.path()).unwrap();
+
+        let error = plan
+            .render_with_writer_and_before_publish(
+                |file, bytes| {
+                    file.write_all(&bytes[..17])?;
+                    Err(io::Error::other("forced partial CI staging write"))
+                },
+                || Ok(()),
+            )
+            .unwrap_err();
+
+        assert!(error.message.contains("forced partial CI staging write"));
+        assert!(!workflow.exists());
+        assert!(
+            fs::read_dir(workflow.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".telos-staging-"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_staging_write_does_not_remove_a_late_staging_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflow = tmp.path().join(WORKFLOW_PATH);
+        let parent = workflow.parent().unwrap().to_path_buf();
+        let plan = preflight(tmp.path()).unwrap();
+        let mut late_owner = None;
+
+        plan.render_with_writer_and_before_publish(
+            |file, bytes| {
+                file.write_all(&bytes[..17])?;
+                let staging = fs::read_dir(&parent)?
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect::<io::Result<Vec<_>>>()?
+                    .into_iter()
+                    .find(|path| {
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .contains(".telos-staging-")
+                    })
+                    .unwrap();
+                fs::rename(&staging, parent.join("moved-original-staging"))?;
+                fs::write(&staging, b"late staging owner\n")?;
+                late_owner = Some(staging);
+                Err(io::Error::other("forced staging failure after replacement"))
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(!workflow.exists());
+        assert_eq!(
+            fs::read(late_owner.unwrap()).unwrap(),
+            b"late staging owner\n"
+        );
+    }
 
     #[test]
     fn reserved_final_write_does_not_follow_a_late_parent_swap() {

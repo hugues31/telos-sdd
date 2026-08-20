@@ -28,6 +28,18 @@ pub fn preflight(root: &Path, provider: Option<CiProvider>) -> Result<InstallPla
     }
 }
 
+/// Replans an init-owned CI integration after a matching transaction marker.
+/// Only byte-exact already-published artifacts may become no-ops.
+pub fn preflight_resume(
+    root: &Path,
+    provider: Option<CiProvider>,
+) -> Result<InstallPlan, TelosError> {
+    match provider {
+        Some(CiProvider::Github) => github::preflight_resume(root).map(InstallPlan::Github),
+        None => Ok(InstallPlan::None),
+    }
+}
+
 /// Installs every requested CI integration after Telos has been sealed.
 pub fn render(plan: &InstallPlan) -> Result<(), TelosError> {
     match plan {

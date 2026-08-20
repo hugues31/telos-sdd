@@ -5,11 +5,11 @@
 //! file is opened through the already-held parent directory handle.
 
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
@@ -27,7 +27,14 @@ pub(crate) struct StagedWrite {
     parents: Vec<OsString>,
     target: OsString,
     staging: OsString,
+    staging_identity: FileIdentity,
     published: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
 }
 
 impl SafeRoot {
@@ -90,9 +97,10 @@ impl SafeRoot {
             .open_parent(&parents, true)?
             .ok_or_else(|| io::Error::other("missing parent"))?;
         let (staging, mut file) = reserve_staging(&parent, &target)?;
+        let staging_identity = file_identity(&file.metadata()?);
         if let Err(error) = write(&mut file, bytes).and_then(|()| file.sync_all()) {
             drop(file);
-            let _ = parent.remove_file(&staging);
+            remove_if_owned(&parent, &staging, staging_identity);
             return Err(error);
         }
         drop(file);
@@ -101,55 +109,64 @@ impl SafeRoot {
             parents,
             target,
             staging,
+            staging_identity,
             published: false,
         })
     }
 
-    pub(crate) fn create_new_write_with<H, J>(
+    pub(crate) fn create_new_write_with<F, H>(
         &self,
         relative: &Path,
         bytes: &[u8],
-        before_reserve: H,
-        after_reserve: J,
+        write: F,
+        before_publish: H,
     ) -> io::Result<()>
     where
+        F: FnOnce(&mut cap_std::fs::File, &[u8]) -> io::Result<()>,
         H: FnOnce() -> io::Result<()>,
-        J: FnOnce() -> io::Result<()>,
     {
-        self.create_new_write_inner(relative, bytes, before_reserve, after_reserve)
+        let staging = self.stage_with(relative, bytes, write)?;
+        before_publish()?;
+        staging.validate_parent_path(self)?;
+        staging.publish_create_only()
     }
 
-    fn create_new_write_inner<H, J>(
+    pub(crate) fn remove_file_if_matches(
         &self,
         relative: &Path,
-        bytes: &[u8],
-        before_reserve: H,
-        after_reserve: J,
-    ) -> io::Result<()>
-    where
-        H: FnOnce() -> io::Result<()>,
-        J: FnOnce() -> io::Result<()>,
-    {
+        expected: &[u8],
+    ) -> io::Result<()> {
         let (parents, name) = split(relative)?;
         let parent = self
-            .open_parent(&parents, true)?
-            .ok_or_else(|| io::Error::other("missing parent"))?;
-        before_reserve()?;
+            .open_parent(&parents, false)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "parent disappeared"))?;
         let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
+        options.read(true).follow(FollowSymlinks::No);
         let mut file = parent.open_with(&name, &options)?;
-        after_reserve()?;
-        file.write_all(bytes)?;
-        self.validate_parent_path(&parents)
-    }
-
-    fn validate_parent_path(&self, parents: &[OsString]) -> io::Result<()> {
-        self.open_parent(parents, false)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "parent disappeared"))?;
-        Ok(())
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target is not a regular file",
+            ));
+        }
+        let identity = file_identity(&file.metadata()?);
+        let mut actual = Vec::new();
+        file.read_to_end(&mut actual)?;
+        if actual != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target bytes changed",
+            ));
+        }
+        drop(file);
+        match parent.symlink_metadata(&name) {
+            Ok(metadata) if file_identity(&metadata) == identity => parent.remove_file(&name),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target identity changed",
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     fn open_parent(&self, components: &[OsString], create: bool) -> io::Result<Option<Dir>> {
@@ -177,37 +194,78 @@ impl StagedWrite {
     }
 
     pub(crate) fn validate_parent_path(&self, root: &SafeRoot) -> io::Result<()> {
-        root.validate_parent_path(&self.parents)
+        let reopened = root
+            .open_parent(&self.parents, false)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "parent disappeared"))?;
+        let held = self.parent.dir_metadata()?;
+        let current = reopened.dir_metadata()?;
+        if held.dev() == current.dev() && held.ino() == current.ino() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "parent directory identity changed",
+            ))
+        }
     }
 
     /// Publishes one complete file and fails atomically if the final name has
     /// acquired an owner since preflight.
     pub(crate) fn publish_create_only(mut self) -> io::Result<()> {
+        self.validate_staging_identity()?;
         self.parent
             .hard_link(&self.staging, &self.parent, &self.target)?;
         self.published = true;
         // Both names refer to the same complete inode after `hard_link`.
         // Failure to remove the private name must not turn a successful,
         // non-clobbering publication into a reported transaction failure.
-        let _ = self.parent.remove_file(&self.staging);
+        remove_if_owned(&self.parent, &self.staging, self.staging_identity);
         Ok(())
     }
 
     /// Atomically replaces a regular target whose bytes were checked by the
     /// caller immediately before this operation.
     pub(crate) fn publish_replace(mut self) -> io::Result<()> {
+        self.validate_staging_identity()?;
         self.parent
             .rename(&self.staging, &self.parent, &self.target)?;
         self.published = true;
         Ok(())
+    }
+
+    fn validate_staging_identity(&self) -> io::Result<()> {
+        match self.parent.symlink_metadata(&self.staging) {
+            Ok(metadata) if file_identity(&metadata) == self.staging_identity => Ok(()),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staging file identity changed",
+            )),
+            Err(error) => Err(error),
+        }
     }
 }
 
 impl Drop for StagedWrite {
     fn drop(&mut self) {
         if !self.published {
-            let _ = self.parent.remove_file(&self.staging);
+            remove_if_owned(&self.parent, &self.staging, self.staging_identity);
         }
+    }
+}
+
+fn remove_if_owned(parent: &Dir, staging: &std::ffi::OsStr, expected: FileIdentity) {
+    if parent
+        .symlink_metadata(staging)
+        .is_ok_and(|metadata| file_identity(&metadata) == expected)
+    {
+        let _ = parent.remove_file(staging);
+    }
+}
+
+fn file_identity(metadata: &cap_std::fs::Metadata) -> FileIdentity {
+    FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
     }
 }
 

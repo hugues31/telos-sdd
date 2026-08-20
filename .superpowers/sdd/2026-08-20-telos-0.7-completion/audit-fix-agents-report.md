@@ -136,3 +136,59 @@ rtk cargo clippy --workspace --all-targets -- -D warnings
 Le `cargo fmt --check` global signale seulement le fichier voisin non indexé
 `crates/telos/tests/contracts.rs`; le `rustfmt --check` explicite de tous les
 fichiers Rust de ce round est vert.
+
+## Review fix round 2
+
+Le marqueur de reprise est passé au format `telos-init-v2`. Il ne contient
+plus seulement les options normalisées: il conserve, pour chaque cible cœur
+écrite par `init` (`telos.toml`, `bindings.tel`, `counters.toml`,
+`.gitattributes` et le lock), les octets initiaux et/ou les octets exacts de
+la transaction. Sa phase est explicite: `preparing`, puis `sealed` avec les
+octets canoniques du lock.
+
+Une reprise `preparing` valide globalement les shapes des répertoires et
+chaque cible comme état initial ou état désiré avant sa première écriture.
+Les cibles déjà exactes sont des no-ops; les absentes sont publiées
+no-replace et les anciennes ne sont remplacées qu'après comparaison avec le
+snapshot. Après création du lock, le marqueur passe atomiquement à `sealed`
+par remplacement CAS. L'intervalle déterministe où le lock est déjà publié
+mais le marqueur encore `preparing` est lui aussi reprenable.
+
+Une reprise `sealed` exige tous les octets cœur exacts, tous les répertoires
+réels et présents, puis recalcule le seal depuis le workspace vivant. Cette
+validation a lieu avant les publications agents/CI, à leur frontière, puis
+avant la suppression du marqueur. Des octets étrangers, un fichier remplacé
+par un répertoire ou un symlink final sont donc refusés avec
+`TELOS_CHANGE_STATE_INVALID`, sans écriture et sans consommer le marqueur.
+
+RED déterministes observés avant correction: les retries acceptaient les
+octets étrangers de chacune des cinq cibles cœur, un `bindings.tel` devenu
+répertoire et un `telos.toml` symlinké vers un owner extérieur. Ils
+réécrivaient/re-scellaient ensuite le projet. Les tests verts couvrent aussi
+une publication cœur partielle pré-seal, ainsi qu'un échec juste après la
+publication du lock mais avant le changement de phase.
+
+Vérification du round:
+
+```text
+rtk cargo test -p telos --bin telos
+# 54 passed
+rtk cargo test -p telos --test agent_init
+# 39 passed
+rtk cargo test -p telos --test init_ci
+# 16 passed
+rtk cargo test -p telos --test cli_m1
+# 14 passed
+rtk cargo clippy --workspace --all-targets -- -D warnings
+# no issues
+```
+
+Le `cargo fmt --all -- --check` global reste perturbé uniquement par le
+fichier voisin non indexé `crates/telos/tests/contracts.rs`; le check
+`rustfmt` ciblé et `git diff --check` sont verts. Les limites adversariales
+restent celles du round précédent: pas de CAS global portable sur plusieurs
+fichiers, petite fenêtre lecture/rename pour un remplacement existant,
+identité d'inode réutilisable, et marqueur pouvant être forgé byte pour byte
+par un acteur qui contrôle déjà le dépôt. Deux contenus byte-identiques sont
+nécessairement indistinguables; ces cas sortent du modèle non-adversarial du
+seal.

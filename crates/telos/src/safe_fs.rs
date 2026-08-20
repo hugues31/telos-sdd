@@ -83,6 +83,15 @@ impl SafeRoot {
         Ok(self.open_parent(&components, false)?.is_some())
     }
 
+    /// Creates a directory path below the held root, opening every component
+    /// without following symlinks. Existing real directories are a no-op.
+    pub(crate) fn create_directory(&self, relative: &Path) -> io::Result<()> {
+        let components = directories(relative)?;
+        self.open_parent(&components, true)?
+            .ok_or_else(|| io::Error::other("failed to create directory"))?;
+        Ok(())
+    }
+
     pub(crate) fn stage_with<F>(
         &self,
         relative: &Path,

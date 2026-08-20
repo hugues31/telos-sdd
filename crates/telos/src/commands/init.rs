@@ -10,20 +10,20 @@
 //! that the very first seal already runs the `eol=lf` clean filter and the
 //! OIDs it records are the cross-OS ones.
 
-use std::fs;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use telos_core::config::{
     AgentHost as ConfigAgentHost, AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg,
 };
-use telos_core::counters::{Counters, write_counters};
 use telos_core::emit::emit_config;
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
-use telos_core::lock::seal;
+use telos_core::lock::{Lock, seal};
 use telos_core::workspace::Workspace;
 
 use crate::ci::{self, CiProvider};
@@ -38,9 +38,54 @@ use crate::safe_fs::SafeRoot;
 const GITATTRIBUTES_LINE: &str = "telos/** text eol=lf";
 
 /// The spec subdirectories a project always has, created empty.
-const SUBDIRS: [&str; 4] = ["notions", "intents", "constraints", "changes"];
+const SUBDIRS: [&str; 4] = [
+    "telos/notions",
+    "telos/intents",
+    "telos/constraints",
+    "telos/changes",
+];
 
 const INIT_MARKER_PATH: &str = ".telos-init.json";
+const CONFIG_PATH: &str = "telos/telos.toml";
+const BINDINGS_PATH: &str = "telos/bindings.tel";
+const COUNTERS_PATH: &str = "telos/changes/counters.toml";
+const LOCK_PATH: &str = "telos/telos.lock";
+const GITATTRIBUTES_PATH: &str = ".gitattributes";
+const COUNTERS_BYTES: &[u8] = b"intent = 0\nscenario = 0\nconstraint = 0\nchange = 0\n";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InitMarker {
+    format: String,
+    agents: Vec<String>,
+    ci: Option<String>,
+    core: CorePlan,
+    phase: InitPhase,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+enum InitPhase {
+    Preparing,
+    Sealed { lock: Vec<u8> },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CorePlan {
+    config: CoreFile,
+    bindings: CoreFile,
+    counters: CoreFile,
+    gitattributes: CoreFile,
+    initial_lock: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CoreFile {
+    initial: Option<Vec<u8>>,
+    desired: Vec<u8>,
+}
 
 pub fn run(ctx: &Ctx, hosts: &[AgentHost], ci: Option<CiProvider>) -> CmdResult {
     run_with_agent_renderer(ctx, hosts, ci, agents::render)
@@ -55,26 +100,70 @@ fn run_with_agent_renderer<F>(
 where
     F: FnOnce(&agents::InstallPlan) -> Result<(), TelosError>,
 {
+    run_with_hooks(ctx, hosts, ci, |_| Ok(()), render_agents)
+}
+
+fn run_with_hooks<F, H>(
+    ctx: &Ctx,
+    hosts: &[AgentHost],
+    ci: Option<CiProvider>,
+    mut after_core_publish: H,
+    render_agents: F,
+) -> CmdResult
+where
+    F: FnOnce(&agents::InstallPlan) -> Result<(), TelosError>,
+    H: FnMut(&Path) -> std::io::Result<()>,
+{
     let git = GitRepo::discover(&ctx.cwd)?;
     let root = git.root().to_path_buf();
-    let telos_dir = root.join("telos");
-    let config_path = telos_dir.join("telos.toml");
-    let marker_bytes = init_marker_bytes(hosts, ci);
+    let config_path = root.join(CONFIG_PATH);
+    let config_bytes = initial_config_bytes(hosts)?;
+    let (requested_agents, requested_ci) = requested_options(hosts, ci);
     let safe_root = SafeRoot::open(&root)
         .map_err(|error| io_error("open", Path::new("repository root"), error))?;
-    let marker = safe_root
+    let marker_on_disk = safe_root
         .read_optional(Path::new(INIT_MARKER_PATH))
         .map_err(|error| marker_error("inspect", error))?;
-    let resuming = marker.as_deref() == Some(marker_bytes.as_slice());
+    let config_exists = safe_root
+        .exists_no_follow(Path::new(CONFIG_PATH))
+        .map_err(|error| io_error("inspect", &config_path, error))?;
 
-    if config_path.exists() && !resuming {
-        return Err(already_initialized(&config_path));
-    }
-    if marker.is_some() && !resuming {
-        if config_path.exists() {
-            return Err(already_initialized(&config_path));
+    let (marker, marker_bytes, resuming) = match marker_on_disk {
+        Some(bytes) => {
+            let parsed = serde_json::from_slice::<InitMarker>(&bytes).ok();
+            let Some(marker) = parsed.filter(|marker| {
+                marker.format == "telos-init-v2"
+                    && marker.agents == requested_agents
+                    && marker.ci == requested_ci
+                    && marker.core.definition_matches(&config_bytes)
+            }) else {
+                if config_exists {
+                    return Err(already_initialized(&config_path));
+                }
+                return Err(marker_collision());
+            };
+            (marker, bytes, true)
         }
-        return Err(marker_collision());
+        None => {
+            if config_exists {
+                return Err(already_initialized(&config_path));
+            }
+            validate_directory_shapes(&safe_root, false)?;
+            let core = CorePlan::capture(&safe_root, config_bytes)?;
+            let marker = InitMarker {
+                format: "telos-init-v2".to_string(),
+                agents: requested_agents,
+                ci: requested_ci,
+                core,
+                phase: InitPhase::Preparing,
+            };
+            let bytes = marker_bytes(&marker);
+            (marker, bytes, false)
+        }
+    };
+
+    if resuming {
+        validate_resume_core(&safe_root, &root, &git, &marker)?;
     }
 
     // Host JSON is the only user-owned input init has to merge. Parse every
@@ -98,10 +187,368 @@ where
             .map_err(|error| marker_error("create", error))?;
     }
 
-    for subdir in SUBDIRS {
-        let path = telos_dir.join(subdir);
-        fs::create_dir_all(&path).map_err(|e| io_error("create", &path, e))?;
+    let sealed_marker_bytes = match &marker.phase {
+        InitPhase::Preparing => finish_core(
+            &safe_root,
+            &root,
+            &git,
+            &marker,
+            &marker_bytes,
+            &mut after_core_publish,
+        )?,
+        InitPhase::Sealed { .. } => marker_bytes,
+    };
+
+    // Preflight can take arbitrary time. Recheck the authenticated core at
+    // the publication boundary, then once more before consuming the marker.
+    let sealed_marker: InitMarker = serde_json::from_slice(&sealed_marker_bytes)
+        .expect("Telos serialized this marker immediately above");
+    validate_resume_core(&safe_root, &root, &git, &sealed_marker)?;
+    render_agents(&agent_plan)?;
+    ci::render(&ci_plan)?;
+    validate_resume_core(&safe_root, &root, &git, &sealed_marker)?;
+    safe_root
+        .remove_file_if_matches(Path::new(INIT_MARKER_PATH), &sealed_marker_bytes)
+        .map_err(|error| marker_error("remove", error))?;
+
+    Ok(Outcome {
+        result: json!({ "root": "telos", "sealed": true }),
+        human: "initialized telos/ and sealed telos/telos.lock".to_string(),
+        next_actions: vec!["telos status".to_string()],
+    })
+}
+
+impl CorePlan {
+    fn capture(safe_root: &SafeRoot, config: Vec<u8>) -> Result<Self, TelosError> {
+        let initial_bindings = read_core(safe_root, BINDINGS_PATH)?;
+        let initial_counters = read_core(safe_root, COUNTERS_PATH)?;
+        let initial_gitattributes = read_core(safe_root, GITATTRIBUTES_PATH)?;
+        let initial_lock = read_core(safe_root, LOCK_PATH)?;
+        let desired_gitattributes = gitattributes_bytes(initial_gitattributes.as_deref())?;
+
+        Ok(Self {
+            config: CoreFile {
+                initial: None,
+                desired: config,
+            },
+            bindings: CoreFile {
+                initial: initial_bindings,
+                desired: Vec::new(),
+            },
+            counters: CoreFile {
+                initial: initial_counters,
+                desired: COUNTERS_BYTES.to_vec(),
+            },
+            gitattributes: CoreFile {
+                initial: initial_gitattributes,
+                desired: desired_gitattributes,
+            },
+            initial_lock,
+        })
     }
+
+    fn definition_matches(&self, config: &[u8]) -> bool {
+        self.config.initial.is_none()
+            && self.config.desired == config
+            && self.bindings.desired.is_empty()
+            && self.counters.desired == COUNTERS_BYTES
+            && gitattributes_bytes(self.gitattributes.initial.as_deref())
+                .is_ok_and(|expected| expected == self.gitattributes.desired)
+    }
+}
+
+fn finish_core<H>(
+    safe_root: &SafeRoot,
+    root: &Path,
+    git: &GitRepo,
+    marker: &InitMarker,
+    preparing_marker_bytes: &[u8],
+    after_core_publish: &mut H,
+) -> Result<Vec<u8>, TelosError>
+where
+    H: FnMut(&Path) -> std::io::Result<()>,
+{
+    validate_preparing_core(safe_root, root, git, &marker.core)?;
+    create_required_directories(safe_root)?;
+
+    for (relative, plan) in core_files(&marker.core) {
+        if publish_core_file(safe_root, relative, plan)? {
+            after_core_publish(Path::new(relative))
+                .map_err(|error| io_error("publish", Path::new(relative), error))?;
+        }
+    }
+    validate_directory_shapes(safe_root, true)?;
+    validate_deterministic_core_exact(safe_root, &marker.core)?;
+
+    let lock_bytes = compute_lock_bytes(root, git)?;
+    let lock_plan = CoreFile {
+        initial: marker.core.initial_lock.clone(),
+        desired: lock_bytes.clone(),
+    };
+    if publish_core_file(safe_root, LOCK_PATH, &lock_plan)? {
+        after_core_publish(Path::new(LOCK_PATH))
+            .map_err(|error| io_error("publish", Path::new(LOCK_PATH), error))?;
+    }
+    validate_core_file_exact(safe_root, LOCK_PATH, &lock_bytes)?;
+
+    let mut sealed = marker.clone();
+    sealed.phase = InitPhase::Sealed { lock: lock_bytes };
+    let sealed_bytes = marker_bytes(&sealed);
+    replace_exact_file(
+        safe_root,
+        INIT_MARKER_PATH,
+        preparing_marker_bytes,
+        &sealed_bytes,
+    )?;
+    Ok(sealed_bytes)
+}
+
+fn validate_resume_core(
+    safe_root: &SafeRoot,
+    root: &Path,
+    git: &GitRepo,
+    marker: &InitMarker,
+) -> Result<(), TelosError> {
+    match &marker.phase {
+        InitPhase::Preparing => validate_preparing_core(safe_root, root, git, &marker.core),
+        InitPhase::Sealed { lock } => {
+            validate_directory_shapes(safe_root, true)?;
+            validate_deterministic_core_exact(safe_root, &marker.core)?;
+            validate_core_file_exact(safe_root, LOCK_PATH, lock)?;
+            if compute_lock_bytes(root, git)? != *lock {
+                return Err(core_changed(Path::new(LOCK_PATH)));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_preparing_core(
+    safe_root: &SafeRoot,
+    root: &Path,
+    git: &GitRepo,
+    core: &CorePlan,
+) -> Result<(), TelosError> {
+    validate_directory_shapes(safe_root, false)?;
+    let mut deterministic_complete = true;
+    for (relative, plan) in core_files(core) {
+        let current = read_core(safe_root, relative)?;
+        if current.as_deref() == Some(plan.desired.as_slice()) {
+            continue;
+        }
+        deterministic_complete = false;
+        if current != plan.initial {
+            return Err(core_changed(Path::new(relative)));
+        }
+    }
+
+    let current_lock = read_core(safe_root, LOCK_PATH)?;
+    if deterministic_complete {
+        let expected_lock = compute_lock_bytes(root, git)?;
+        if current_lock != core.initial_lock && current_lock.as_deref() != Some(&expected_lock) {
+            return Err(core_changed(Path::new(LOCK_PATH)));
+        }
+    } else if current_lock != core.initial_lock {
+        return Err(core_changed(Path::new(LOCK_PATH)));
+    }
+    Ok(())
+}
+
+fn validate_deterministic_core_exact(
+    safe_root: &SafeRoot,
+    core: &CorePlan,
+) -> Result<(), TelosError> {
+    for (relative, plan) in core_files(core) {
+        validate_core_file_exact(safe_root, relative, &plan.desired)?;
+    }
+    Ok(())
+}
+
+fn core_files(core: &CorePlan) -> [(&'static str, &CoreFile); 4] {
+    [
+        (CONFIG_PATH, &core.config),
+        (BINDINGS_PATH, &core.bindings),
+        (GITATTRIBUTES_PATH, &core.gitattributes),
+        (COUNTERS_PATH, &core.counters),
+    ]
+}
+
+fn publish_core_file(
+    safe_root: &SafeRoot,
+    relative: &str,
+    plan: &CoreFile,
+) -> Result<bool, TelosError> {
+    let current = read_core(safe_root, relative)?;
+    if current.as_deref() == Some(plan.desired.as_slice()) {
+        return Ok(false);
+    }
+    if current != plan.initial {
+        return Err(core_changed(Path::new(relative)));
+    }
+
+    let staged = safe_root
+        .stage_with(Path::new(relative), &plan.desired, |file, bytes| {
+            file.write_all(bytes)
+        })
+        .map_err(|error| core_write_error("stage", relative, error))?;
+    if staged
+        .read_target()
+        .map_err(|_| core_changed(Path::new(relative)))?
+        != plan.initial
+    {
+        return Err(core_changed(Path::new(relative)));
+    }
+    staged
+        .validate_parent_path(safe_root)
+        .map_err(|_| core_changed(Path::new(relative)))?;
+    match plan.initial {
+        Some(_) => staged.publish_replace(),
+        None => staged.publish_create_only(),
+    }
+    .map_err(|error| core_write_error("publish", relative, error))?;
+    Ok(true)
+}
+
+fn replace_exact_file(
+    safe_root: &SafeRoot,
+    relative: &str,
+    expected: &[u8],
+    desired: &[u8],
+) -> Result<(), TelosError> {
+    publish_core_file(
+        safe_root,
+        relative,
+        &CoreFile {
+            initial: Some(expected.to_vec()),
+            desired: desired.to_vec(),
+        },
+    )?;
+    Ok(())
+}
+
+fn validate_core_file_exact(
+    safe_root: &SafeRoot,
+    relative: &str,
+    expected: &[u8],
+) -> Result<(), TelosError> {
+    if read_core(safe_root, relative)?.as_deref() == Some(expected) {
+        Ok(())
+    } else {
+        Err(core_changed(Path::new(relative)))
+    }
+}
+
+fn validate_directory_shapes(
+    safe_root: &SafeRoot,
+    require_present: bool,
+) -> Result<(), TelosError> {
+    for relative in std::iter::once("telos").chain(SUBDIRS.iter().copied()) {
+        let exists = safe_root
+            .exists_no_follow(Path::new(relative))
+            .map_err(|_| core_changed(Path::new(relative)))?;
+        let valid = safe_root
+            .validate_directory(Path::new(relative))
+            .map_err(|_| core_changed(Path::new(relative)))?;
+        if (exists && !valid) || (require_present && !valid) {
+            return Err(core_changed(Path::new(relative)));
+        }
+    }
+    Ok(())
+}
+
+fn create_required_directories(safe_root: &SafeRoot) -> Result<(), TelosError> {
+    for relative in SUBDIRS {
+        safe_root
+            .create_directory(Path::new(relative))
+            .map_err(|error| core_write_error("create", relative, error))?;
+    }
+    Ok(())
+}
+
+fn compute_lock_bytes(root: &Path, git: &GitRepo) -> Result<Vec<u8>, TelosError> {
+    let ws = Workspace::discover(root)?;
+    let model = ws.load_model().map_err(first_error)?;
+    Ok(render_lock(&seal(&ws, &model, git, None)?).into_bytes())
+}
+
+fn render_lock(lock: &Lock) -> String {
+    let mut out = String::new();
+    writeln!(out, "version = {}", lock.version).unwrap();
+    writeln!(out, "tool = {}", quote_lock(&lock.tool)).unwrap();
+    if let Some(id) = &lock.sealed_by {
+        writeln!(out, "sealed_by = {}", quote_lock(&id.to_string())).unwrap();
+    }
+    writeln!(out, "spec_digest = {}", quote_lock(&lock.spec_digest)).unwrap();
+    out.push_str("\n[spec]\n");
+    for (path, oid) in &lock.spec {
+        writeln!(
+            out,
+            "{} = {}",
+            quote_lock(path.as_str()),
+            quote_lock(&oid.0)
+        )
+        .unwrap();
+    }
+    out.push_str("\n[code]\n");
+    for (path, oid) in &lock.code {
+        writeln!(
+            out,
+            "{} = {}",
+            quote_lock(path.as_str()),
+            quote_lock(&oid.0)
+        )
+        .unwrap();
+    }
+    out
+}
+
+fn quote_lock(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn read_core(safe_root: &SafeRoot, relative: &str) -> Result<Option<Vec<u8>>, TelosError> {
+    safe_root
+        .read_optional(Path::new(relative))
+        .map_err(|_| core_changed(Path::new(relative)))
+}
+
+fn core_write_error(verb: &str, relative: &str, error: std::io::Error) -> TelosError {
+    match error.kind() {
+        std::io::ErrorKind::AlreadyExists
+        | std::io::ErrorKind::InvalidInput
+        | std::io::ErrorKind::NotADirectory
+        | std::io::ErrorKind::PermissionDenied => core_changed(Path::new(relative)),
+        _ => io_error(verb, Path::new(relative), error),
+    }
+}
+
+fn core_changed(path: &Path) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        format!(
+            "`{}` no longer matches the incomplete Telos init transaction",
+            display_path(path)
+        ),
+    )
+    .hint(format!(
+        "preserve `{INIT_MARKER_PATH}` and restore the transaction-owned path before retrying"
+    ))
+}
+
+fn initial_config_bytes(hosts: &[AgentHost]) -> Result<Vec<u8>, TelosError> {
     let mut config = Config {
         code: Globs::default(),
         tests: Globs::default(),
@@ -120,49 +567,26 @@ where
         },
     };
     config.normalize();
-    write(&config_path, &emit_config(&config)?)?;
-    // Empty to the byte: `bindings.tel` must seal as git's empty blob,
-    // `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`, on every OS.
-    write(&telos_dir.join("bindings.tel"), "")?;
-    ensure_gitattributes(&root)?;
-
-    let ws = Workspace::discover(&root)?;
-    // Seeded before sealing (D4): `telos/changes/` is excluded from
-    // `Workspace::spec_files`, so this write never enters the seal.
-    write_counters(&ws, &Counters::default())?;
-    let model = ws.load_model().map_err(first_error)?;
-    let lock = seal(&ws, &model, &git, None)?;
-    lock.write(&ws.lock_path())?;
-    render_agents(&agent_plan)?;
-    ci::render(&ci_plan)?;
-    safe_root
-        .remove_file_if_matches(Path::new(INIT_MARKER_PATH), &marker_bytes)
-        .map_err(|error| marker_error("remove", error))?;
-
-    Ok(Outcome {
-        result: json!({ "root": "telos", "sealed": true }),
-        human: "initialized telos/ and sealed telos/telos.lock".to_string(),
-        next_actions: vec!["telos status".to_string()],
-    })
+    Ok(emit_config(&config)?.into_bytes())
 }
 
-fn init_marker_bytes(hosts: &[AgentHost], ci: Option<CiProvider>) -> Vec<u8> {
-    let hosts: Vec<&str> = agents::normalize(hosts)
+fn requested_options(hosts: &[AgentHost], ci: Option<CiProvider>) -> (Vec<String>, Option<String>) {
+    let hosts = agents::normalize(hosts)
         .into_iter()
         .map(|host| match host {
-            AgentHost::Claude => "claude",
-            AgentHost::Codex => "codex",
+            AgentHost::Claude => "claude".to_string(),
+            AgentHost::Codex => "codex".to_string(),
         })
         .collect();
     let ci = ci.map(|provider| match provider {
-        CiProvider::Github => "github",
+        CiProvider::Github => "github".to_string(),
     });
-    let mut bytes = serde_json::to_vec_pretty(&json!({
-        "format": "telos-init-v1",
-        "agents": hosts,
-        "ci": ci,
-    }))
-    .expect("the init marker contains only serializable literals");
+    (hosts, ci)
+}
+
+fn marker_bytes(marker: &InitMarker) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec_pretty(marker)
+        .expect("the init marker contains only serializable values");
     bytes.push(b'\n');
     bytes
 }
@@ -193,20 +617,14 @@ fn marker_error(verb: &str, error: std::io::Error) -> TelosError {
     }
 }
 
-/// Makes sure `.gitattributes` at the repository root carries
-/// [`GITATTRIBUTES_LINE`], creating the file if it is absent and appending to
-/// it otherwise -- never rewriting what is already there. An existing file
-/// that does not end in a newline gets one first, so the append cannot glue
-/// itself onto somebody else's rule. Already present (on a line of its own,
-/// whitespace aside) means there is nothing to do.
-fn ensure_gitattributes(root: &Path) -> Result<(), TelosError> {
-    let path = root.join(".gitattributes");
-
-    let mut content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(io_error("read", &path, e)),
-    };
+fn gitattributes_bytes(initial: Option<&[u8]>) -> Result<Vec<u8>, TelosError> {
+    let mut content = String::from_utf8(initial.unwrap_or_default().to_vec()).map_err(|error| {
+        io_error(
+            "read",
+            Path::new(GITATTRIBUTES_PATH),
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        )
+    })?;
 
     // `lines()` strips the `\r` of a CRLF file too, so a checkout with
     // Windows endings is recognized as already carrying the rule.
@@ -214,7 +632,7 @@ fn ensure_gitattributes(root: &Path) -> Result<(), TelosError> {
         .lines()
         .any(|line| line.trim() == GITATTRIBUTES_LINE)
     {
-        return Ok(());
+        return Ok(content.into_bytes());
     }
 
     if !content.is_empty() && !content.ends_with('\n') {
@@ -223,11 +641,7 @@ fn ensure_gitattributes(root: &Path) -> Result<(), TelosError> {
     content.push_str(GITATTRIBUTES_LINE);
     content.push('\n');
 
-    write(&path, &content)
-}
-
-fn write(path: &Path, content: &str) -> Result<(), TelosError> {
-    fs::write(path, content).map_err(|e| io_error("write", path, e))
+    Ok(content.into_bytes())
 }
 
 fn io_error(verb: &str, path: &Path, e: std::io::Error) -> TelosError {
@@ -259,13 +673,15 @@ fn first_error(diagnostics: Vec<Diagnostic>) -> TelosError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::io;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use telos_core::error::ErrorCode;
 
-    use super::{INIT_MARKER_PATH, run, run_with_agent_renderer};
+    use super::{INIT_MARKER_PATH, LOCK_PATH, run, run_with_agent_renderer, run_with_hooks};
     use crate::ci::CiProvider;
     use crate::commands::Ctx;
     use crate::commands::agents::{self, AgentHost};
@@ -288,6 +704,20 @@ mod tests {
         }
     }
 
+    fn fail_after_two_agent_publications(ctx: &Ctx) -> crate::envelope::CmdResult {
+        let mut publications = 0;
+        run_with_agent_renderer(ctx, &[AgentHost::Codex], Some(CiProvider::Github), |plan| {
+            agents::render_with_before_publish(plan, |_relative| {
+                publications += 1;
+                if publications == 3 {
+                    Err(io::Error::other("forced third agent publication failure"))
+                } else {
+                    Ok(())
+                }
+            })
+        })
+    }
+
     #[test]
     fn post_seal_agent_failure_resumes_only_with_exact_options() {
         let tmp = repo();
@@ -295,26 +725,9 @@ mod tests {
             cwd: tmp.path().to_path_buf(),
         };
         fs::write(tmp.path().join("AGENTS.md"), "# Owner instructions\n").unwrap();
-        let mut publications = 0;
-
-        let first = run_with_agent_renderer(
-            &ctx,
-            &[AgentHost::Codex],
-            Some(CiProvider::Github),
-            |plan| {
-                agents::render_with_before_publish(plan, |_relative| {
-                    publications += 1;
-                    if publications == 3 {
-                        Err(io::Error::other("forced third agent publication failure"))
-                    } else {
-                        Ok(())
-                    }
-                })
-            },
-        );
+        let first = fail_after_two_agent_publications(&ctx);
 
         assert_eq!(error_code(first), ErrorCode::TelosInternal);
-        assert_eq!(publications, 3);
         assert!(tmp.path().join("telos/telos.lock").is_file());
         assert!(tmp.path().join(INIT_MARKER_PATH).is_file());
         assert!(tmp.path().join(".agents/skills/telos/SKILL.md").is_file());
@@ -339,7 +752,19 @@ mod tests {
             ErrorCode::TelosAlreadyInitialized
         );
 
-        let resumed = run(&ctx, &[AgentHost::Codex], Some(CiProvider::Github)).unwrap();
+        let resumed = run_with_hooks(
+            &ctx,
+            &[AgentHost::Codex],
+            Some(CiProvider::Github),
+            |relative| -> io::Result<()> {
+                panic!(
+                    "sealed resume must not republish core path {}",
+                    relative.display()
+                )
+            },
+            agents::render,
+        )
+        .unwrap();
         assert_eq!(
             resumed.result,
             serde_json::json!({"root": "telos", "sealed": true})
@@ -362,6 +787,75 @@ mod tests {
     }
 
     #[test]
+    fn pre_seal_partial_core_publication_resumes_without_duplicate_merge() {
+        let tmp = repo();
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+        fs::write(tmp.path().join(".gitattributes"), b"# owner rule\n").unwrap();
+
+        let first = run_with_hooks(
+            &ctx,
+            &[AgentHost::Codex],
+            Some(CiProvider::Github),
+            |relative| {
+                if relative == Path::new(".gitattributes") {
+                    Err(io::Error::other("forced pre-seal failure"))
+                } else {
+                    Ok(())
+                }
+            },
+            agents::render,
+        );
+
+        assert_eq!(error_code(first), ErrorCode::TelosInternal);
+        assert!(tmp.path().join(INIT_MARKER_PATH).is_file());
+        assert!(tmp.path().join("telos/telos.toml").is_file());
+        assert!(tmp.path().join("telos/bindings.tel").is_file());
+        assert!(!tmp.path().join("telos/changes/counters.toml").exists());
+        assert!(!tmp.path().join(LOCK_PATH).exists());
+        assert!(!tmp.path().join(".agents").exists());
+
+        run(&ctx, &[AgentHost::Codex], Some(CiProvider::Github)).unwrap();
+        let attributes = fs::read_to_string(tmp.path().join(".gitattributes")).unwrap();
+        assert!(attributes.starts_with("# owner rule\n"));
+        assert_eq!(attributes.matches("telos/** text eol=lf").count(), 1);
+        assert!(!tmp.path().join(INIT_MARKER_PATH).exists());
+    }
+
+    #[test]
+    fn failure_after_lock_publication_before_phase_change_is_resumable() {
+        let tmp = repo();
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+
+        let first = run_with_hooks(
+            &ctx,
+            &[AgentHost::Codex],
+            Some(CiProvider::Github),
+            |relative| {
+                if relative == Path::new(LOCK_PATH) {
+                    Err(io::Error::other("forced pre-transition failure"))
+                } else {
+                    Ok(())
+                }
+            },
+            agents::render,
+        );
+
+        assert_eq!(error_code(first), ErrorCode::TelosInternal);
+        assert!(tmp.path().join(LOCK_PATH).is_file());
+        assert!(tmp.path().join(INIT_MARKER_PATH).is_file());
+        assert!(!tmp.path().join(".agents").exists());
+
+        run(&ctx, &[AgentHost::Codex], Some(CiProvider::Github)).unwrap();
+        assert!(!tmp.path().join(INIT_MARKER_PATH).exists());
+        assert!(tmp.path().join(".agents/skills/telos/SKILL.md").is_file());
+        assert!(tmp.path().join(".github/workflows/telos.yml").is_file());
+    }
+
+    #[test]
     fn a_foreign_init_marker_never_authorizes_project_writes() {
         let tmp = repo();
         let ctx = Ctx {
@@ -379,5 +873,123 @@ mod tests {
         );
         assert!(!tmp.path().join("telos").exists());
         assert!(!tmp.path().join(".agents").exists());
+    }
+
+    #[test]
+    fn post_seal_resume_rejects_foreign_core_bytes_without_any_write() {
+        for relative in [
+            "telos/telos.toml",
+            "telos/bindings.tel",
+            "telos/changes/counters.toml",
+            "telos/telos.lock",
+            ".gitattributes",
+        ] {
+            let tmp = repo();
+            let ctx = Ctx {
+                cwd: tmp.path().to_path_buf(),
+            };
+            assert_eq!(
+                error_code(fail_after_two_agent_publications(&ctx)),
+                ErrorCode::TelosInternal
+            );
+            fs::write(tmp.path().join(relative), b"foreign owner\n").unwrap();
+            let before = non_git_tree(tmp.path());
+
+            assert_eq!(
+                error_code(run(&ctx, &[AgentHost::Codex], Some(CiProvider::Github))),
+                ErrorCode::TelosChangeStateInvalid,
+                "{relative}"
+            );
+            assert_eq!(non_git_tree(tmp.path()), before, "{relative}");
+            assert!(tmp.path().join(INIT_MARKER_PATH).is_file(), "{relative}");
+        }
+    }
+
+    #[test]
+    fn post_seal_resume_rejects_a_core_file_replaced_by_a_directory() {
+        let tmp = repo();
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+        assert_eq!(
+            error_code(fail_after_two_agent_publications(&ctx)),
+            ErrorCode::TelosInternal
+        );
+        let bindings = tmp.path().join("telos/bindings.tel");
+        fs::remove_file(&bindings).unwrap();
+        fs::create_dir(&bindings).unwrap();
+        let before = non_git_tree(tmp.path());
+
+        assert_eq!(
+            error_code(run(&ctx, &[AgentHost::Codex], Some(CiProvider::Github))),
+            ErrorCode::TelosChangeStateInvalid
+        );
+        assert_eq!(non_git_tree(tmp.path()), before);
+        assert!(tmp.path().join(INIT_MARKER_PATH).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_seal_resume_rejects_a_symlinked_config_without_touching_its_owner() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = repo();
+        let outside = tempfile::tempdir().unwrap();
+        let owner = outside.path().join("owner.toml");
+        fs::write(&owner, b"foreign owner\n").unwrap();
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+        assert_eq!(
+            error_code(fail_after_two_agent_publications(&ctx)),
+            ErrorCode::TelosInternal
+        );
+        let config = tmp.path().join("telos/telos.toml");
+        fs::remove_file(&config).unwrap();
+        symlink(&owner, &config).unwrap();
+        let before = non_git_tree(tmp.path());
+        let outside_before = non_git_tree(outside.path());
+
+        assert_eq!(
+            error_code(run(&ctx, &[AgentHost::Codex], Some(CiProvider::Github))),
+            ErrorCode::TelosChangeStateInvalid
+        );
+        assert_eq!(non_git_tree(tmp.path()), before);
+        assert_eq!(non_git_tree(outside.path()), outside_before);
+        assert!(config.is_symlink());
+        assert!(tmp.path().join(INIT_MARKER_PATH).is_file());
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum TreeEntry {
+        Directory,
+        File(Vec<u8>),
+        Symlink(PathBuf),
+    }
+
+    fn non_git_tree(root: &Path) -> BTreeMap<PathBuf, TreeEntry> {
+        let mut entries = BTreeMap::new();
+        snapshot_dir(root, root, &mut entries);
+        entries
+    }
+
+    fn snapshot_dir(root: &Path, directory: &Path, entries: &mut BTreeMap<PathBuf, TreeEntry>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if relative == Path::new(".git") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.file_type().is_symlink() {
+                entries.insert(relative, TreeEntry::Symlink(fs::read_link(path).unwrap()));
+            } else if metadata.is_dir() {
+                entries.insert(relative.clone(), TreeEntry::Directory);
+                snapshot_dir(root, &path, entries);
+            } else {
+                entries.insert(relative, TreeEntry::File(fs::read(path).unwrap()));
+            }
+        }
     }
 }

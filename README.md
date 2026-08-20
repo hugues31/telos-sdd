@@ -16,18 +16,18 @@ by git blob hash. Nobody, human or agent, edits `telos/*.tel` by hand.
 
 ## Status
 
-v0.7 M1 (engine) complete — M2 transactions, M3 agents, M4 view, M5 rebuild
-proof upcoming.
+v0.7 M1 (engine) and M2 (transactions) complete — M3 agents, M4 view, M5
+rebuild proof upcoming.
 
 The three acceptance loops from the spec (§14) are the project's executable
 roadmap: **feature** (open → challenge → approve → red/green → reconcile →
 `coherent`), **drift** (out-of-protocol edit → `drifted` → `adopt` → same
 loop → `coherent`), **merge** (two sealed branches → lock conflict →
-`reconcile --full` → `coherent`). They are committed today as `#[ignore]`d
-end-to-end tests in
-[`crates/telos/tests/acceptance_loops.rs`](crates/telos/tests/acceptance_loops.rs),
-scripting commands M2/M3 haven't implemented yet, and are un-ignored one at
-a time as those milestones land. List them:
+`reconcile --full` → `coherent`). They live in
+[`crates/telos/tests/acceptance_loops.rs`](crates/telos/tests/acceptance_loops.rs)
+and are un-ignored one at a time as the milestone implementing their last
+command lands. **merge** is green as of M2; **feature** and **drift** wait
+on M3's `test`/`bind`. List what is still ignored:
 
 ```sh
 cargo test --workspace -- --ignored --list
@@ -37,6 +37,14 @@ M1 ships the `.tel` parser, the in-memory model with full referential
 integrity, the lock/seal engine (git blob OIDs), and the read/query CLI
 surface: `telos version | init | status | check [--sealed] | show | list |
 query | impact`, all behind a frozen `--json` envelope.
+
+M2 ships the write path: the change transaction (`telos change
+open|list|diff|approve|reconcile|abandon`), staged mutations (`add`, `edit`,
+`remove`) validated against an overlay before anything touches disk,
+digest-bound approvals, drift capture and restore (`adopt`, `revert`), and
+`change reconcile --full` — the way out of a merge-conflicted lock, and the
+way to seal a pre-existing spec tree. The CLI contracts are frozen in
+[`docs/contracts.md`](docs/contracts.md).
 
 ## Quickstart
 

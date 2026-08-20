@@ -8,12 +8,16 @@
 //!
 //! They are committed `#[ignore]`d and stay that way until the milestone
 //! that implements their last missing command lands, at which point that
-//! loop's `#[ignore]` comes off and the test starts asserting for real. Run
-//! with `cargo test --workspace -- --ignored` today, every loop is expected
-//! to fail -- on the *first* command M1 doesn't have, not on a compile
-//! error or a panic unrelated to the missing surface. That failure is this
-//! file doing its job: it is the roadmap's done-criterion, not a bug to fix
-//! here.
+//! loop's `#[ignore]` comes off and the test starts asserting for real.
+//! `loop_merge` came off at M2, which landed `change open`/`edit`/`approve`/
+//! `reconcile [--full]` -- it now runs in the ordinary suite and is the
+//! milestone's executable done-criterion. `loop_feature` and `loop_drift`
+//! stay `#[ignore]`d for M3 (`test`/`bind`, and the red/green witness
+//! protocol). Run with `cargo test --workspace -- --ignored` today, those
+//! two are expected to fail -- on the *first* command M2 doesn't have, not
+//! on a compile error or a panic unrelated to the missing surface. That
+//! failure is this file doing its job: it is the roadmap's done-criterion,
+//! not a bug to fix here.
 //!
 //! Payload JSON shapes fed to `add`/`edit` on stdin follow Annex D, frozen
 //! by T13 into `docs/contracts.md` -- `loop_feature` uses the real,
@@ -160,6 +164,46 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
     assert!(status.success(), "git {args:?} failed in {}", dir.display());
+}
+
+/// Runs `git <args>` in `dir`, asserts it succeeded, and returns its stdout.
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {}",
+        dir.display()
+    );
+    String::from_utf8(out.stdout).expect("git output is valid UTF-8")
+}
+
+/// The paths git left unmerged, sorted. `--name-only` collapses a conflicted
+/// path's three index stages into one line, and paths are not localized (the
+/// surrounding prose is), so this reads the same under any `LANG`.
+fn unmerged_paths(dir: &Path) -> Vec<String> {
+    let mut paths: Vec<String> = git_stdout(dir, &["diff", "--name-only", "--diff-filter=U"])
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Asserts `telos status --json` reports `state`, and returns the whole
+/// envelope so a caller can look at `changes` or `coverage`.
+fn assert_state(dir: &Path, state: &str) -> Value {
+    let status = run_ok(dir, &["status", "--json"]);
+    assert_eq!(
+        status["result"]["state"],
+        json!(state),
+        "expected the project to be {state}, got: {status}"
+    );
+    status
 }
 
 /// The branch `HEAD` currently points to. Used instead of a hardcoded
@@ -382,11 +426,15 @@ fn loop_feature() {
 /// `adopt` captures it as a real change, after which the ordinary loop
 /// finishes it the same way `loop_feature` does.
 ///
-/// Un-ignored once M3 lands (`adopt` needs the M2 change machinery to
-/// capture drift *into*, and this loop's final phase is the same
-/// implement/reconcile path `loop_feature` exercises).
+/// Every command it calls landed at M2, and it passes as written today
+/// (verified at T13 and again at T14 with `cargo test -p telos --test
+/// acceptance_loops -- --ignored`). It stays `#[ignore]`d anyway: the
+/// milestone plan schedules its un-ignoring for M3, alongside
+/// `loop_feature`, and this loop's Implement phase -- the one it currently
+/// skips entirely, going straight from `approve` to `reconcile` -- is the
+/// part M3's `test`/`bind` fill in.
 #[test]
-#[ignore = "un-ignored at M3"]
+#[ignore = "un-ignored at M3 (passes today; its Implement phase is still M3's)"]
 fn loop_drift() {
     let tmp = with_fixture();
     let dir = tmp.path();
@@ -450,18 +498,77 @@ fn loop_drift() {
 
 /// The **merge loop** (spec §7.4): two branches, each sealed independently
 /// off the same starting point, diverge and conflict on `telos.lock` when
-/// merged. `check` alone is green once the `.tel` conflicts are resolved by
-/// hand (the spec parses and resolves cleanly), but `check --sealed` stays
-/// red until `telos change reconcile --full` re-validates every §3.3 rule,
-/// reruns the whole test suite, and re-seals -- proof, not a bypass.
+/// merged. The spec files themselves merge cleanly -- §5's promise that
+/// conflicts stay "rare and localized" -- so `check` is green the moment the
+/// merge stops; but `check --sealed` stays red, because the *seal* is what
+/// conflicted, until `telos change reconcile --full` re-validates every §3.3
+/// rule, re-runs the impacted proof obligations, and re-seals. Proof, not a
+/// bypass.
 ///
-/// Un-ignored once M2 lands `change open/add/edit/reconcile --full`.
+/// Un-ignored at M2, which landed `change open`/`edit`/`approve`/`reconcile
+/// [--full]` -- the loop's last missing commands. It is M2's executable
+/// done-criterion.
+///
+/// # Amendments made when this loop was un-ignored (T14)
+///
+/// The loop was committed at M1 as a prediction of M2's behaviour. Its spine
+/// -- diverge, merge, conflict on the lock alone, `--full` as the way out --
+/// held exactly as predicted when it was first run for real. Three of its
+/// *comments*, though, described steps that never happen; the amendments
+/// below correct those and write down the assertions the loop had so far
+/// only implied. No assertion was weakened.
+///
+/// 1. **`#[ignore = "un-ignored at M2"]` removed.** M2 landed every command
+///    this loop calls.
+/// 2. **The two `git checkout --ours/--theirs` calls and their `git add`
+///    are gone.** They claimed to "resolve the two `.tel` conflicts by
+///    hand"; there are none. Each branch edits a *different* intent file, so
+///    git auto-merges both edits -- `git diff --name-only --diff-filter=U`
+///    after the merge lists exactly `telos/telos.lock`, and the working tree
+///    holds branch A's `INT-0017` wording *and* branch B's `INT-0042`
+///    wording. `git checkout --ours <path>` needs a stage-2 entry to pick
+///    from; with none, git 2.55 (the version this was verified against)
+///    makes it a silent no-op -- "0 paths updated from the index" -- and
+///    nothing promises it stays silent. Either way the call asserted a
+///    hand-resolution that never happens. The two assertions that replace it
+///    (the conflict set is exactly the lock; both wordings survive) are what
+///    §5's promise actually means.
+/// 3. **Branch B's comment corrected.** It said the two locks conflict
+///    because each carries a "new sealing change id". They do not: change
+///    ids are allocated per branch from that branch's own counters (D4), so
+///    both branches seal their own `CHG-0001` and the `sealed_by` line
+///    merges cleanly. What conflicts is `spec_digest` plus the two
+///    `[spec]` OID lines around the touched intents.
+/// 4. **State assertions added at every phase** (`status --json`): coherent
+///    fixture -> `changing` while each branch's transaction is open ->
+///    coherent after each branch reconciles -> coherent after the merge is
+///    resolved by `--full`. Plus the `--full` envelope itself
+///    (`id: null`, `ops_applied: 0`, `checks_run: 1` -- D11's *total*
+///    constraint revalidation, not the impacted subset) and a green
+///    `check --sealed` at the end, which is the only real proof the re-seal
+///    happened.
+/// 5. **No `status` assertion in the conflicted phase, deliberately.**
+///    `status` reports the tree *against its seal*, and here the seal is the
+///    thing carrying git's conflict markers: it answers `TELOS_PARSE_ERROR`
+///    (contracts.md's `TELOS_PARSE_ERROR` row covers `telos.lock`). That
+///    phase is therefore asserted through `check`/`check --sealed`, which is
+///    also exactly the pair §7.4 talks about.
+/// 6. **"reruns the whole test suite" softened to the truth in the doc
+///    comment.** The `billing` corpus ships `[test] cmd = ""` (D13), so D10
+///    skips the run and `tests_run` is `0`. What `--full` re-proves *here*
+///    is the whole §3.3 rule set and every constraint; asserting a suite the
+///    corpus does not configure would be asserting a fiction.
+/// 7. **The merge is now committed at the end.** The loop used to stop with
+///    `telos.lock` still unmerged in git's index; a merge nobody can commit
+///    is not a merge resolved. `git commit` after `--full` is the last step
+///    of §7.4's story, and it is what proves the re-derived lock is a real
+///    resolution and not just a file on disk.
 #[test]
-#[ignore = "un-ignored at M2"]
 fn loop_merge() {
     let tmp = with_fixture();
     let dir = tmp.path();
     let base = current_branch(dir);
+    assert_state(dir, "coherent");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-m", "seal the billing corpus"]);
 
@@ -469,6 +576,16 @@ fn loop_merge() {
     git(dir, &["checkout", "-b", "branch-a"]);
     let change_a = run_ok(dir, &["change", "open", "tighten INT-0017", "--json"]);
     let change_a_id = change_a["result"]["id"].as_str().unwrap().to_string();
+    let status = assert_state(dir, "changing");
+    assert_eq!(
+        status["result"]["changes"],
+        json!([{
+            "id": change_a_id,
+            "status": "open",
+            "obligations": ["stage the delta", "approve", "reconcile"],
+        }]),
+        "an open transaction is the whole of what branch A has going on"
+    );
     run_ok_stdin(
         dir,
         &[
@@ -484,6 +601,9 @@ fn loop_merge() {
     run_ok(dir, &["change", "diff", &change_a_id, "--json"]);
     run_ok(dir, &["change", "approve", &change_a_id, "--json"]);
     run_ok(dir, &["change", "reconcile", &change_a_id, "--json"]);
+    // Reconciled: the change file is gone and the branch is sealed again.
+    let status = assert_state(dir, "coherent");
+    assert_eq!(status["result"]["changes"], json!([]));
     git(dir, &["add", "-A"]);
     git(
         dir,
@@ -491,13 +611,17 @@ fn loop_merge() {
     );
 
     // --- Branch B: touch INT-0042 the same way, from the same starting
-    // point -- each branch's `reconcile` rewrites the whole lock (new
-    // digest, new sealing change id), so the two branches' `telos.lock`
-    // conflict line-for-line on merge, not just around the touched intent.
+    // point. Change ids are per-branch (D4), so branch B seals its own
+    // `CHG-0001` too and `sealed_by` merges cleanly; what makes the two
+    // `telos.lock`s conflict is `spec_digest` -- rewritten wholesale by
+    // every reconcile -- plus the `[spec]` OID lines of the touched
+    // intents, which sit close enough together for git to fold them into
+    // one hunk.
     git(dir, &["checkout", &base]);
     git(dir, &["checkout", "-b", "branch-b"]);
     let change_b = run_ok(dir, &["change", "open", "tighten INT-0042", "--json"]);
     let change_b_id = change_b["result"]["id"].as_str().unwrap().to_string();
+    assert_state(dir, "changing");
     run_ok_stdin(
         dir,
         &[
@@ -513,13 +637,14 @@ fn loop_merge() {
     run_ok(dir, &["change", "diff", &change_b_id, "--json"]);
     run_ok(dir, &["change", "approve", &change_b_id, "--json"]);
     run_ok(dir, &["change", "reconcile", &change_b_id, "--json"]);
+    assert_state(dir, "coherent");
     git(dir, &["add", "-A"]);
     git(
         dir,
         &["commit", "-m", "branch B: reconcile the INT-0042 edit"],
     );
 
-    // --- Merge: git conflicts on telos.lock. --------------------------------
+    // --- Merge: git conflicts on telos.lock, and on nothing else. ----------
     git(dir, &["checkout", "branch-a"]);
     let merge_status = Command::new("git")
         .args(["merge", "branch-b"])
@@ -531,32 +656,69 @@ fn loop_merge() {
         "expected `git merge branch-b` to conflict on telos.lock"
     );
 
-    // Resolve the two `.tel` conflicts by hand -- each branch touched a
-    // different intent file, so this is a clean pick from each side.
-    // `telos.lock` itself is deliberately left conflicted: it is not a file
-    // a human resolves by hand, `reconcile --full` re-derives it.
-    git(dir, &["checkout", "--ours", "telos/intents/INT-0017.tel"]);
-    git(dir, &["checkout", "--theirs", "telos/intents/INT-0042.tel"]);
-    git(
-        dir,
-        &[
-            "add",
-            "telos/intents/INT-0017.tel",
-            "telos/intents/INT-0042.tel",
-        ],
+    // §5, checked rather than asserted in prose: the spec files are ordinary
+    // text files that merge like any other, so a conflict on them is rare and
+    // local. Here there is none at all -- each branch edited a different
+    // intent -- and the only unmerged path is the derived one.
+    assert_eq!(
+        unmerged_paths(dir),
+        vec!["telos/telos.lock".to_string()],
+        "only the derived lock may conflict; the spec files merge like any other text"
+    );
+    // Both branches' edits survived the merge: nothing was picked over
+    // anything else.
+    let int_0017 = fs::read_to_string(dir.join("telos/intents/INT-0017.tel"))
+        .expect("failed to read INT-0017.tel");
+    assert!(
+        int_0017.contains("branch A wording"),
+        "branch A's INT-0017 edit must survive the merge, got: {int_0017}"
+    );
+    let int_0042 = fs::read_to_string(dir.join("telos/intents/INT-0042.tel"))
+        .expect("failed to read INT-0042.tel");
+    assert!(
+        int_0042.contains("branch B wording"),
+        "branch B's INT-0042 edit must survive the merge, got: {int_0042}"
     );
 
-    // `check` only re-parses the (now-resolved) spec -- green.
+    // `check` only re-parses the spec, which merged cleanly -- green.
     run_ok(dir, &["check", "--json"]);
-    // `check --sealed` still reads telos.lock -- which still has git's
-    // conflict markers in it -- so it stays red.
+    // `check --sealed` reads telos.lock -- which still has git's conflict
+    // markers in it -- so it stays red. (`status` answers the same way for
+    // the same reason, which is why this phase is asserted here and not
+    // through `status`.)
     run_err(dir, &["check", "--sealed", "--json"], "TELOS_PARSE_ERROR");
 
     // --- Reconcile --full -------------------------------------------------------
-    // §7.4: total integrity revalidation + the whole test suite green +
-    // re-seal. Not a bypass -- it demands full proof.
-    run_ok(dir, &["change", "reconcile", "--full", "--json"]);
+    // §7.4: total integrity revalidation, every constraint re-checked, every
+    // impacted proof obligation re-run, then re-seal. Not a bypass -- it
+    // demands full proof, and it is the only way out of a conflicted lock.
+    let reconciled = run_ok(dir, &["change", "reconcile", "--full", "--json"]);
+    assert_eq!(
+        reconciled["result"],
+        json!({
+            "checks_run": 1,
+            "full": true,
+            "id": null,
+            "ops_applied": 0,
+            "tests_run": 0,
+        }),
+        "--full applies no ops, belongs to no change, and re-checks every \
+         constraint (the corpus has one, and ships no test runner -- D13)"
+    );
 
-    let status = run_ok(dir, &["status", "--json"]);
-    assert_eq!(status["result"]["state"], json!("coherent"));
+    let status = assert_state(dir, "coherent");
+    assert_eq!(status["result"]["changes"], json!([]));
+    // The seal is real, not merely re-written: `check --sealed` is the
+    // command that was red one line above the reconcile.
+    run_ok(dir, &["check", "--sealed", "--json"]);
+
+    // And the merge is genuinely resolved: the re-derived lock stages, the
+    // merge commits, and the merged branch is still coherent afterwards.
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "--no-edit"]);
+    assert!(
+        unmerged_paths(dir).is_empty(),
+        "the merge must be fully resolved once `--full` has re-derived the lock"
+    );
+    assert_state(dir, "coherent");
 }

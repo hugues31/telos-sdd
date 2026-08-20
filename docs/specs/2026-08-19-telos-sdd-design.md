@@ -177,7 +177,7 @@ Sorties du drift : `telos adopt [--into CHG-…]` (le travail est capturé comme
 
 ### 7.4 Cas particuliers
 
-- **Merge git de deux branches scellées** : le lock est conflictuel → `telos reconcile --full` : revalidation d'intégrité complète + suite de tests entière verte + re-scellement. Ce n'est pas un bypass : il exige la preuve totale.
+- **Merge git de deux branches scellées** : le lock est conflictuel → `telos change reconcile --full` : revalidation d'intégrité complète + exécution complète des obligations et comportements actifs + re-scellement. S'il existe au moins un intent actif, le runner exécute la suite entière exactement une fois et elle doit être verte ; s'il n'en existe aucun, il n'y a aucune obligation de test et le runner n'est pas invoqué (`tests_run = 0`). Ce n'est pas un bypass : il exige la preuve totale de toutes les obligations actives.
 - **Changes concurrents** : autorisés ; un fichier ne peut être revendiqué que par un change à la fois.
 
 ## 8. Surface CLI

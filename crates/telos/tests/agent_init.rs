@@ -113,6 +113,22 @@ fn duplicate_hosts_normalize_deterministically() {
 }
 
 #[test]
+fn init_persists_normalized_agent_hosts_in_project_configuration() {
+    let tmp = repo();
+    telos(
+        tmp.path(),
+        &["init", "--agents", "codex,claude,codex,claude"],
+    )
+    .assert()
+    .success();
+
+    assert_eq!(
+        read(tmp.path(), "telos/telos.toml"),
+        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
+    );
+}
+
+#[test]
 fn unknown_host_is_a_clap_error_before_any_project_write() {
     let tmp = repo();
     telos(tmp.path(), &["init", "--agents", "claude,wat"])

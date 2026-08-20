@@ -14,12 +14,13 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tempfile::TempDir;
 
+use telos_core::config::{AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg};
 use telos_core::counters::{Alloc, Counters, floors};
 use telos_core::error::{Diagnostic, ErrorCode};
 use telos_core::ids::{ConstraintId, IntentId, NotionName, RepoPath};
 use telos_core::model::{Intent, Notion, StagedOp, TelFile};
 use telos_core::overlay::{
-    apply_ops, apply_ops_idempotent, notions_of, op_before_after, parse_base,
+    apply_config_ops, apply_ops, apply_ops_idempotent, notions_of, op_before_after, parse_base,
     validate_ops_idempotent,
 };
 use telos_core::payload::{intent_from_json, notion_from_json, patch_intent};
@@ -29,6 +30,49 @@ use telos_core::workspace::Workspace;
 
 fn corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/billing")
+}
+
+#[test]
+fn apply_config_ops_uses_the_last_typed_edit_and_normalizes_sets() {
+    let base = Config::default();
+    let first = Config {
+        code: Globs {
+            globs: vec!["b/**/*.rs".into(), "a/**/*.rs".into()],
+        },
+        tests: Globs::default(),
+        test: TestCfg {
+            cmd: "first".into(),
+        },
+        policy: Policy {
+            tdd: TddPolicy::Advisory,
+        },
+        agents: AgentsCfg::default(),
+    };
+    let second = Config {
+        code: Globs {
+            globs: vec!["src/**/*.rs".into(), "src/**/*.rs".into()],
+        },
+        tests: Globs {
+            globs: vec!["tests/**/*.rs".into()],
+        },
+        test: TestCfg {
+            cmd: "second".into(),
+        },
+        policy: Policy {
+            tdd: TddPolicy::Strict,
+        },
+        agents: AgentsCfg::default(),
+    };
+
+    let effective = apply_config_ops(
+        &base,
+        &[StagedOp::EditConfig(first), StagedOp::EditConfig(second)],
+    );
+
+    assert_eq!(effective.code.globs, ["src/**/*.rs"]);
+    assert_eq!(effective.tests.globs, ["tests/**/*.rs"]);
+    assert_eq!(effective.test.cmd, "second");
+    assert_eq!(effective.policy.tdd, TddPolicy::Strict);
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) {

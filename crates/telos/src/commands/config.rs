@@ -52,9 +52,10 @@ struct PayloadAgents {
 pub fn run(ctx: &Ctx, change: Option<&str>, payload: Option<&str>) -> CmdResult {
     let ws = Workspace::discover(&ctx.cwd)?;
     let Some(change) = change else {
+        let canonical = telos_core::config::emit(&ws.config)?;
         return Ok(Outcome {
             result: json!(ws.config),
-            human: telos_core::emit::emit_config(&ws.config)?,
+            human: canonical.trim_end_matches('\n').to_string(),
             next_actions: Vec::new(),
         });
     };

@@ -1562,6 +1562,25 @@ fn advisory_reports_the_missing_witness_instead_of_refusing() {
     assert_eq!(status["result"]["state"], json!("coherent"));
 }
 
+#[test]
+fn a_staged_config_glob_is_effective_before_reconcile_writes_it() {
+    let tmp = fresh();
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::write(tmp.path().join("src/unbound.rs"), "fn unbound() {}\n").unwrap();
+    open_change(tmp.path());
+    stage(
+        tmp.path(),
+        &["config", "--change", "CHG-0001", "--json"],
+        r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":[]},"test":{"cmd":""},"policy":{"tdd":"strict"},"agents":{"hosts":[]}}"#,
+    );
+    approve(tmp.path());
+
+    let error = reconcile_err(tmp.path());
+
+    assert_eq!(error["code"], "TELOS_ORPHAN_CODE");
+    assert!(read(tmp.path(), "telos/telos.toml").contains("globs = []"));
+}
+
 /// The same warning in human mode, where an advisory project's TDD debt has
 /// to be visible at all.
 #[test]

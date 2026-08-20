@@ -59,7 +59,7 @@ enum Command {
     Status,
     /// View Telos documentation locally or export a sealed static snapshot.
     View {
-        /// Loopback server port (implemented in the next milestone).
+        /// Loopback server port.
         #[arg(long, default_value_t = 3000, conflicts_with = "export")]
         port: u16,
         /// Write a self-contained static site to this new directory.
@@ -216,6 +216,13 @@ pub fn run() -> ExitCode {
     if let Command::AgentGuard { host } = &cli.command {
         return commands::agents::guard::run(*host);
     }
+    if let Command::View { port, export: None } = &cli.command {
+        let context = match ctx() {
+            Ok(context) => context,
+            Err(error) => return commands::view::render_startup_error(error, cli.json),
+        };
+        return commands::view::serve(&context, *port, cli.json);
+    }
 
     let name = cli.command.name();
     let res = execute(&cli.command);
@@ -250,12 +257,11 @@ fn execute(command: &Command) -> CmdResult {
                     "export destination must be valid UTF-8",
                 )
             })?;
-            commands::view::run(&ctx()?, destination)
+            commands::view::export(&ctx()?, destination)
         }
-        Command::View { export: None, .. } => Err(TelosError::new(
-            ErrorCode::TelosInternal,
-            "the live view server is not available yet; pass `--export DIR`",
-        )),
+        Command::View { export: None, .. } => {
+            unreachable!("live view returned before ordinary dispatch")
+        }
         Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
         Command::Show { target } => commands::show::run(&ctx()?, target),
         Command::List { kind } => commands::list::run(&ctx()?, *kind),

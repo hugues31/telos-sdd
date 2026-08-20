@@ -381,7 +381,10 @@ fn published_error_code_table_is_exact_and_unique() {
 
 #[test]
 fn published_error_code_parser_accepts_crlf_contracts() {
-    let contracts = include_str!("../../../docs/contracts.md").replace('\n', "\r\n");
+    let contracts = include_str!("../../../docs/contracts.md")
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n");
+    assert!(!contracts.contains("\r\r\n"));
     let documented = published_error_codes(&contracts);
 
     assert_eq!(documented.len(), 17);

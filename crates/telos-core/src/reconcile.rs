@@ -253,13 +253,31 @@ pub fn reconcile_change(
 /// files untouched and still open -- a full reseal is about the spec on
 /// disk, not about anybody's staged delta. **The sealed code coverage**
 /// (gate 7) is a comparison against the previous seal, so it goes with the
-/// lock this function does not read: §7.4's total proof of the tree cannot
-/// be qualified by what an older, possibly worthless lock happened to
-/// cover, and rule 5 above already proves that every file the globs match
-/// *is* bound. **The witness** (gate 8) is a property of a change's
+/// lock this function does not read: §7.4's answer to «is this tree
+/// provable?» is computed over the tree, and what an older, possibly
+/// worthless lock happened to cover is no part of it.
+///
+/// That last one is an escape hatch, not a proof, and it is worth naming as
+/// such: `--full` seals disk truth, so it *is* the one remaining way a
+/// `bindings.tel` that shrank outside the protocol reaches a fresh lock
+/// with nobody having approved the shrink. Rule 5 does not close the hole
+/// on its way past -- it judges only the files the *current* globs match,
+/// and the same hand edit that drops an `implements` line can empty the
+/// `[code]` globs that would have caught the file it covered (the e2e
+/// `a_full_reseal_is_exempt_from_the_coverage_gate` is exactly that tree).
+/// What keeps this honest is that `--full` is a deliberate, human-invoked
+/// act with no delta behind it: the same property that makes it the exit
+/// from a `telos.lock` merge conflict makes it the operator's
+/// responsibility, which is where §7.4 puts it.
+///
+/// **The witness** (gate 8) is a property of a change's
 /// *journal*, so it goes the same way, and `witness_warnings` comes back
 /// empty -- and with no change to claim anything in flight, rule 5 exempts
-/// nothing here either. **The ops** are likewise absent,
+/// nothing here either, so a `--full` run while some change holds a
+/// red-only journal refuses on that change's test file. `--full` is
+/// stricter than a per-change reconcile there, deliberately: it proves the
+/// disk, and an unreconciled journal is not on it. **The ops** are likewise
+/// absent,
 /// hence `ops_applied: 0` and a `sealed_by: None` seal: no transaction
 /// produced this state, it was simply found -- and with no ops there is no
 /// journal to fold either, so `bindings.tel` is read as it stands rather
@@ -581,11 +599,19 @@ fn require_no_orphan_code(
 /// it is exactly what §4.1's «une édition manuelle = drift» forbids.
 ///
 /// The one exemption is a delta that *stages* `telos/bindings.tel` -- the
-/// `accept` op `adopt` produces for it. Then the new table is the delta's
-/// own content, it went through `change diff` and `change approve`, and a
-/// human said yes to this precise shrink. Any op targeting the path counts,
-/// not just `accept`: what matters is that the reviewed delta is about that
-/// file.
+/// `accept` op `adopt` produces for it. What that buys is bounded, and the
+/// bound belongs in the contract rather than in a reader's optimism: the
+/// shrink was **captured** by `adopt` into a change, and somebody approved
+/// a delta one of whose ops is «take the current bytes of
+/// `telos/bindings.tel`». It is not a line-level review.
+/// [`crate::overlay::op_before_after`] renders an `accept`'s `before` from
+/// the tree as it stands -- already shrunk -- and its `after` as `None`, so
+/// `change diff` never shows the approver *which* `implements` line went
+/// missing. The exemption means «this shrink is owned by an approved
+/// delta», not «somebody read it», and that is the whole claim.
+///
+/// Any op targeting the path counts, not just `accept`: what matters is
+/// that the reviewed delta is about that file.
 ///
 /// Deliberately local and static: the alternative -- deriving the expected
 /// code table from the carried-over lock -- would need `git cat-file` on a
@@ -602,6 +628,11 @@ fn require_no_coverage_shrink(
     model: &TelosModel,
     ops: &[StagedOp],
 ) -> Result<(), TelosError> {
+    // The follow-up this exemption is waiting on: render an `accept`'s
+    // `before` from the *seal* rather than from disk, so that `change diff`
+    // shows an approver which `implements` line the delta drops. Until then
+    // what is exempted here is ownership, not a line-level review -- see the
+    // doc above, which says so rather than implying otherwise.
     let bindings_path = RepoPath::new(BINDINGS_PATH);
     if ops.iter().any(|op| op.target_path() == bindings_path) {
         return Ok(());
@@ -1304,16 +1335,20 @@ mod tests {
         }
     }
 
+    const STRAY: &str = "src/stray.rs";
+
     #[test]
     fn in_flight_paths_are_this_journals_and_every_other_changes_claims() {
-        // The op's own target is *not* in flight: this transaction is about
-        // to write it, so rule 5 judges the state it produces.
+        // `accept STRAY` is the witness that a change's *own op targets* are
+        // not in flight: this transaction is applying them, so rule 5 judges
+        // the state they produce -- adopting a code file without binding it
+        // is still an orphan, exactly as in M2.
         let change = Change {
             id: crate::ids::ChangeId(1),
             motivation: "x".to_string(),
             status: ChangeStatus::Implementing,
             approved_digest: None,
-            ops: vec![StagedOp::RemoveIntent(IntentId(42))],
+            ops: vec![StagedOp::RemoveIntent(IntentId(42)), accept(STRAY)],
             journal: vec![JournalEntry::Bind {
                 path: RepoPath::new(CODE),
                 intent: IntentId(42),
@@ -1328,6 +1363,10 @@ mod tests {
         // Own journal, plus the *foreign* claims -- the caller's own entry
         // in `others` contributes nothing, exactly as in gate 1.
         assert_eq!(paths, carried(&[CODE, ROGUE]));
+        assert!(
+            !paths.contains(&RepoPath::new(STRAY)),
+            "a path this change's own op targets must not be exempted from rule 5"
+        );
     }
 
     /// `previous` with the fields a carry-over does not touch taken from

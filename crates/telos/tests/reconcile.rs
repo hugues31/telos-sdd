@@ -512,16 +512,52 @@ fn code_another_open_change_claims_is_no_orphan_until_that_change_is_gone() {
     );
 }
 
+/// The exemption covers what *another* change claims and what this change's
+/// own **journal** declares -- never the paths its own ops target. This is
+/// the sharpest case of that: a delta `adopt` built from a hand-edited
+/// `bindings.tel` *and* from the very code file that edit orphaned, so the
+/// orphan is one of the change's own `accept` targets. Rule 5 still refuses
+/// it -- adopting a code file without binding it is an orphan, as in M2.
+#[test]
+fn a_code_file_this_changes_own_accept_op_targets_is_still_an_orphan() {
+    let tmp = with_fixture();
+    drop_the_implements_line(tmp.path());
+    // The bound file drifts too, so `adopt` captures both: unlike the ledger
+    // attack, the `[code]` globs stay, so rule 5 has something to say -- and
+    // it says it about a path this very delta stages.
+    fs::write(
+        tmp.path().join("src/billing/invoice.rs"),
+        "// edited out of protocol\n",
+    )
+    .unwrap();
+
+    let adopted = ok_result(tmp.path(), &["adopt", "--json"]);
+    assert_eq!(adopted["ops"], json!(2), "{adopted}");
+    let a = adopted["change"]
+        .as_str()
+        .expect("`adopt` answers with the change that captured the drift")
+        .to_string();
+    approve_id(tmp.path(), &a);
+
+    assert_eq!(
+        reconcile_id_err(tmp.path(), &a),
+        json!({
+            "code": "TELOS_ORPHAN_CODE",
+            "message": "`src/billing/invoice.rs` matches the [code] globs but \
+                        no `implements` binding covers it",
+            "hint": ORPHAN_HINT
+        })
+    );
+}
+
 // --- gate 7: the sealed code coverage (D9) -----------------------------------
 
 /// The frozen `TELOS_INTEGRITY_VIOLATION` hint of Annex F, gate 7's row.
 const COVERAGE_HINT: &str = "the bindings shrank outside this change; reconcile or abandon the change that claims telos/bindings.tel, or restore them with `telos revert`";
 
-/// Hand-edits the corpus into the ledger attack's starting position: the
-/// `implements` line dropped from `bindings.tel`, and the `[code]` globs
-/// emptied so that rule 5 has nothing left to say about the file that just
-/// lost its binding. Both are sealed spec files, so both are drift.
-fn stage_the_ledger_attack(dir: &Path) {
+/// Hand-edits `telos/bindings.tel` down to its `proves` line, out of
+/// protocol. A sealed spec file, so this is drift.
+fn drop_the_implements_line(dir: &Path) {
     let bindings = read(dir, BINDINGS);
     let kept: String = bindings
         .lines()
@@ -533,6 +569,14 @@ fn stage_the_ledger_attack(dir: &Path) {
         "the corpus no longer ships an `implements` line to drop"
     );
     fs::write(dir.join(BINDINGS), kept).unwrap();
+}
+
+/// Hand-edits the corpus into the ledger attack's starting position: the
+/// `implements` line dropped, *and* the `[code]` globs emptied so that rule
+/// 5 has nothing left to say about the file that just lost its binding --
+/// which is what leaves gate 7 as the only thing standing in the way.
+fn stage_the_ledger_attack(dir: &Path) {
+    drop_the_implements_line(dir);
 
     let toml = read(dir, "telos/telos.toml");
     let emptied = toml.replace("globs = [\"src/**/*.rs\"]", "globs = []");
@@ -1334,6 +1378,38 @@ fn a_red_only_change_is_told_about_its_missing_green_not_about_an_orphan() {
                 "run `telos test {}` again once the implementation is in place",
                 feature.scenario()
             ),
+        })
+    );
+}
+
+/// The other side of that exemption, and the asymmetry it creates: `--full`
+/// proves the *disk*, and a journal nobody has reconciled yet is not on it.
+///
+/// So the very red-only state the test above gets a witness verdict for is
+/// refused by a full reseal of the same tree, one command apart -- `--full`
+/// is *stricter* here than a per-change reconcile, deliberately (§7.4). The
+/// remedy is to finish or abandon the change, not to reach for `--full`.
+#[test]
+fn a_full_reseal_refuses_the_in_flight_file_a_change_reconcile_exempts() {
+    let tmp = configured("strict");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+    write_test_file(tmp.path(), &[feature.scenario()], "");
+    witness(tmp.path(), feature.scenario(), "red");
+
+    let envelope = reconcile_full(tmp.path());
+
+    assert_eq!(envelope["ok"], json!(false), "got {envelope}");
+    assert_eq!(
+        envelope["error"],
+        json!({
+            "code": "TELOS_ORPHAN_CODE",
+            "message": format!(
+                "`{TEST_FILE}` matches the [tests] globs but no `proves` binding covers it"
+            ),
+            "hint": ORPHAN_HINT
         })
     );
 }

@@ -17,6 +17,7 @@
 
 use std::str::FromStr;
 
+use crate::config::{AgentHost, AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg};
 use crate::error::{Diagnostic, ErrorCode};
 use crate::git::Oid;
 use crate::ids::{
@@ -1464,6 +1465,9 @@ impl<'a> P<'a> {
         }
         if self.at_kw("edit") {
             self.advance();
+            if self.at_kw("config") {
+                return self.config_op();
+            }
             return self.entity_decl(Verb::Edit);
         }
         if self.at_kw("remove") {
@@ -1475,6 +1479,64 @@ impl<'a> P<'a> {
             return self.accept_op();
         }
         Err(self.expected("`add`, `edit`, `remove` or `accept`"))
+    }
+
+    fn config_op(&mut self) -> Result<StagedOp, Diagnostic> {
+        self.expect_lower_kw("config")?;
+        self.expect(&TokKind::LBrace, "`{`")?;
+        let mut config = Config {
+            code: Globs::default(),
+            tests: Globs::default(),
+            test: TestCfg::default(),
+            policy: Policy::default(),
+            agents: AgentsCfg::default(),
+        };
+        self.skip_newlines();
+        while !self.at(&TokKind::RBrace) && !self.at(&TokKind::Eof) {
+            if self.at_kw("code_glob") {
+                self.advance();
+                config.code.globs.push(self.expect_str("a code glob")?.node);
+            } else if self.at_kw("test_glob") {
+                self.advance();
+                config
+                    .tests
+                    .globs
+                    .push(self.expect_str("a test glob")?.node);
+            } else if self.at_kw("test_cmd") {
+                self.advance();
+                config.test.cmd = self.expect_str("a test command")?.node;
+            } else if self.at_kw("tdd") {
+                self.advance();
+                config.policy.tdd = if self.at_kw("strict") {
+                    self.advance();
+                    TddPolicy::Strict
+                } else if self.at_kw("advisory") {
+                    self.advance();
+                    TddPolicy::Advisory
+                } else {
+                    return Err(self.expected("`strict` or `advisory`"));
+                };
+            } else if self.at_kw("agent_host") {
+                self.advance();
+                config.agents.hosts.push(if self.at_kw("claude") {
+                    self.advance();
+                    AgentHost::Claude
+                } else if self.at_kw("codex") {
+                    self.advance();
+                    AgentHost::Codex
+                } else {
+                    return Err(self.expected("`claude` or `codex`"));
+                });
+            } else {
+                return Err(self.expected("a config field"));
+            }
+            self.end_of_field()?;
+            self.skip_newlines();
+        }
+        self.expect(&TokKind::RBrace, "`}`")?;
+        self.end_of_field()?;
+        config.normalize();
+        Ok(StagedOp::EditConfig(config))
     }
 
     /// `entity-decl = notion-file | intent-file | constraint-file`, nested

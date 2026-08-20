@@ -144,7 +144,7 @@ use crate::model::{
     Binding, Change, ChangeStatus, Constraint, JournalEntry, Scope, StagedOp, TelFile, TelosModel,
     TestRef,
 };
-use crate::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
+use crate::overlay::{apply_config_ops, apply_ops_idempotent, fold_journal_bindings, parse_base};
 use crate::semantic::build_model;
 use crate::state::{DRIFT_HINT, compute_state};
 use crate::witness::{WitnessVerdict, required_witnesses, witness_verdict};
@@ -205,17 +205,22 @@ pub fn reconcile_change(
     require_fresh_approval(change)?;
     require_accepted_bytes(git, change)?;
 
+    let effective_ws = Workspace {
+        repo_root: ws.repo_root.clone(),
+        telos_dir: ws.telos_dir.clone(),
+        config: apply_config_ops(&ws.config, &change.ops),
+    };
     let base = parse_base(ws).map_err(diagnostics_to_error)?;
     let folded = fold_journal_bindings(apply_ops_idempotent(base.clone(), &change.ops), change);
     let model = build_model(folded).map_err(diagnostics_to_error)?;
-    require_no_orphan_code(ws, &model, &in_flight_paths(change, others))?;
+    require_no_orphan_code(&effective_ws, &model, &in_flight_paths(change, others))?;
     require_no_coverage_shrink(lock, &model, &change.ops)?;
 
-    let witness_warnings = check_witnesses(ws, git, &base, &model, change)?;
+    let witness_warnings = check_witnesses(&effective_ws, git, &base, &model, change)?;
 
     let impacted = impacted_nodes(ws, &model, &change.ops);
-    let checks_run = run_constraint_checks(ws, &model, Some(&impacted))?;
-    let tests_run = run_tests(ws, &model, &impacted)?;
+    let checks_run = run_constraint_checks(&effective_ws, &model, Some(&impacted))?;
+    let tests_run = run_tests(&effective_ws, &model, &impacted)?;
 
     // --- D6: everything above passed, so and only so, write. ---
     for op in &change.ops {
@@ -806,6 +811,7 @@ fn impacted_nodes(ws: &Workspace, model: &TelosModel, ops: &[StagedOp]) -> BTree
             StagedOp::RemoveNotion(name) => (NodeRef::Notion(name.clone()), pre.as_ref()),
             StagedOp::RemoveIntent(id) => (NodeRef::Intent(*id), pre.as_ref()),
             StagedOp::RemoveConstraint(id) => (NodeRef::Constraint(*id), pre.as_ref()),
+            StagedOp::EditConfig(_) => continue,
             StagedOp::Accept { path, .. } => (NodeRef::Code(path.clone()), Some(model)),
         };
 
@@ -1031,6 +1037,7 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
         StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => {
             emit_file(&TelFile::Constraint(c.clone()))
         }
+        StagedOp::EditConfig(config) => crate::emit::emit_config(config)?,
         StagedOp::Accept { .. } => return Ok(()),
         StagedOp::RemoveNotion(_) | StagedOp::RemoveIntent(_) | StagedOp::RemoveConstraint(_) => {
             return match fs::remove_file(&path) {

@@ -66,6 +66,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::config::Config;
 use crate::emit::{emit_constraint, emit_intent, emit_notion};
 use crate::error::{Diagnostic, ErrorCode, TelosError};
 use crate::ids::{NotionName, RepoPath};
@@ -85,6 +86,18 @@ use crate::workspace::{BINDINGS_PATH, Workspace};
 /// pass.
 pub fn parse_base(ws: &Workspace) -> Result<Vec<(RepoPath, TelFile)>, Vec<Diagnostic>> {
     ws.parse_spec_files()
+}
+
+/// Applies configuration operations. They are intentionally not model ops.
+pub fn apply_config_ops(base: &Config, ops: &[StagedOp]) -> Config {
+    let mut config = base.clone();
+    for op in ops {
+        if let StagedOp::EditConfig(next) = op {
+            config = next.clone();
+        }
+    }
+    config.normalize();
+    config
 }
 
 /// Every notion of a base, by name -- the map
@@ -184,7 +197,7 @@ fn apply_one(base: &mut Vec<(RepoPath, TelFile)>, op: &StagedOp) -> Result<(), T
         // Inert: an `accept` seals the current bytes of a path the model
         // holds no entity for -- a reconcile-time concern, not an overlay
         // one.
-        StagedOp::Accept { .. } => Ok(()),
+        StagedOp::Accept { .. } | StagedOp::EditConfig(_) => Ok(()),
 
         StagedOp::AddNotion(n) => add(base, op, TelFile::Notion(n.clone())),
         StagedOp::AddIntent(i) => add(base, op, TelFile::Intent(i.clone())),
@@ -412,7 +425,7 @@ pub fn apply_ops_idempotent(
         // `Accept` seals bytes the model holds no entity for -- inert here,
         // exactly as in `apply_ops`.
         let post = match op {
-            StagedOp::Accept { .. } => continue,
+            StagedOp::Accept { .. } | StagedOp::EditConfig(_) => continue,
             StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => Some(TelFile::Notion(n.clone())),
             StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => Some(TelFile::Intent(i.clone())),
             StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => {
@@ -570,6 +583,7 @@ pub fn op_before_after(
         | StagedOp::RemoveIntent(_)
         | StagedOp::RemoveConstraint(_)
         | StagedOp::Accept { .. } => None,
+        StagedOp::EditConfig(_) => None,
     };
     (before, after)
 }

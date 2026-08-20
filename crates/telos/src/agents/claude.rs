@@ -16,8 +16,8 @@ pub fn render(root: &Path) -> Result<(), TelosError> {
     let mut settings = read_optional_object(&path)?;
     merge_command_hook(
         &mut settings,
-        super::AgentHost::Claude.matcher(),
-        super::AgentHost::Claude.guard_command(),
+        super::matcher(super::AgentHost::Claude),
+        super::guard_command(super::AgentHost::Claude),
     )?;
     write_json(&path, &settings)
 }

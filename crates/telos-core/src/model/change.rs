@@ -30,6 +30,7 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 
+use crate::config::Config;
 use crate::emit::emit_op;
 use crate::git::Oid;
 use crate::ids::{ChangeId, ConstraintId, IntentId, NotionName, RepoPath, ScenarioId};
@@ -93,6 +94,7 @@ pub enum StagedOp {
     AddConstraint(Constraint),
     EditConstraint(Constraint),
     RemoveConstraint(ConstraintId),
+    EditConfig(Config),
     Accept { path: RepoPath, oid: Oid },
 }
 
@@ -111,6 +113,7 @@ impl StagedOp {
             StagedOp::RemoveIntent(id) => intent_path(*id),
             StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => constraint_path(c.id),
             StagedOp::RemoveConstraint(id) => constraint_path(*id),
+            StagedOp::EditConfig(_) => RepoPath::new("telos/telos.toml"),
             StagedOp::Accept { path, .. } => path.clone(),
         }
     }
@@ -122,6 +125,7 @@ impl StagedOp {
             StagedOp::EditNotion(_) | StagedOp::EditIntent(_) | StagedOp::EditConstraint(_) => {
                 "edit"
             }
+            StagedOp::EditConfig(_) => "edit",
             StagedOp::RemoveNotion(_)
             | StagedOp::RemoveIntent(_)
             | StagedOp::RemoveConstraint(_) => "remove",
@@ -142,6 +146,7 @@ impl StagedOp {
             StagedOp::AddConstraint(_)
             | StagedOp::EditConstraint(_)
             | StagedOp::RemoveConstraint(_) => "constraint",
+            StagedOp::EditConfig(_) => "config",
             StagedOp::Accept { .. } => "file",
         }
     }
@@ -156,6 +161,7 @@ impl StagedOp {
             StagedOp::RemoveIntent(id) => id.to_string(),
             StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => c.id.to_string(),
             StagedOp::RemoveConstraint(id) => id.to_string(),
+            StagedOp::EditConfig(_) => "telos/telos.toml".to_string(),
             StagedOp::Accept { path, .. } => path.to_string(),
         }
     }

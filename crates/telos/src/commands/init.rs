@@ -15,7 +15,11 @@ use std::path::Path;
 
 use serde_json::json;
 
+use telos_core::config::{
+    AgentHost as ConfigAgentHost, AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg,
+};
 use telos_core::counters::{Counters, write_counters};
+use telos_core::emit::emit_config;
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::lock::seal;
@@ -24,22 +28,6 @@ use telos_core::workspace::Workspace;
 use crate::commands::Ctx;
 use crate::commands::agents::{self, AgentHost};
 use crate::envelope::{CmdResult, Outcome};
-
-/// The `telos.toml` a fresh project starts with: every section present and
-/// empty, so a reader sees the shape without consulting the documentation.
-const DEFAULT_CONFIG: &str = "\
-[code]
-globs = []
-
-[tests]
-globs = []
-
-[test]
-cmd = \"\"
-
-[policy]
-tdd = \"strict\"
-";
 
 /// Pins the byte identity of the spec across operating systems: whatever a
 /// checkout does to line endings, the blob git hashes for a `telos/` file is
@@ -72,7 +60,25 @@ pub fn run(ctx: &Ctx, hosts: &[AgentHost]) -> CmdResult {
         let path = telos_dir.join(subdir);
         fs::create_dir_all(&path).map_err(|e| io_error("create", &path, e))?;
     }
-    write(&config_path, DEFAULT_CONFIG)?;
+    let mut config = Config {
+        code: Globs::default(),
+        tests: Globs::default(),
+        test: TestCfg::default(),
+        policy: Policy {
+            tdd: TddPolicy::Strict,
+        },
+        agents: AgentsCfg {
+            hosts: hosts
+                .iter()
+                .map(|host| match host {
+                    AgentHost::Claude => ConfigAgentHost::Claude,
+                    AgentHost::Codex => ConfigAgentHost::Codex,
+                })
+                .collect(),
+        },
+    };
+    config.normalize();
+    write(&config_path, &emit_config(&config)?)?;
     // Empty to the byte: `bindings.tel` must seal as git's empty blob,
     // `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`, on every OS.
     write(&telos_dir.join("bindings.tel"), "")?;

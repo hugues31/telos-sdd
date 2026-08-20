@@ -9,30 +9,22 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use clap::ValueEnum;
 use serde_json::{Map, Value};
 use telos_core::error::{ErrorCode, TelosError};
 
-/// Agent hosts supported by `telos init --agents`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-pub enum AgentHost {
-    Claude,
-    Codex,
+pub use telos_core::config::AgentHost;
+
+fn matcher(host: AgentHost) -> &'static str {
+    match host {
+        AgentHost::Claude => "Edit|Write|Bash",
+        AgentHost::Codex => "Bash|apply_patch",
+    }
 }
 
-impl AgentHost {
-    fn matcher(self) -> &'static str {
-        match self {
-            Self::Claude => "Edit|Write|Bash",
-            Self::Codex => "Bash|apply_patch",
-        }
-    }
-
-    fn guard_command(self) -> &'static str {
-        match self {
-            Self::Claude => "telos agent-guard --host claude",
-            Self::Codex => "telos agent-guard --host codex",
-        }
+fn guard_command(host: AgentHost) -> &'static str {
+    match host {
+        AgentHost::Claude => "telos agent-guard --host claude",
+        AgentHost::Codex => "telos agent-guard --host codex",
     }
 }
 
@@ -52,11 +44,11 @@ pub fn preflight(root: &Path, hosts: &[AgentHost]) -> Result<(), TelosError> {
         match host {
             AgentHost::Claude => {
                 let mut object = read_optional_object(&root.join(".claude/settings.json"))?;
-                merge_command_hook(&mut object, host.matcher(), host.guard_command())?;
+                merge_command_hook(&mut object, matcher(host), guard_command(host))?;
             }
             AgentHost::Codex => {
                 let mut object = read_optional_object(&root.join(".codex/hooks.json"))?;
-                merge_command_hook(&mut object, host.matcher(), host.guard_command())?;
+                merge_command_hook(&mut object, matcher(host), guard_command(host))?;
             }
         }
     }

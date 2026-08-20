@@ -23,7 +23,7 @@ use telos_core::error::{ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::ids::ChangeId;
 use telos_core::model::{Change, ChangeStatus, StagedOp};
-use telos_core::overlay::{op_before_after, parse_base};
+use telos_core::overlay::{apply_config_ops, op_before_after, parse_base};
 use telos_core::reconcile::{reconcile_change, reconcile_full};
 use telos_core::workspace::Workspace;
 
@@ -217,7 +217,16 @@ fn diff(ctx: &Ctx, id: &str) -> CmdResult {
     let mut ops = Vec::with_capacity(change.ops.len());
     let mut human_ops = Vec::with_capacity(change.ops.len());
     for (i, op) in change.ops.iter().enumerate() {
-        let (before, after) = op_before_after(&base, &change.ops, i);
+        let (before, after) = match op {
+            StagedOp::EditConfig(config) => (
+                Some(telos_core::emit::emit_config(&apply_config_ops(
+                    &ws.config,
+                    &change.ops[..i],
+                ))?),
+                Some(telos_core::emit::emit_config(config)?),
+            ),
+            _ => op_before_after(&base, &change.ops, i),
+        };
         ops.push(json!({
             "n": i + 1,
             "op": op.verb(),

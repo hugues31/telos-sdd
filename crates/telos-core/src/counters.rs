@@ -141,6 +141,7 @@ pub fn floors(model: &TelosModel, open: &[Change], sealed_by: Option<ChangeId>) 
                 | StagedOp::RemoveNotion(_)
                 | StagedOp::RemoveIntent(_)
                 | StagedOp::RemoveConstraint(_)
+                | StagedOp::EditConfig(_)
                 | StagedOp::Accept { .. } => {}
             }
         }

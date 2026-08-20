@@ -210,8 +210,11 @@ fn load_config(path: &Path) -> Result<Config, TelosError> {
             format!("failed to read {}: {e}", path.display()),
         )
     })?;
-    toml::from_str(&src)
-        .map_err(|e| TelosError::new(ErrorCode::TelosParseError, format!("telos/telos.toml: {e}")))
+    let mut config: Config = toml::from_str(&src).map_err(|e| {
+        TelosError::new(ErrorCode::TelosParseError, format!("telos/telos.toml: {e}"))
+    })?;
+    config.normalize();
+    Ok(config)
 }
 
 /// Lists the direct `*.tel` entries of `dir`, reporting them as

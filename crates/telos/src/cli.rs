@@ -39,14 +39,20 @@ enum Command {
     /// Create `telos/` in this git repository and seal it.
     Init {
         /// Install integrations for these comma-delimited agent hosts.
-        #[arg(long, value_delimiter = ',', value_enum)]
+        #[arg(long, value_delimiter = ',', value_parser = parse_agent_host)]
         agents: Vec<AgentHost>,
     },
     /// Internal entry point invoked by generated synchronous host hooks.
     #[command(hide = true)]
     AgentGuard {
-        #[arg(long, value_enum)]
+        #[arg(long, value_parser = parse_agent_host)]
         host: AgentHost,
+    },
+    /// Print the project's canonical configuration, or stage a complete edit.
+    Config {
+        /// The change to stage into (`CHG-0001`).
+        #[arg(long)]
+        change: Option<String>,
     },
     /// Report the project's state against its seal and its spec coverage.
     Status,
@@ -160,6 +166,7 @@ impl Command {
             Command::Version => "version",
             Command::Init { .. } => "init",
             Command::AgentGuard { .. } => "agent-guard",
+            Command::Config { .. } => "config",
             Command::Status => "status",
             Command::Check { .. } => "check",
             Command::Show { .. } => "show",
@@ -217,6 +224,10 @@ fn execute(command: &Command) -> CmdResult {
         Command::Version => commands::version(),
         Command::Init { agents } => commands::init::run(&ctx()?, agents),
         Command::AgentGuard { .. } => unreachable!("agent guard returned before dispatch"),
+        Command::Config { change } => {
+            let payload = change.as_ref().map(|_| stdin_payload()).transpose()?;
+            commands::config::run(&ctx()?, change.as_deref(), payload.as_deref())
+        }
         Command::Status => commands::status::run(&ctx()?),
         Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
         Command::Show { target } => commands::show::run(&ctx()?, target),
@@ -263,6 +274,16 @@ fn stdin_payload() -> Result<String, TelosError> {
         )
     })?;
     Ok(payload)
+}
+
+fn parse_agent_host(raw: &str) -> Result<AgentHost, String> {
+    match raw {
+        "claude" => Ok(AgentHost::Claude),
+        "codex" => Ok(AgentHost::Codex),
+        _ => Err(format!(
+            "invalid agent host `{raw}`; expected `claude` or `codex`"
+        )),
+    }
 }
 
 /// Builds the context commands run in. The current directory is where every

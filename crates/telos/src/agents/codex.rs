@@ -58,8 +58,8 @@ pub fn render(root: &Path) -> Result<(), TelosError> {
     let mut hooks = read_optional_object(&hooks_path)?;
     merge_command_hook(
         &mut hooks,
-        super::AgentHost::Codex.matcher(),
-        super::AgentHost::Codex.guard_command(),
+        super::matcher(super::AgentHost::Codex),
+        super::guard_command(super::AgentHost::Codex),
     )?;
     write_json(&hooks_path, &hooks)?;
 

@@ -6,6 +6,20 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Agent integrations selected when the project was initialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentHost {
+    Claude,
+    Codex,
+}
+
+/// Sorts and removes duplicate hosts before configuration is persisted.
+pub fn normalize_hosts(hosts: &mut Vec<AgentHost>) {
+    hosts.sort();
+    hosts.dedup();
+}
+
 /// Parsed `telos.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -21,6 +35,32 @@ pub struct Config {
     /// `[policy] tdd = "strict" | "advisory"`.
     #[serde(default)]
     pub policy: Policy,
+    /// `[agents]`: normalized host metadata. Host files are managed by init.
+    #[serde(default)]
+    pub agents: AgentsCfg,
+}
+
+/// `[agents]`: the host integrations initially installed for this project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentsCfg {
+    #[serde(default)]
+    pub hosts: Vec<AgentHost>,
+}
+
+impl Config {
+    /// Canonicalize configuration values that are represented as sets.
+    pub fn normalize(&mut self) {
+        normalize_hosts(&mut self.agents.hosts);
+        self.code.globs.sort();
+        self.code.globs.dedup();
+        self.tests.globs.sort();
+        self.tests.globs.dedup();
+    }
+}
+
+/// Emits canonical TOML for a configuration value.
+pub fn emit(config: &Config) -> Result<String, crate::error::TelosError> {
+    crate::emit::emit_config(config)
 }
 
 /// A named list of glob patterns (`[code]` or `[tests]`).

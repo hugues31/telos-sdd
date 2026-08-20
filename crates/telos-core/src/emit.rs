@@ -31,6 +31,27 @@ use crate::model::{
     InstanceStep, Intent, IntentStatus, JournalEntry, Literal, Notion, NotionKind, Operand, Rel,
     Rule, Scenario, Scope, StagedOp, Statement, TelFile,
 };
+use crate::{
+    config::Config,
+    error::{ErrorCode, TelosError},
+};
+
+/// Emits a project's configuration in the canonical TOML representation.
+pub fn emit_config(config: &Config) -> Result<String, TelosError> {
+    let mut config = config.clone();
+    config.normalize();
+    let mut text = toml::to_string(&config).map_err(|e| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!("failed to emit telos.toml: {e}"),
+        )
+    })?;
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    text.push('\n');
+    Ok(text)
+}
 use crate::span::Sp;
 
 /// `write!` into a `String`: `fmt::Write` on a `String` is infallible, so
@@ -454,6 +475,38 @@ pub fn emit_op(op: &StagedOp) -> String {
         StagedOp::AddConstraint(c) => format!("op add {}", emit_constraint(c)),
         StagedOp::EditConstraint(c) => format!("op edit {}", emit_constraint(c)),
         StagedOp::RemoveConstraint(id) => format!("op remove constraint {id}\n"),
+        StagedOp::EditConfig(config) => {
+            let mut config = config.clone();
+            config.normalize();
+            let mut out = String::from("op edit config {\n");
+            for glob in &config.code.globs {
+                w!(out, "  code_glob  {}\n", quote(glob));
+            }
+            for glob in &config.tests.globs {
+                w!(out, "  test_glob  {}\n", quote(glob));
+            }
+            w!(out, "  test_cmd   {}\n", quote(&config.test.cmd));
+            w!(
+                out,
+                "  tdd        {}\n",
+                match config.policy.tdd {
+                    crate::config::TddPolicy::Strict => "strict",
+                    crate::config::TddPolicy::Advisory => "advisory",
+                }
+            );
+            for host in &config.agents.hosts {
+                w!(
+                    out,
+                    "  agent_host {}\n",
+                    match host {
+                        crate::config::AgentHost::Claude => "claude",
+                        crate::config::AgentHost::Codex => "codex",
+                    }
+                );
+            }
+            out.push_str("}\n");
+            out
+        }
         StagedOp::Accept { path, oid } => {
             format!("op accept {} {}\n", quote(path.as_str()), quote(&oid.0))
         }

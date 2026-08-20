@@ -365,7 +365,8 @@ impl<'a> Lexer<'a> {
     /// alphanumeric, so `issued-to` is one identifier but `a->b` is not.
     fn lex_lower(&mut self, start: u32) -> Token {
         self.advance();
-        while matches!(self.peek(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        while matches!(self.peek(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
             self.advance();
         }
         while self.peek() == Some('-')
@@ -373,7 +374,8 @@ impl<'a> Lexer<'a> {
         {
             self.advance(); // '-'
             self.advance(); // first char of the segment (checked above)
-            while matches!(self.peek(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            while matches!(self.peek(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
                 self.advance();
             }
         }

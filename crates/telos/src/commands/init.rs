@@ -22,6 +22,7 @@ use telos_core::lock::seal;
 use telos_core::workspace::Workspace;
 
 use crate::commands::Ctx;
+use crate::commands::agents::{self, AgentHost};
 use crate::envelope::{CmdResult, Outcome};
 
 /// The `telos.toml` a fresh project starts with: every section present and
@@ -48,7 +49,7 @@ const GITATTRIBUTES_LINE: &str = "telos/** text eol=lf";
 /// The spec subdirectories a project always has, created empty.
 const SUBDIRS: [&str; 4] = ["notions", "intents", "constraints", "changes"];
 
-pub fn run(ctx: &Ctx) -> CmdResult {
+pub fn run(ctx: &Ctx, hosts: &[AgentHost]) -> CmdResult {
     let git = GitRepo::discover(&ctx.cwd)?;
     let root = git.root().to_path_buf();
     let telos_dir = root.join("telos");
@@ -61,6 +62,11 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         )
         .hint("project already initialized; see `telos status`"));
     }
+
+    // Host JSON is the only user-owned input init has to merge. Parse every
+    // requested file before the first project write so malformed config can
+    // never leave a partial Telos tree behind.
+    agents::preflight(&root, hosts)?;
 
     for subdir in SUBDIRS {
         let path = telos_dir.join(subdir);
@@ -79,6 +85,7 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     let model = ws.load_model().map_err(first_error)?;
     let lock = seal(&ws, &model, &git, None)?;
     lock.write(&ws.lock_path())?;
+    agents::render(&root, hosts)?;
 
     Ok(Outcome {
         result: json!({ "root": "telos", "sealed": true }),

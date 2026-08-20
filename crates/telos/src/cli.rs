@@ -14,7 +14,8 @@ use clap::{Parser, Subcommand};
 use telos_core::error::{ErrorCode, TelosError};
 
 use crate::commands::{
-    self, Ctx, change::ChangeCommand, list::EntityType, mutate::EntityKind, query::QueryCommand,
+    self, Ctx, agents::AgentHost, change::ChangeCommand, list::EntityType, mutate::EntityKind,
+    query::QueryCommand,
 };
 use crate::envelope::CmdResult;
 use crate::render::render;
@@ -36,7 +37,17 @@ enum Command {
     /// Print the telos version.
     Version,
     /// Create `telos/` in this git repository and seal it.
-    Init,
+    Init {
+        /// Install integrations for these comma-delimited agent hosts.
+        #[arg(long, value_delimiter = ',', value_enum)]
+        agents: Vec<AgentHost>,
+    },
+    /// Internal entry point invoked by generated synchronous host hooks.
+    #[command(hide = true)]
+    AgentGuard {
+        #[arg(long, value_enum)]
+        host: AgentHost,
+    },
     /// Report the project's state against its seal and its spec coverage.
     Status,
     /// Parse the spec and check its integrity.
@@ -147,7 +158,8 @@ impl Command {
     fn name(&self) -> &'static str {
         match self {
             Command::Version => "version",
-            Command::Init => "init",
+            Command::Init { .. } => "init",
+            Command::AgentGuard { .. } => "agent-guard",
             Command::Status => "status",
             Command::Check { .. } => "check",
             Command::Show { .. } => "show",
@@ -183,6 +195,10 @@ impl Command {
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
 
+    if let Command::AgentGuard { host } = &cli.command {
+        return commands::agents::guard::run(*host);
+    }
+
     let name = cli.command.name();
     let res = execute(&cli.command);
     let failed = res.is_err();
@@ -199,7 +215,8 @@ pub fn run() -> ExitCode {
 fn execute(command: &Command) -> CmdResult {
     match command {
         Command::Version => commands::version(),
-        Command::Init => commands::init::run(&ctx()?),
+        Command::Init { agents } => commands::init::run(&ctx()?, agents),
+        Command::AgentGuard { .. } => unreachable!("agent guard returned before dispatch"),
         Command::Status => commands::status::run(&ctx()?),
         Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
         Command::Show { target } => commands::show::run(&ctx()?, target),

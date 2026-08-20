@@ -4,6 +4,8 @@
 //! what keeps every command's human and JSON output consistent.
 
 pub mod adopt;
+#[path = "../agents/mod.rs"]
+pub mod agents;
 pub mod bind;
 pub mod change;
 pub mod check;

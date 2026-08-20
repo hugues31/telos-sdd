@@ -6,7 +6,9 @@
 mod cli;
 mod commands;
 mod envelope;
+mod projection;
 mod render;
+mod view;
 
 use std::process::ExitCode;
 

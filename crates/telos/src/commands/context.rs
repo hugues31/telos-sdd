@@ -49,7 +49,7 @@ use telos_core::graph::{NodeRef, Relation};
 use telos_core::ids::{
     ChangeId, ConstraintId, EntityRef, IntentId, NotionName, RepoPath, ScenarioId,
 };
-use telos_core::model::{Binding, Change, Intent, Scope, StagedOp, TelosModel};
+use telos_core::model::{Binding, Change, Intent, StagedOp, TelosModel};
 use telos_core::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
 use telos_core::semantic::build_model;
 
@@ -57,6 +57,7 @@ use crate::commands::{
     Ctx, Project, diagnostics_to_error, nearest_id, project, unknown, unparsable,
 };
 use crate::envelope::{CmdResult, Outcome};
+use crate::projection::{applicable_constraints, implementations, proofs};
 
 pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
     let entity_ref: EntityRef = target.parse().map_err(|_| unparsable(target))?;
@@ -315,9 +316,22 @@ fn build_pack(model: &TelosModel, intent: &Intent, change: Option<ChangeId>) -> 
         canonical: emit_intent(intent),
         scenarios: scenario_entries(model, intent),
         notions: notion_entries(model, intent),
-        constraints: constraint_entries(model, intent.id),
-        implements: implements_of(model, intent.id),
-        proves: proves_of(model, intent),
+        constraints: applicable_constraints(model, intent.id)
+            .into_iter()
+            .map(|entry| ConstraintEntry {
+                id: entry.constraint.id,
+                scope: entry.scope,
+                canonical: emit_constraint(entry.constraint),
+            })
+            .collect(),
+        implements: implementations(model, intent.id),
+        proves: proofs(model, intent)
+            .into_iter()
+            .map(|entry| ProvesEntry {
+                scenario: entry.scenario,
+                test: entry.test,
+            })
+            .collect(),
         neighbors: neighbor_entries(model, intent.id),
     }
 }
@@ -376,66 +390,6 @@ fn collect_uses(model: &TelosModel, node: &NodeRef, out: &mut BTreeSet<NotionNam
             out.insert(name.clone());
         }
     }
-}
-
-/// Global constraints, plus every constraint whose scope names the intent,
-/// sorted by id (Annex C) -- free, since `model.constraints` is already a
-/// `BTreeMap<ConstraintId, _>`.
-fn constraint_entries(model: &TelosModel, intent_id: IntentId) -> Vec<ConstraintEntry> {
-    model
-        .constraints
-        .values()
-        .filter_map(|c| {
-            let scope = match &c.scope {
-                Scope::Global => "global",
-                Scope::Intents(ids) if ids.iter().any(|i| i.node == intent_id) => "scoped",
-                Scope::Intents(_) => return None,
-            };
-            Some(ConstraintEntry {
-                id: c.id,
-                scope,
-                canonical: emit_constraint(c),
-            })
-        })
-        .collect()
-}
-
-/// Paths that `implements` the intent, sorted -- the pack's own bindings,
-/// not the whole spec's.
-fn implements_of(model: &TelosModel, intent_id: IntentId) -> Vec<RepoPath> {
-    let mut paths: Vec<RepoPath> = model
-        .bindings
-        .iter()
-        .filter_map(|b| match b {
-            Binding::Implements { path, intent } if intent.node == intent_id => Some(path.clone()),
-            _ => None,
-        })
-        .collect();
-    paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    paths
-}
-
-/// `proves` bindings for any of the intent's own scenarios, sorted by
-/// `(scenario, test)` -- grouped by scenario, unlike `emit_bindings`' own
-/// file-level `(test, scenario)` order, since a pack is read scenario by
-/// scenario rather than replayed as a sealed file.
-fn proves_of(model: &TelosModel, intent: &Intent) -> Vec<ProvesEntry> {
-    let scenario_ids: BTreeSet<ScenarioId> = intent.scenarios.iter().map(|s| s.id).collect();
-    let mut entries: Vec<ProvesEntry> = model
-        .bindings
-        .iter()
-        .filter_map(|b| match b {
-            Binding::Proves { test, scenario } if scenario_ids.contains(&scenario.node) => {
-                Some(ProvesEntry {
-                    scenario: scenario.node,
-                    test: test.to_string(),
-                })
-            }
-            _ => None,
-        })
-        .collect();
-    entries.sort_by(|a, b| (a.scenario, &a.test).cmp(&(b.scenario, &b.test)));
-    entries
 }
 
 /// The intent's 1-hop intent-to-intent neighbours over `refines`/`requires`/

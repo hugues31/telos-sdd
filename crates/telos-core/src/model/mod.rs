@@ -19,7 +19,10 @@ pub mod notion;
 pub mod scenario;
 
 pub use binding::{Binding, TestRef};
-pub use change::{Change, ChangeStatus, StagedOp, constraint_path, intent_path, notion_path};
+pub use change::{
+    Change, ChangeStatus, JournalEntry, StagedOp, TestRun, Witness, constraint_path, intent_path,
+    notion_path,
+};
 pub use constraint::{Constraint, ConstraintKind, Rule, Scope};
 pub use expr::{AttrRef, CmpOp, Expr, Literal, Operand};
 pub use intent::{Action, Intent, IntentStatus, Statement};

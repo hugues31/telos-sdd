@@ -66,6 +66,7 @@ fn sample_change(id: u32) -> Change {
         status: ChangeStatus::Drafted,
         approved_digest: None,
         ops: vec![StagedOp::AddNotion(ledger_notion())],
+        journal: vec![],
     }
 }
 

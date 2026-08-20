@@ -315,6 +315,7 @@ fn drafted_change(id: u32, ops: Vec<StagedOp>) -> Change {
         status: ChangeStatus::Drafted,
         approved_digest: None,
         ops,
+        journal: vec![],
     }
 }
 

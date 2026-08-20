@@ -9,19 +9,21 @@
 //!    that keeps the parser and the emitter from drifting apart: padding,
 //!    the blank line before each op, the indentation of nested entity
 //!    blocks and the staged order of the ops are all pinned at once. The
-//!    Annex C example itself is round-tripped in `syntax/parser.rs`'s unit
-//!    tests, where the single in-crate copy of that golden lives (it is
-//!    `emit.rs`'s `ANNEX_C_EXAMPLE`, moved next to the model fixture it is
-//!    paired with); the sources here cover the shapes it does not.
+//!    Annex C example itself -- and the Annex A one, which adds the M3
+//!    journal -- are round-tripped in `syntax/parser.rs`'s unit tests, where
+//!    the single in-crate copy of each golden lives (next to the model
+//!    fixture it is paired with); the sources here cover the shapes they do
+//!    not.
 //! 2. **Diagnostics** -- the parse-level rules a change file has beyond its
-//!    grammar (the digest belongs to an approved change and to no other,
-//!    and it is a `sha256:<64 hex>`), plus the arity and vocabulary errors
-//!    an agent is most likely to write.
+//!    grammar (the digest belongs to an approved change and to no other and
+//!    it is a `sha256:<64 hex>`; a journal belongs to an implementing change
+//!    and to no other), plus the arity and vocabulary errors an agent is
+//!    most likely to write.
 
 use telos_core::emit::emit_change;
 use telos_core::error::{Diagnostic, ErrorCode};
 use telos_core::ids::{ChangeId, RepoPath};
-use telos_core::model::{ChangeStatus, StagedOp};
+use telos_core::model::{Binding, ChangeStatus, JournalEntry, StagedOp};
 use telos_core::syntax::parse_change_file;
 
 fn path() -> RepoPath {
@@ -60,7 +62,7 @@ fn assert_reports(diags: &[Diagnostic], needle: &str) {
     );
 }
 
-// --- the four canonical variants -----------------------------------------
+// --- the canonical variants ----------------------------------------------
 
 /// `telos change open` and nothing else: no op, no digest (D16).
 const OPEN_EMPTY: &str = concat!(
@@ -145,13 +147,45 @@ const IMPLEMENTING_WITH_DIGEST: &str = concat!(
     "}\n",
 );
 
-fn variants() -> [&'static str; 5] {
+/// An implementing change whose journal holds runs only: the state
+/// `telos test` leaves behind before anything is bound (D1).
+const IMPLEMENTING_RUNS_ONLY: &str = concat!(
+    "change CHG-0006 \"Settle the ledger\" {\n",
+    "  status implementing\n",
+    "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+    "\n",
+    "  op remove notion Ledger\n",
+    "\n",
+    "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+    "  run  SCN-0107 green \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+    "}\n",
+);
+
+/// Runs *and* binds, in the order they were appended -- a bind between two
+/// runs, which no sort would ever produce.
+const IMPLEMENTING_RUNS_AND_BINDS: &str = concat!(
+    "change CHG-0007 \"Settle the ledger\" {\n",
+    "  status implementing\n",
+    "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+    "\n",
+    "  op remove notion Ledger\n",
+    "\n",
+    "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+    "  bind \"src/billing.rs\" -> INT-0042\n",
+    "  run  SCN-0107 green \"tests/billing.rs\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+    "  bind \"src/ledger.rs\" -> INT-0042\n",
+    "}\n",
+);
+
+fn variants() -> [&'static str; 7] {
     [
         OPEN_EMPTY,
         DRAFTED_ONE_ADD,
         APPROVED_MULTI,
         REMOVE_AND_ACCEPT,
         IMPLEMENTING_WITH_DIGEST,
+        IMPLEMENTING_RUNS_ONLY,
+        IMPLEMENTING_RUNS_AND_BINDS,
     ]
 }
 
@@ -350,6 +384,142 @@ fn an_unknown_verb_names_the_four_ops() {
         &parse_err(src),
         "expected `add`, `edit`, `remove` or `accept`",
     );
+}
+
+// --- the journal (Annex A) ------------------------------------------------
+
+#[test]
+fn a_change_with_no_journal_keeps_the_m2_shape_exactly() {
+    // The journal block is written only when there is one: every M2 variant
+    // above round-trips unchanged, and none of them grew a blank line.
+    for src in [
+        OPEN_EMPTY,
+        DRAFTED_ONE_ADD,
+        APPROVED_MULTI,
+        REMOVE_AND_ACCEPT,
+        IMPLEMENTING_WITH_DIGEST,
+    ] {
+        let change = parse_ok(src);
+        assert!(change.journal.is_empty(), "{src}");
+        assert_eq!(emit_change(&change), src);
+    }
+}
+
+#[test]
+fn the_journal_is_read_back_in_append_order() {
+    let change = parse_ok(IMPLEMENTING_RUNS_AND_BINDS);
+    let shape: Vec<String> = change
+        .journal
+        .iter()
+        .map(|entry| match entry {
+            JournalEntry::Run(run) => {
+                format!("run {} {}", run.scenario, run.witness.as_str())
+            }
+            JournalEntry::Bind { path, intent } => format!("bind {path} {intent}"),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            "run SCN-0107 red",
+            "bind src/billing.rs INT-0042",
+            "run SCN-0107 green",
+            "bind src/ledger.rs INT-0042",
+        ]
+    );
+}
+
+#[test]
+fn a_journalled_change_claims_its_test_files_and_bound_paths() {
+    // D3: the drift of a file this change is working on is legitimate work
+    // in progress, admissible to *its* reconcile -- so it is claimed.
+    let claims = parse_ok(IMPLEMENTING_RUNS_AND_BINDS).claims();
+    for path in [
+        "telos/notions/Ledger.tel",
+        "tests/billing.rs",
+        "src/billing.rs",
+        "src/ledger.rs",
+    ] {
+        assert!(claims.contains(&RepoPath::new(path)), "{path}: {claims:?}");
+    }
+    // D2: bindings.tel is derived at reconcile and claimed by no one.
+    assert!(!claims.contains(&RepoPath::new("telos/bindings.tel")));
+    assert_eq!(claims.len(), 4);
+}
+
+#[test]
+fn the_journal_folds_into_bindings_greens_and_binds_only() {
+    let bindings = parse_ok(IMPLEMENTING_RUNS_AND_BINDS).journal_bindings();
+    let shape: Vec<String> = bindings
+        .iter()
+        .map(|binding| match binding {
+            Binding::Implements { path, intent } => format!("implements {path} {}", intent.node),
+            Binding::Proves { test, scenario } => format!("proves {test} {}", scenario.node),
+        })
+        .collect();
+    // The red run contributes nothing; the order is the journal's.
+    assert_eq!(
+        shape,
+        vec![
+            "implements src/billing.rs INT-0042",
+            "proves tests/billing.rs SCN-0107",
+            "implements src/ledger.rs INT-0042",
+        ]
+    );
+}
+
+#[test]
+fn a_journal_does_not_move_the_digest_of_the_delta_it_implements() {
+    // The two sources below stage the same single op; only the journal
+    // differs. D1: an approval survives its own implementation.
+    let bare = parse_ok(IMPLEMENTING_WITH_DIGEST);
+    let journalled = parse_ok(IMPLEMENTING_RUNS_AND_BINDS);
+    assert_eq!(bare.ops, journalled.ops);
+    assert_eq!(bare.ops_digest(), journalled.ops_digest());
+    assert!(!journalled.journal.is_empty());
+}
+
+#[test]
+fn a_journal_on_a_change_that_is_not_implementing_is_rejected() {
+    let src = concat!(
+        "change CHG-0001 \"x\" {\n",
+        "  status drafted\n",
+        "\n",
+        "  bind \"src/billing.rs\" -> INT-0042\n",
+        "}\n",
+    );
+    assert_reports(
+        &parse_err(src),
+        "a journal is only valid on an implementing change",
+    );
+}
+
+#[test]
+fn a_verdict_that_is_neither_red_nor_green_is_rejected() {
+    let src = concat!(
+        "change CHG-0001 \"x\" {\n",
+        "  status implementing\n",
+        "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+        "\n",
+        "  run  SCN-0107 blue \"tests/billing.rs\" \"cafe\"\n",
+        "}\n",
+    );
+    assert_reports(&parse_err(src), "expected `red` or `green`, found `blue`");
+}
+
+#[test]
+fn an_op_may_not_follow_a_journal_line() {
+    let src = concat!(
+        "change CHG-0001 \"x\" {\n",
+        "  status implementing\n",
+        "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+        "\n",
+        "  bind \"src/billing.rs\" -> INT-0042\n",
+        "\n",
+        "  op remove notion Ledger\n",
+        "}\n",
+    );
+    assert_reports(&parse_err(src), "expected `run`, `bind` or `}`, found `op`");
 }
 
 #[test]

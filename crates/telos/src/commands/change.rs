@@ -109,6 +109,7 @@ fn open(ctx: &Ctx, motivation: &str) -> CmdResult {
         status: ChangeStatus::Open,
         approved_digest: None,
         ops: Vec::new(),
+        journal: Vec::new(),
     };
     write_change(&project.ws, &change)?;
     write_counters(&project.ws, &alloc.counters())?;

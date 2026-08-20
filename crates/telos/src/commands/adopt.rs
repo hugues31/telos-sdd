@@ -81,6 +81,7 @@ pub fn run(ctx: &Ctx, into: Option<&str>) -> CmdResult {
                     status: ChangeStatus::Open,
                     approved_digest: None,
                     ops: Vec::new(),
+                    journal: Vec::new(),
                 },
                 Some(alloc),
             )

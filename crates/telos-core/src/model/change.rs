@@ -19,6 +19,12 @@
 //!   the ops' order -- which is exactly what an approval is an approval of.
 //! - **Claims are paths** (D5). [`Change::claims`] is the set of files this
 //!   change owns while it is open; a second change may not stage them.
+//! - **The journal is digest-inert** (M3, D1). [`Change::journal`] records
+//!   what the implementer did -- test runs and bindings -- *after* the delta
+//!   was approved, so it must never move [`Change::ops_digest`]: an approval
+//!   is an approval of the ops, and implementing an approved change may not
+//!   invalidate its own approval. The digest hashes ops and nothing else,
+//!   which is what makes journalling free.
 
 use std::collections::BTreeSet;
 
@@ -26,8 +32,10 @@ use sha2::{Digest, Sha256};
 
 use crate::emit::emit_op;
 use crate::git::Oid;
-use crate::ids::{ChangeId, ConstraintId, IntentId, NotionName, RepoPath};
+use crate::ids::{ChangeId, ConstraintId, IntentId, NotionName, RepoPath, ScenarioId};
+use crate::span::{Sp, Span};
 
+use super::binding::{Binding, TestRef};
 use super::constraint::Constraint;
 use super::intent::Intent;
 use super::notion::Notion;
@@ -174,6 +182,80 @@ pub fn constraint_path(id: ConstraintId) -> RepoPath {
     RepoPath::new(format!("telos/constraints/{id}.tel"))
 }
 
+/// Which side of the red/green pair a run witnessed (D1).
+///
+/// A `Red` run is the sealed proof that the test failed *before* the code
+/// existed; a `Green` one that it passes now. The pair is what M3's witness
+/// gate (T2) reads, and the reason a run is recorded rather than merely
+/// counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Witness {
+    Red,
+    Green,
+}
+
+impl Witness {
+    /// The keyword this verdict is written as on a `run` line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Witness::Red => "red",
+            Witness::Green => "green",
+        }
+    }
+}
+
+/// One recorded execution of one scenario's test (D1).
+///
+/// `oid` is the blob oid of the test *file* at the moment of the run, not a
+/// hash of the run: it is what lets a later pass say "this red witness was
+/// taken on these bytes, and the bytes have not moved since". There is no
+/// timestamp -- goldens must be deterministic, and the chronology is the
+/// journal's append order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestRun {
+    pub scenario: ScenarioId,
+    pub witness: Witness,
+    pub test: TestRef,
+    pub oid: Oid,
+}
+
+/// One line of a change's journal: a test run, or a code file bound to an
+/// intent.
+///
+/// `Bind` carries the *unspanned* ids it was written with: a journal line is
+/// authored by a command, not by a human editing a file, so there is no
+/// source position worth threading through. [`Change::journal_bindings`]
+/// gives them the zero span when it turns them into [`Binding`]s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalEntry {
+    Run(TestRun),
+    Bind { path: RepoPath, intent: IntentId },
+}
+
+impl JournalEntry {
+    /// The one repository path this line names -- the test file of a run,
+    /// the bound file of a bind. Both become claims of the change (D3).
+    pub fn path(&self) -> &RepoPath {
+        match self {
+            JournalEntry::Run(run) => &run.test.path,
+            JournalEntry::Bind { path, .. } => path,
+        }
+    }
+}
+
+/// Wraps an id the journal wrote with no source position of its own.
+///
+/// A journal line is authored by a command rather than read off a hand-
+/// written file, so the [`Sp`] a [`Binding`] carries has nothing to point
+/// at: the zero span is the honest answer, and it is also what makes two
+/// bindings folded from two identical lines compare equal.
+fn unspanned<T>(node: T) -> Sp<T> {
+    Sp {
+        node,
+        span: Span::default(),
+    }
+}
+
 /// One staged transaction over the spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
@@ -190,6 +272,14 @@ pub struct Change {
     pub approved_digest: Option<String>,
     /// Staged order, never sorted: the order is part of the transaction.
     pub ops: Vec<StagedOp>,
+    /// The implementation record, in append order (D1): every test run and
+    /// every binding the implementer made against this change.
+    ///
+    /// Append-only by convention -- nothing here enforces it, but a line
+    /// once written is evidence, and rewriting evidence is what the sealed
+    /// red witness exists to prevent. Never sorted, and never part of
+    /// [`Change::ops_digest`].
+    pub journal: Vec<JournalEntry>,
 }
 
 impl Change {
@@ -226,13 +316,81 @@ impl Change {
         }
     }
 
-    /// The set of files this change owns while it lives (D5).
+    /// The set of files this change owns while it lives (D5), the journal's
+    /// paths included (D3).
     ///
     /// A `BTreeSet` both deduplicates (two ops on the same entity claim it
-    /// once) and orders, so the claim list a CLI prints or a conflict
-    /// message names is stable regardless of staging order.
+    /// once, a test file run twice is claimed once) and orders, so the claim
+    /// list a CLI prints or a conflict message names is stable regardless of
+    /// staging order.
+    ///
+    /// The journal's paths are claims because the drift they carry is
+    /// legitimate work in progress: the implementer edits the test file the
+    /// runs name and the source file the binds name, and that drift is
+    /// admissible to *this* change's reconcile and carried over for every
+    /// other. `telos/bindings.tel` is never among them -- no journal line
+    /// names it, because a binding is journalled as a `bind` line and only
+    /// folded into `bindings.tel` at reconcile (D2). Were it claimable, one
+    /// change would lock the file every other change has to rewrite.
     pub fn claims(&self) -> BTreeSet<RepoPath> {
-        self.ops.iter().map(StagedOp::target_path).collect()
+        self.ops
+            .iter()
+            .map(StagedOp::target_path)
+            .chain(self.journal.iter().map(|entry| entry.path().clone()))
+            .collect()
+    }
+
+    /// The bindings this journal asserts, in journal order, deduplicated
+    /// (D2).
+    ///
+    /// A `bind` line is an `implements`; a *green* run is a `proves`. A red
+    /// run asserts nothing -- it is evidence that the test failed, which is
+    /// exactly what a binding must not claim. Reconcile folds this list into
+    /// `bindings.tel`, which is where it becomes part of the spec.
+    ///
+    /// Order is the journal's, never sorted: `emit_bindings` is the one
+    /// place bindings get canonicalized, so producing them in append order
+    /// keeps this function a transcription rather than a second sort with
+    /// its own opinion. Duplicates are dropped keeping the first occurrence
+    /// (running a test green twice, or binding a path twice, says one thing
+    /// once); equality is over the whole line, so one file may implement two
+    /// intents.
+    pub fn journal_bindings(&self) -> Vec<Binding> {
+        let mut bindings: Vec<Binding> = Vec::new();
+        for entry in &self.journal {
+            let binding = match entry {
+                JournalEntry::Run(TestRun {
+                    witness: Witness::Red,
+                    ..
+                }) => continue,
+                JournalEntry::Run(run) => Binding::Proves {
+                    test: run.test.clone(),
+                    scenario: unspanned(run.scenario),
+                },
+                JournalEntry::Bind { path, intent } => Binding::Implements {
+                    path: path.clone(),
+                    intent: unspanned(*intent),
+                },
+            };
+            // Every binding built here carries the zero span, so equality
+            // is equality of content -- which is what deduplication means.
+            if !bindings.contains(&binding) {
+                bindings.push(binding);
+            }
+        }
+        bindings
+    }
+
+    /// Every run recorded for one scenario, in journal order.
+    ///
+    /// The order is what makes the sequence readable as a history: the
+    /// witness gate (T2) reads the reds and greens of one scenario in the
+    /// order they were taken.
+    pub fn runs_for(&self, id: ScenarioId) -> impl Iterator<Item = &TestRun> {
+        self.journal.iter().filter_map(move |entry| match entry {
+            JournalEntry::Run(run) if run.scenario == id => Some(run),
+            _ => None,
+        })
     }
 
     /// What remains to be done, as the frozen strings of Annex E.
@@ -251,13 +409,14 @@ impl Change {
     }
 }
 
-/// The Annex C canonical example, as a model *and* as its canonical bytes.
+/// The two canonical examples -- Annex C's delta and Annex A's journal --
+/// each as a model *and* as its canonical bytes.
 ///
-/// It lives outside `mod tests` so that the rest of the crate's tests can
-/// reach it: the byte-exact golden is what `emit.rs` must produce and what
-/// `syntax/parser.rs` must read back, the `claims`/digest assertions belong
-/// here, and all three must be talking about the same change or none of
-/// them proves anything about the others. Hence one copy of each, here.
+/// They live outside `mod tests` so that the rest of the crate's tests can
+/// reach them: the byte-exact goldens are what `emit.rs` must produce and
+/// what `syntax/parser.rs` must read back, the `claims`/digest assertions
+/// belong here, and all three must be talking about the same change or none
+/// of them proves anything about the others. Hence one copy of each, here.
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
@@ -383,6 +542,7 @@ pub(crate) mod fixtures {
                     .to_string(),
             ),
             ops: annex_c_ops(),
+            journal: vec![],
         }
     }
 
@@ -438,8 +598,81 @@ pub(crate) mod fixtures {
             status: ChangeStatus::Open,
             approved_digest: None,
             ops: vec![],
+            journal: vec![],
         }
     }
+
+    /// The test the Annex A example's runs were taken on.
+    pub(crate) fn billing_test() -> TestRef {
+        TestRef {
+            path: RepoPath::new("tests/billing.rs"),
+            name: Some("scn_0001_a_full_payment_settles_the_invoice".to_string()),
+        }
+    }
+
+    /// The blob oid both runs of the example were taken at -- the same
+    /// bytes, which is what makes the pair a valid witness (D7).
+    pub(crate) fn run_oid() -> Oid {
+        Oid("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".to_string())
+    }
+
+    /// One run of the example's scenario, on either verdict.
+    pub(crate) fn run(witness: Witness) -> JournalEntry {
+        JournalEntry::Run(TestRun {
+            scenario: ScenarioId(1),
+            witness,
+            test: billing_test(),
+            oid: run_oid(),
+        })
+    }
+
+    /// The Annex A canonical example: an implementing change whose journal
+    /// holds the red/green pair of one scenario and one binding.
+    ///
+    /// Its digest is the same placeholder as [`annex_c_change`]'s, and for
+    /// the same reason: the golden pins the *layout* of the digest line.
+    pub(crate) fn implementing_change() -> Change {
+        Change {
+            id: ChangeId(1),
+            motivation: "Invoices can be settled".to_string(),
+            status: ChangeStatus::Implementing,
+            approved_digest: Some(
+                "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
+                    .to_string(),
+            ),
+            ops: vec![StagedOp::AddNotion(invoice())],
+            journal: vec![
+                run(Witness::Red),
+                run(Witness::Green),
+                JournalEntry::Bind {
+                    path: RepoPath::new("src/billing.rs"),
+                    intent: IntentId(1),
+                },
+            ],
+        }
+    }
+
+    /// The canonical example of Annex A, byte for byte: what
+    /// `emit_change(&implementing_change())` writes, and what
+    /// `parse_change_file` reads back into `implementing_change()`.
+    ///
+    /// Unlike [`ANNEX_C_EXAMPLE`], this one is the annex' bytes verbatim --
+    /// the journal grammar nests nothing, so there is no dropped token to
+    /// restore.
+    pub(crate) const ANNEX_A_EXAMPLE: &str = r#"change CHG-0001 "Invoices can be settled" {
+  status implementing
+  digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
+
+  op add notion Invoice entity {
+    def  "A bill issued to a Customer for delivered work."
+    attr state enum(open, settled)
+  }
+
+  run  SCN-0001 red "tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+  run  SCN-0001 green "tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+  bind "src/billing.rs" -> INT-0001
+}
+"#;
 }
 
 #[cfg(test)]
@@ -741,6 +974,7 @@ mod tests {
                 StagedOp::AddNotion(invoice()),
                 StagedOp::EditNotion(invoice()),
             ],
+            journal: vec![],
         };
         assert_eq!(
             change.claims(),
@@ -753,6 +987,219 @@ mod tests {
     #[test]
     fn a_change_with_no_op_claims_nothing() {
         assert!(empty_change().claims().is_empty());
+    }
+
+    // --- the journal: digest inertness -----------------------------------
+
+    /// The property the whole journal design rests on (M3, D1).
+    ///
+    /// The value asserted is the M2 constant, character for character: an
+    /// approved delta that starts being implemented -- status moved to
+    /// `implementing`, three journal lines written -- must still hash to
+    /// exactly what its approval froze, or the first `telos test` would
+    /// stale the change it is implementing.
+    #[test]
+    fn a_journal_never_moves_the_ops_digest() {
+        let mut implementing = annex_c_change();
+        implementing.status = ChangeStatus::Implementing;
+        implementing.journal = implementing_change().journal;
+
+        assert_eq!(
+            implementing.ops_digest(),
+            "sha256:3c7b089eed526d2dead2aadd21095e1b099be1009ac99379db4795a70be2945d"
+        );
+        assert_eq!(implementing.ops_digest(), annex_c_change().ops_digest());
+    }
+
+    #[test]
+    fn a_change_approved_before_its_journal_is_not_stale_after_it() {
+        let mut change = annex_c_change();
+        change.approved_digest = Some(change.ops_digest());
+        change.status = ChangeStatus::Implementing;
+        change.journal = implementing_change().journal;
+        assert!(!change.is_stale());
+    }
+
+    // --- Witness ---------------------------------------------------------
+
+    #[test]
+    fn witness_as_str_names_both_verdicts() {
+        assert_eq!(Witness::Red.as_str(), "red");
+        assert_eq!(Witness::Green.as_str(), "green");
+    }
+
+    #[test]
+    fn a_journal_entry_names_the_one_path_it_carries() {
+        assert_eq!(run(Witness::Red).path(), &RepoPath::new("tests/billing.rs"));
+        assert_eq!(
+            JournalEntry::Bind {
+                path: RepoPath::new("src/billing.rs"),
+                intent: IntentId(1),
+            }
+            .path(),
+            &RepoPath::new("src/billing.rs")
+        );
+    }
+
+    // --- claims, journal included (D3) -----------------------------------
+
+    #[test]
+    fn claims_take_in_the_test_files_and_bound_paths_of_the_journal() {
+        let expected: BTreeSet<RepoPath> = [
+            "src/billing.rs",
+            "telos/notions/Invoice.tel",
+            "tests/billing.rs",
+        ]
+        .into_iter()
+        .map(RepoPath::new)
+        .collect();
+        assert_eq!(implementing_change().claims(), expected);
+    }
+
+    #[test]
+    fn claims_deduplicate_a_test_file_run_twice() {
+        // The red and the green of the example name one file, claimed once.
+        let change = implementing_change();
+        assert_eq!(change.journal.len(), 3);
+        assert_eq!(change.claims().len(), 3);
+    }
+
+    /// D2: `bindings.tel` is derived at reconcile, never claimed.
+    ///
+    /// It cannot appear here by construction -- no journal line names it,
+    /// and no op stages it in this change -- and the point of asserting it
+    /// is that a future line kind must not change that: a claimed
+    /// `bindings.tel` would let one change lock the file every other change
+    /// has to rewrite.
+    #[test]
+    fn the_bindings_file_is_never_a_claim() {
+        let claims = implementing_change().claims();
+        assert!(!claims.contains(&RepoPath::new("telos/bindings.tel")));
+    }
+
+    // --- journal_bindings (D2) -------------------------------------------
+
+    fn implements(path: &str, intent: u32) -> Binding {
+        Binding::Implements {
+            path: RepoPath::new(path),
+            intent: Sp {
+                node: IntentId(intent),
+                span: Span::default(),
+            },
+        }
+    }
+
+    fn proves(scenario: u32) -> Binding {
+        Binding::Proves {
+            test: billing_test(),
+            scenario: Sp {
+                node: ScenarioId(scenario),
+                span: Span::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn journal_bindings_fold_binds_to_implements_and_greens_to_proves() {
+        assert_eq!(
+            implementing_change().journal_bindings(),
+            vec![proves(1), implements("src/billing.rs", 1)]
+        );
+    }
+
+    #[test]
+    fn a_red_run_alone_contributes_no_binding() {
+        // A red witness is evidence that the test failed, not that anything
+        // is proved: only a green run asserts a `proves`.
+        let mut change = implementing_change();
+        change.journal = vec![run(Witness::Red)];
+        assert_eq!(change.journal_bindings(), vec![]);
+    }
+
+    #[test]
+    fn repeating_a_green_run_yields_one_proves() {
+        let mut change = implementing_change();
+        change.journal = vec![run(Witness::Green), run(Witness::Red), run(Witness::Green)];
+        assert_eq!(change.journal_bindings(), vec![proves(1)]);
+    }
+
+    #[test]
+    fn binding_the_same_path_twice_yields_one_implements() {
+        let mut change = implementing_change();
+        let bind = JournalEntry::Bind {
+            path: RepoPath::new("src/billing.rs"),
+            intent: IntentId(1),
+        };
+        change.journal = vec![bind.clone(), bind];
+        assert_eq!(
+            change.journal_bindings(),
+            vec![implements("src/billing.rs", 1)]
+        );
+    }
+
+    #[test]
+    fn two_intents_bound_to_one_path_are_two_bindings() {
+        // Deduplication is on the whole line, not on the path: one file may
+        // implement several intents.
+        let mut change = implementing_change();
+        change.journal = vec![
+            JournalEntry::Bind {
+                path: RepoPath::new("src/billing.rs"),
+                intent: IntentId(1),
+            },
+            JournalEntry::Bind {
+                path: RepoPath::new("src/billing.rs"),
+                intent: IntentId(2),
+            },
+        ];
+        assert_eq!(
+            change.journal_bindings(),
+            vec![
+                implements("src/billing.rs", 1),
+                implements("src/billing.rs", 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn journal_bindings_keep_the_journal_order_never_sorted() {
+        let mut change = implementing_change();
+        change.journal.reverse();
+        assert_eq!(
+            change.journal_bindings(),
+            vec![implements("src/billing.rs", 1), proves(1)]
+        );
+    }
+
+    #[test]
+    fn a_change_with_no_journal_has_no_journal_binding() {
+        assert_eq!(annex_c_change().journal_bindings(), vec![]);
+    }
+
+    // --- runs_for --------------------------------------------------------
+
+    #[test]
+    fn runs_for_returns_the_runs_of_one_scenario_in_journal_order() {
+        let change = implementing_change();
+        let verdicts: Vec<&str> = change
+            .runs_for(ScenarioId(1))
+            .map(|r| r.witness.as_str())
+            .collect();
+        assert_eq!(verdicts, vec!["red", "green"]);
+    }
+
+    #[test]
+    fn runs_for_ignores_other_scenarios_and_bind_lines() {
+        let mut change = implementing_change();
+        change.journal.push(JournalEntry::Run(TestRun {
+            scenario: ScenarioId(2),
+            witness: Witness::Green,
+            test: billing_test(),
+            oid: run_oid(),
+        }));
+        assert_eq!(change.runs_for(ScenarioId(1)).count(), 2);
+        assert_eq!(change.runs_for(ScenarioId(2)).count(), 1);
+        assert_eq!(change.runs_for(ScenarioId(9)).count(), 0);
     }
 
     // --- obligations -----------------------------------------------------

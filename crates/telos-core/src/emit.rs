@@ -28,8 +28,8 @@
 use crate::ids::{FieldName, IntentId, ScenarioId};
 use crate::model::{
     Action, Attr, AttrRef, AttrType, Binding, Change, CmpOp, Constraint, ConstraintKind, Expr,
-    InstanceStep, Intent, IntentStatus, Literal, Notion, NotionKind, Operand, Rel, Rule, Scenario,
-    Scope, StagedOp, Statement, TelFile,
+    InstanceStep, Intent, IntentStatus, JournalEntry, Literal, Notion, NotionKind, Operand, Rel,
+    Rule, Scenario, Scope, StagedOp, Statement, TelFile,
 };
 use crate::span::Sp;
 
@@ -63,6 +63,8 @@ mod width {
     pub const BINDING: usize = 10;
     /// `status`, `digest`.
     pub const CHANGE: usize = 6;
+    /// `run`, `bind` -- the two journal lines of a change (Annex A).
+    pub const JOURNAL: usize = 4;
 }
 
 /// Emits one parsed file in canonical form.
@@ -393,6 +395,11 @@ pub fn emit_bindings(bindings: &[Binding]) -> String {
 /// one level right, which is what nests a whole entity block -- header line,
 /// body and closing brace -- inside the change without the entity emitters
 /// knowing anything about changes.
+///
+/// The journal comes last (Annex A), separated from the ops by a single
+/// blank line and written contiguously in append order -- also never sorted,
+/// and for a stronger reason: it is a chronology, and D1 records no
+/// timestamps precisely because the order of the lines *is* the time.
 pub fn emit_change(c: &Change) -> String {
     let mut out = String::new();
     w!(out, "change {} {} {{\n", c.id, quote(&c.motivation));
@@ -407,6 +414,17 @@ pub fn emit_change(c: &Change) -> String {
     for op in &c.ops {
         out.push('\n');
         out.push_str(&indent(&emit_op(op), 1));
+    }
+
+    // The journal closes the block (Annex A): one blank line separates it
+    // from whatever precedes it -- the last op, or the header of a change
+    // that has none -- and its lines are contiguous, in append order. A
+    // change with no journal is byte-identical to what M2 wrote.
+    if !c.journal.is_empty() {
+        out.push('\n');
+        for entry in &c.journal {
+            out.push_str(&indent(&emit_journal_entry(entry), 1));
+        }
     }
 
     out.push_str("}\n");
@@ -440,6 +458,56 @@ pub fn emit_op(op: &StagedOp) -> String {
             format!("op accept {} {}\n", quote(path.as_str()), quote(&oid.0))
         }
     }
+}
+
+/// Emits one journal line at indentation level 0, ending in exactly one
+/// `\n` (Annex A).
+///
+/// `run` and `bind` share one padding group of width 4, so the two line
+/// kinds keep a common column and adding a `bind` to a journal of `run`s
+/// reflows nothing. Both strings are quoted like any other: a test locator
+/// is written as the single `path[::name]` string [`crate::model::TestRef`]
+/// displays, and the oid is written verbatim -- it is opaque (D1), never
+/// parsed, only compared.
+///
+/// Unlike [`emit_op`], this is *not* an input of any digest: the journal is
+/// written after the approval it must not move (D1).
+pub fn emit_journal_entry(e: &JournalEntry) -> String {
+    let mut out = String::new();
+    match e {
+        JournalEntry::Run(run) => {
+            keyword(&mut out, 0, "run", width::JOURNAL);
+            w!(
+                out,
+                "{} {} {} {}\n",
+                run.scenario,
+                run.witness.as_str(),
+                quote(&run.test.to_string()),
+                quote(&run.oid.0)
+            );
+        }
+        JournalEntry::Bind { path, intent } => {
+            keyword(&mut out, 0, "bind", width::JOURNAL);
+            w!(out, "{} -> {intent}\n", quote(path.as_str()));
+        }
+    }
+    out
+}
+
+/// The canonical block of one scenario, alone: exactly the bytes
+/// [`emit_intent`] writes for it, indentation included.
+///
+/// This is a *fingerprint*, not a file: T2 compares the fragment of a
+/// scenario in the base against the fragment of the same scenario in a
+/// change's post-model to decide whether it moved (D7). Emission is what
+/// makes that comparison sound -- spans differ between a parsed scenario and
+/// a staged one and would defeat structural equality, and the emitter has no
+/// notion of them.
+#[allow(dead_code)] // T2 (witness.rs) is its first caller.
+pub(crate) fn emit_scenario_fragment(s: &Scenario) -> String {
+    let mut out = String::new();
+    emit_scenario(&mut out, s);
+    out
 }
 
 // --- expressions ---------------------------------------------------------
@@ -719,12 +787,188 @@ mod tests {
         use crate::ids::ChangeId;
         use crate::model::ChangeStatus;
         use crate::model::change::fixtures::{
-            ANNEX_C_EXAMPLE, annex_c_change, con_0003, empty_change, int_0017, invoice, notion_name,
+            ANNEX_A_EXAMPLE, ANNEX_C_EXAMPLE, annex_c_change, con_0003, empty_change,
+            implementing_change, int_0017, invoice, notion_name, run, run_oid,
         };
+        use crate::model::{TestRun, Witness};
 
         #[test]
         fn emit_change_reproduces_the_annex_c_example_byte_for_byte() {
             assert_eq!(emit_change(&annex_c_change()), ANNEX_C_EXAMPLE);
+        }
+
+        // --- the journal (Annex A) ----------------------------------------
+
+        #[test]
+        fn emit_change_reproduces_the_annex_a_example_byte_for_byte() {
+            assert_eq!(emit_change(&implementing_change()), ANNEX_A_EXAMPLE);
+        }
+
+        #[test]
+        fn a_run_line_is_the_keyword_the_scenario_the_verdict_the_test_and_the_oid() {
+            assert_eq!(
+                emit_journal_entry(&run(Witness::Red)),
+                "run  SCN-0001 red \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \
+                 \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n"
+            );
+            assert_eq!(
+                emit_journal_entry(&run(Witness::Green)),
+                "run  SCN-0001 green \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \
+                 \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n"
+            );
+        }
+
+        #[test]
+        fn a_bind_line_is_the_keyword_the_path_an_arrow_and_the_intent() {
+            assert_eq!(
+                emit_journal_entry(&JournalEntry::Bind {
+                    path: RepoPath::new("src/billing.rs"),
+                    intent: IntentId(1),
+                }),
+                "bind \"src/billing.rs\" -> INT-0001\n"
+            );
+        }
+
+        #[test]
+        fn run_and_bind_share_one_padding_group_of_width_four() {
+            // `run` is padded to `bind`'s length, so the two line kinds line
+            // up in a column and neither reflows the other.
+            let run_line = emit_journal_entry(&run(Witness::Red));
+            let bind_line = emit_journal_entry(&JournalEntry::Bind {
+                path: RepoPath::new("src/billing.rs"),
+                intent: IntentId(1),
+            });
+            assert!(run_line.starts_with("run  SCN-"), "{run_line}");
+            assert!(bind_line.starts_with("bind \""), "{bind_line}");
+            assert_eq!(width::JOURNAL, 4);
+        }
+
+        #[test]
+        fn a_test_reference_without_a_name_is_emitted_as_a_bare_path() {
+            let entry = JournalEntry::Run(TestRun {
+                scenario: ScenarioId(7),
+                witness: Witness::Green,
+                test: "tests/billing.rs".parse().unwrap(),
+                oid: run_oid(),
+            });
+            assert!(
+                emit_journal_entry(&entry)
+                    .starts_with("run  SCN-0007 green \"tests/billing.rs\" \"e69de29"),
+                "{}",
+                emit_journal_entry(&entry)
+            );
+        }
+
+        #[test]
+        fn every_journal_line_ends_in_exactly_one_newline() {
+            for entry in &implementing_change().journal {
+                let emitted = emit_journal_entry(entry);
+                assert!(emitted.ends_with('\n'), "{emitted:?}");
+                assert!(!emitted.ends_with("\n\n"), "{emitted:?}");
+            }
+        }
+
+        #[test]
+        fn one_blank_line_opens_the_journal_block_and_none_splits_it() {
+            let emitted = emit_change(&implementing_change());
+            let (_, journal) = emitted.split_once("  }\n").expect("the op block closes");
+            assert_eq!(
+                journal,
+                concat!(
+                    "\n",
+                    "  run  SCN-0001 red \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+                    "  run  SCN-0001 green \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+                    "  bind \"src/billing.rs\" -> INT-0001\n",
+                    "}\n",
+                )
+            );
+        }
+
+        #[test]
+        fn an_empty_journal_adds_no_blank_line_at_all() {
+            // The M2 shape must be untouched: a change with no journal is
+            // byte-identical to what M2 emitted.
+            assert_eq!(emit_change(&annex_c_change()), ANNEX_C_EXAMPLE);
+            let mut change = empty_change();
+            change.journal = vec![];
+            assert_eq!(
+                emit_change(&change),
+                "change CHG-0001 \"x\" {\n  status open\n}\n"
+            );
+        }
+
+        #[test]
+        fn a_journal_on_a_change_with_no_op_still_gets_its_blank_line() {
+            // The blank line separates the journal from whatever precedes
+            // it, which here is the status line rather than an op.
+            let mut change = empty_change();
+            change.journal = vec![JournalEntry::Bind {
+                path: RepoPath::new("src/billing.rs"),
+                intent: IntentId(1),
+            }];
+            assert_eq!(
+                emit_change(&change),
+                concat!(
+                    "change CHG-0001 \"x\" {\n",
+                    "  status open\n",
+                    "\n",
+                    "  bind \"src/billing.rs\" -> INT-0001\n",
+                    "}\n",
+                )
+            );
+        }
+
+        #[test]
+        fn journal_lines_are_emitted_in_append_order_never_sorted() {
+            let mut change = implementing_change();
+            change.journal.reverse();
+            let emitted = emit_change(&change);
+            let kinds: Vec<String> = emitted
+                .lines()
+                .filter(|l| l.starts_with("  run ") || l.starts_with("  bind "))
+                .map(|l| l.trim_start().split(' ').next().unwrap().to_string())
+                .collect();
+            assert_eq!(kinds, vec!["bind", "run", "run"]);
+            // Within the runs, green now precedes red -- the append order
+            // is data, and reversing it must show.
+            assert!(emitted.find(" green ") < emitted.find(" red "), "{emitted}");
+        }
+
+        #[test]
+        fn a_journal_line_never_carries_trailing_whitespace() {
+            for line in emit_change(&implementing_change()).lines() {
+                assert_eq!(line.trim_end(), line, "trailing whitespace: {line:?}");
+            }
+        }
+
+        // --- emit_scenario_fragment ---------------------------------------
+
+        #[test]
+        fn a_scenario_fragment_is_the_scenario_block_the_intent_emitter_writes() {
+            let intent = int_0017();
+            let scenario = &intent.scenarios[0];
+            let fragment = emit_scenario_fragment(scenario);
+            assert!(
+                emit_intent(&intent).contains(&fragment),
+                "the fragment must be the intent's own bytes:\n{fragment}"
+            );
+            assert!(fragment.starts_with("  scenario SCN-0091 "), "{fragment}");
+            assert!(fragment.ends_with("  }\n"), "{fragment}");
+        }
+
+        #[test]
+        fn a_scenario_fragment_ignores_spans_by_construction() {
+            // Two scenarios equal but for their spans emit the same bytes,
+            // which is what makes the fragment a fingerprint (D7).
+            let mut a = int_0017();
+            let mut b = int_0017();
+            a.scenarios[0].given[0].notion.span = crate::span::Span { start: 1, end: 2 };
+            b.scenarios[0].given[0].notion.span = crate::span::Span { start: 90, end: 99 };
+            assert_ne!(a.scenarios[0], b.scenarios[0]);
+            assert_eq!(
+                emit_scenario_fragment(&a.scenarios[0]),
+                emit_scenario_fragment(&b.scenarios[0])
+            );
         }
 
         #[test]

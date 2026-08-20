@@ -6,7 +6,8 @@
 //! `bindings-file`), Annex C.3's expression mini-language, and Annex C's
 //! `change-file` -- whose `op add|edit` nests the C.2 block rules verbatim
 //! rather than restating them (D2), which is what makes a change file's
-//! round-trip byte-exact for free.
+//! round-trip byte-exact for free -- with the `run` and `bind` journal lines
+//! Annex A adds to it in M3.
 //!
 //! Diagnostics all share one shape (« expected X, found `Y` »), and every
 //! file rule recovers from a field-level error by skipping the rest of the
@@ -23,8 +24,9 @@ use crate::ids::{
 };
 use crate::model::{
     Action, Attr, AttrRef, AttrType, Binding, Change, ChangeStatus, CmpOp, Constraint,
-    ConstraintKind, Expr, InstanceStep, Intent, IntentStatus, Literal, Notion, NotionKind, Operand,
-    Rel, Rule, Scenario, Scope, StagedOp, Statement, TestRef,
+    ConstraintKind, Expr, InstanceStep, Intent, IntentStatus, JournalEntry, Literal, Notion,
+    NotionKind, Operand, Rel, Rule, Scenario, Scope, StagedOp, Statement, TestRef, TestRun,
+    Witness,
 };
 use crate::span::{Sp, Span, line_col};
 use crate::suggest::closest;
@@ -79,6 +81,9 @@ const CHANGE_STATUSES: [(&str, ChangeStatus); 5] = [
     ("implementing", ChangeStatus::Implementing),
     ("abandoned", ChangeStatus::Abandoned),
 ];
+
+/// The two verdicts a `run` line may carry (Annex A, D1).
+const WITNESSES: [(&str, Witness); 2] = [("red", Witness::Red), ("green", Witness::Green)];
 
 /// How an unknown change status is named back: the whole closed set, in the
 /// `expected ..., found ...` shape every other diagnostic uses.
@@ -191,13 +196,18 @@ pub fn parse_bindings_file(path: &RepoPath, src: &str) -> Result<Vec<Binding>, V
 /// use (D2), which is what makes the round-trip byte-exact: whatever the
 /// emitter writes for an entity, nested or not, this reads back.
 ///
-/// Two rules of Annex C live here rather than in the grammar, because they
-/// relate two lines rather than describing one: a `digest` belongs to a
-/// change that has been approved -- `approved`, or the `implementing` it
-/// moves on to in M3 (D16) -- and to no other, and it is a
-/// `sha256:<64 hex>` (D3). Everything else about a change -- that its ops
-/// are appliable, that no other change claims the same paths -- is a job
-/// for later passes.
+/// The journal lines that may follow the ops are Annex A's, and the model
+/// they build takes no part in the digest: a change may be implemented
+/// without going stale (D1).
+///
+/// Three rules live here rather than in the grammar, because they relate two
+/// lines rather than describing one: a `digest` belongs to a change that has
+/// been approved -- `approved`, or the `implementing` it moves on to in M3
+/// (D16) -- and to no other; it is a `sha256:<64 hex>` (D3); and a journal
+/// belongs to an `implementing` change and to no other (D5). Everything else
+/// about a change -- that its ops are appliable, that no other change claims
+/// the same paths, that its witnesses are intact -- is a job for later
+/// passes.
 pub fn parse_change_file(path: &RepoPath, src: &str) -> Result<Change, Vec<Diagnostic>> {
     parse_file(path, src, |p: &mut P<'_>| p.change_file())
 }
@@ -1236,12 +1246,13 @@ impl<'a> P<'a> {
     // --- change files (Annex C) ------------------------------------------
 
     /// `change-file = "change" , change-id , string-lit , "{" ,
-    ///  status-field , [ digest-field ] , { op-decl } , "}"`.
+    ///  status-field , [ digest-field ] , { op-decl } , { journal-line } ,
+    ///  "}"`.
     ///
     /// The header string is the motivation. The two field lines are
-    /// recovered from like any others, and every op is recovered from
-    /// independently, so a file with three broken ops reports three
-    /// diagnostics.
+    /// recovered from like any others, and every op and journal line is
+    /// recovered from independently, so a file with three broken ops reports
+    /// three diagnostics.
     fn change_file(&mut self) -> Result<Change, Diagnostic> {
         self.skip_newlines();
         self.expect_lower_kw("change")?;
@@ -1266,23 +1277,45 @@ impl<'a> P<'a> {
             self.skip_newlines();
         }
 
+        // The body is two phases: ops, then journal lines (Annex A). Once a
+        // journal line has been seen, `op` is no longer one of the options
+        // -- the canonical order is what makes a change file readable as
+        // "what was decided" followed by "what was done".
+        //
+        // `journal_span` records that the first journal *keyword* was
+        // written, whether or not its line parsed: like `digest_span`, the
+        // coherence check below is about the line being there.
         let mut ops = Vec::new();
+        let mut journal = Vec::new();
+        let mut journal_span: Option<Span> = None;
         loop {
             self.skip_newlines();
             if self.at(&TokKind::RBrace) {
                 self.advance();
                 break;
             }
+            let what = if journal_span.is_none() {
+                "`op`, `run`, `bind` or `}`"
+            } else {
+                "`run`, `bind` or `}`"
+            };
             if self.at_eof() {
-                return Err(self.expected("`op` or `}`"));
+                return Err(self.expected(what));
             }
-            if self.at_kw("op") {
+            if self.at_kw("op") && journal_span.is_none() {
                 if let Some(op) = self.recovered(home, |p| p.op_decl()) {
                     ops.push(op);
                 }
                 continue;
             }
-            let diag = self.expected("`op` or `}`");
+            if self.at_kw("run") || self.at_kw("bind") {
+                journal_span.get_or_insert(self.peek().span);
+                if let Some(entry) = self.recovered(home, |p| p.journal_line()) {
+                    journal.push(entry);
+                }
+                continue;
+            }
+            let diag = self.expected(what);
             self.diags.push(diag);
             self.recover_to_newline(home);
         }
@@ -1317,6 +1350,22 @@ impl<'a> P<'a> {
             if let Some(diag) = diag {
                 self.diags.push(diag);
             }
+
+            // A journal is the record of an implementation in flight, and
+            // only one status describes that (D1, D5): the first line a
+            // `telos test` or `telos bind` writes is what moves an approved
+            // change to `implementing`, so a journal anywhere else names a
+            // transition that never happened.
+            if let Some(span) = journal_span
+                && status != ChangeStatus::Implementing
+            {
+                let diag = self.diag_at(
+                    span,
+                    "a journal is only valid on an implementing change".to_string(),
+                    None,
+                );
+                self.diags.push(diag);
+            }
         }
 
         Ok(Change {
@@ -1325,6 +1374,7 @@ impl<'a> P<'a> {
             status: status.unwrap_or(ChangeStatus::Open),
             approved_digest: digest,
             ops,
+            journal,
         })
     }
 
@@ -1458,6 +1508,65 @@ impl<'a> P<'a> {
         };
         self.end_of_field()?;
         Ok(op)
+    }
+
+    /// `journal-line = run-line | bind-line` (Annex A).
+    ///
+    /// Only reached on `run` or `bind`, which the body loop matched to
+    /// decide the phase; the final `Err` is unreachable in practice and
+    /// kept so the rule reads on its own.
+    fn journal_line(&mut self) -> Result<JournalEntry, Diagnostic> {
+        if self.at_kw("run") {
+            self.advance();
+            let scenario = self.expect_scenario_id()?.node;
+            let witness = self.witness()?;
+            let text = self.expect_str("a test reference")?;
+            let test = TestRef::from_str(&text.node)
+                .map_err(|err| self.diag_at(text.span, err.message, err.hint))?;
+            // The oid is opaque (D1): 40 hex in a sha1 repository, 64 in a
+            // sha256 one, and never anything this parser should adjudicate.
+            let oid = self.expect_str("the blob oid string after the test reference")?;
+            self.end_of_field()?;
+            return Ok(JournalEntry::Run(TestRun {
+                scenario,
+                witness,
+                test,
+                oid: Oid(oid.node),
+            }));
+        }
+        if self.at_kw("bind") {
+            self.advance();
+            let path = self.expect_str("a code path")?;
+            self.expect(&TokKind::Arrow, "`->`")?;
+            let intent = self.expect_intent_id()?.node;
+            self.end_of_field()?;
+            return Ok(JournalEntry::Bind {
+                path: RepoPath::new(path.node),
+                intent,
+            });
+        }
+        Err(self.expected("`run` or `bind`"))
+    }
+
+    /// The two verdicts a run may carry.
+    ///
+    /// The set is two words wide, so it is named in full rather than
+    /// abbreviated to "a verdict" -- and the closest match is still offered
+    /// as a hint, which is what turns `gren` into a one-line fix.
+    fn witness(&mut self) -> Result<Witness, Diagnostic> {
+        let TokKind::LowerIdent(word) = &self.peek().kind else {
+            return Err(self.expected("`red` or `green`"));
+        };
+        let span = self.peek().span;
+        if let Some(entry) = WITNESSES.iter().find(|entry| entry.0 == word.as_str()) {
+            let witness = entry.1;
+            self.advance();
+            return Ok(witness);
+        }
+        let hint = closest(word, WITNESSES.iter().map(|entry| entry.0))
+            .map(|w| format!("closest is `{w}`"));
+        let message = format!("expected `red` or `green`, found `{word}`");
+        Err(self.diag_at(span, message, hint))
     }
 
     /// `"accept" , string-lit , string-lit`: the path, then the blob oid it
@@ -3000,7 +3109,10 @@ mod tests {
         use super::*;
         use crate::emit::{emit_change, emit_op};
         use crate::ids::ChangeId;
-        use crate::model::change::fixtures::{ANNEX_C_EXAMPLE, annex_c_change, annex_c_ops};
+        use crate::model::change::fixtures::{
+            ANNEX_A_EXAMPLE, ANNEX_C_EXAMPLE, annex_c_change, annex_c_ops, implementing_change,
+        };
+        use crate::model::{JournalEntry, TestRun, Witness};
 
         fn change_path() -> RepoPath {
             RepoPath::new("telos/changes/CHG-0007.tel")
@@ -3302,21 +3414,24 @@ mod tests {
         }
 
         #[test]
-        fn a_line_that_is_not_an_op_is_reported_and_skipped() {
+        fn a_line_that_is_neither_an_op_nor_a_journal_line_is_reported_and_skipped() {
             let src = concat!(
                 "change CHG-0001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
-                "  run \"cargo test\"\n",
+                "  check \"cargo test\"\n",
                 "\n",
                 "  op remove notion A\n",
                 "}\n",
             );
             let found = diags(src);
-            // `run` lines are reserved for M3 (D1): in M2 they are simply
-            // not part of the grammar, and the op after one still parses.
+            // The body admits four keywords; the op after the bad line is
+            // still parsed.
             assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
-            assert_eq!(found[0].message, "expected `op` or `}`, found `run`");
+            assert_eq!(
+                found[0].message,
+                "expected `op`, `run`, `bind` or `}`, found `check`"
+            );
         }
 
         #[test]
@@ -3349,7 +3464,10 @@ mod tests {
         fn an_unclosed_change_block_is_fatal() {
             let src = "change CHG-0001 \"x\" {\n  status drafted\n";
             let found = diags(src);
-            assert_eq!(found[0].message, "expected `op` or `}`, found end of input");
+            assert_eq!(
+                found[0].message,
+                "expected `op`, `run`, `bind` or `}`, found end of input"
+            );
         }
 
         #[test]
@@ -3383,6 +3501,277 @@ mod tests {
             );
             assert_eq!(emit_change(&parse(dense)), canonical);
             assert_eq!(emit_change(&parse(canonical)), canonical);
+        }
+
+        // --- the journal (Annex A) ----------------------------------------
+
+        /// An implementing change with `body` as its journal block.
+        fn journalled(body: &str) -> String {
+            format!(
+                "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
+                 {body}}}\n",
+                "0".repeat(64)
+            )
+        }
+
+        #[test]
+        fn parses_the_annex_a_example_into_the_expected_change() {
+            let change = parse(ANNEX_A_EXAMPLE);
+            let expected = implementing_change();
+            assert_eq!(change.status, ChangeStatus::Implementing);
+            assert_eq!(change.ops.len(), 1);
+            assert_eq!(change.journal, expected.journal);
+            // The journal is not hashed: the parsed change digests exactly
+            // as the same ops with no journal at all would (D1).
+            assert_eq!(change.ops_digest(), expected.ops_digest());
+        }
+
+        #[test]
+        fn the_annex_a_example_round_trips_byte_exact() {
+            assert_eq!(emit_change(&parse(ANNEX_A_EXAMPLE)), ANNEX_A_EXAMPLE);
+        }
+
+        #[test]
+        fn a_run_line_carries_the_scenario_the_verdict_the_test_and_the_oid() {
+            let src = journalled("  run  SCN-0107 red \"tests/billing.rs::scn_0107\" \"cafe\"\n");
+            let change = parse(&src);
+            assert_eq!(
+                change.journal,
+                vec![JournalEntry::Run(TestRun {
+                    scenario: ScenarioId(107),
+                    witness: Witness::Red,
+                    test: "tests/billing.rs::scn_0107".parse().unwrap(),
+                    oid: Oid("cafe".to_string()),
+                })]
+            );
+        }
+
+        #[test]
+        fn a_test_locator_may_be_a_bare_path() {
+            let src = journalled("  run  SCN-0107 green \"tests/billing.rs\" \"cafe\"\n");
+            let JournalEntry::Run(run) = &parse(&src).journal[0] else {
+                panic!("a run line");
+            };
+            assert_eq!(run.test.path, RepoPath::new("tests/billing.rs"));
+            assert_eq!(run.test.name, None);
+            assert_eq!(run.witness, Witness::Green);
+        }
+
+        #[test]
+        fn a_locator_with_no_path_is_rejected_where_it_stands() {
+            let src = journalled("  run  SCN-0107 red \"::scn_0107\" \"cafe\"\n");
+            let found = diags(&src);
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert!(
+                found[0]
+                    .message
+                    .contains("test reference is missing a path"),
+                "{:?}",
+                found[0].message
+            );
+        }
+
+        #[test]
+        fn the_oid_of_a_run_is_opaque() {
+            // Never parsed, only compared (`Oid`): a sha1 repo writes 40
+            // hex, a sha256 one 64, and the parser has no business knowing.
+            let src = journalled("  run  SCN-0107 red \"tests/b.rs\" \"not-a-real-oid\"\n");
+            let JournalEntry::Run(run) = &parse(&src).journal[0] else {
+                panic!("a run line");
+            };
+            assert_eq!(run.oid, Oid("not-a-real-oid".to_string()));
+        }
+
+        #[test]
+        fn a_bind_line_carries_the_path_and_the_intent() {
+            let src = journalled("  bind \"src/billing.rs\" -> INT-0042\n");
+            assert_eq!(
+                parse(&src).journal,
+                vec![JournalEntry::Bind {
+                    path: RepoPath::new("src/billing.rs"),
+                    intent: IntentId(42),
+                }]
+            );
+        }
+
+        #[test]
+        fn a_verdict_outside_red_and_green_names_both_and_hints_the_closest() {
+            let src = journalled("  run  SCN-0107 blue \"tests/b.rs\" \"cafe\"\n");
+            let found = diags(&src);
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(found[0].message, "expected `red` or `green`, found `blue`");
+            assert_eq!(found[0].code, ErrorCode::TelosParseError);
+            assert_eq!((found[0].line, found[0].col), (Some(5), Some(17)));
+
+            // A near miss is named: the closed set is two words wide, so a
+            // typo has nowhere to hide.
+            let src = journalled("  run  SCN-0107 gren \"tests/b.rs\" \"cafe\"\n");
+            let found = diags(&src);
+            assert_eq!(found[0].message, "expected `red` or `green`, found `gren`");
+            assert_eq!(found[0].hint.as_deref(), Some("closest is `green`"));
+        }
+
+        #[test]
+        fn a_journal_is_only_valid_on_an_implementing_change() {
+            // The grammar of a journal line says nothing about status; this
+            // rule relates two lines, so it lives with the digest check.
+            for status in ["open", "drafted", "abandoned"] {
+                let src = format!(
+                    "change CHG-0001 \"x\" {{\n  status {status}\n\n  \
+                     bind \"src/b.rs\" -> INT-0001\n}}\n"
+                );
+                let found = diags(&src);
+                assert_eq!(found.len(), 1, "for `{status}`: {found:#?}");
+                assert_eq!(
+                    found[0].message, "a journal is only valid on an implementing change",
+                    "for `{status}`"
+                );
+                // Reported at the first journal line: that is what has to go
+                // (or what the status has to catch up with).
+                assert_eq!((found[0].line, found[0].col), (Some(4), Some(3)));
+            }
+        }
+
+        #[test]
+        fn an_approved_change_may_not_carry_a_journal_either() {
+            // D5: the first journalled line is what moves an approved change
+            // to `implementing`, so an approved change with a journal is a
+            // change whose writer skipped that transition.
+            let src = format!(
+                "change CHG-0001 \"x\" {{\n  status approved\n  digest \"sha256:{}\"\n\n  \
+                 run  SCN-0107 red \"tests/b.rs\" \"cafe\"\n}}\n",
+                "0".repeat(64)
+            );
+            let found = diags(&src);
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(
+                found[0].message,
+                "a journal is only valid on an implementing change"
+            );
+        }
+
+        #[test]
+        fn a_journal_line_that_did_not_parse_still_counts_as_a_journal() {
+            // The coherence check is about the line being there, not about
+            // it being well-formed -- the same rule the digest check uses.
+            let src = "change CHG-0001 \"x\" {\n  status drafted\n\n  bind \"src/b.rs\"\n}\n";
+            let found = diags(src);
+            let messages: Vec<&str> = found.iter().map(|d| d.message.as_str()).collect();
+            assert_eq!(
+                messages,
+                vec![
+                    "expected `->`, found end of line",
+                    "a journal is only valid on an implementing change",
+                ]
+            );
+        }
+
+        #[test]
+        fn an_op_after_a_journal_line_is_rejected() {
+            // Annex A: journal lines come after the last op, so the body is
+            // two phases -- once a journal line is seen, no op may follow.
+            let src = journalled(concat!(
+                "  bind \"src/b.rs\" -> INT-0001\n",
+                "\n",
+                "  op remove notion A\n",
+            ));
+            let found = diags(&src);
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(
+                found[0].message,
+                "expected `run`, `bind` or `}`, found `op`"
+            );
+        }
+
+        #[test]
+        fn an_unclosed_journal_block_names_what_could_still_come() {
+            let src =
+                "change CHG-0001 \"x\" {\n  status implementing\n  bind \"a.rs\" -> INT-0001\n";
+            let found = diags(src);
+            assert_eq!(
+                found[0].message,
+                "expected `run`, `bind` or `}`, found end of input"
+            );
+        }
+
+        #[test]
+        fn blank_lines_inside_the_journal_are_layout_only() {
+            // The emitter writes one blank line before the block and none
+            // inside it; the parser accepts any spacing, and emitting
+            // normalizes.
+            let dense = concat!(
+                "change CHG-0001 \"x\" {\n",
+                "  status implementing\n",
+                "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+                "  bind \"a.rs\" -> INT-0001\n",
+                "\n",
+                "\n",
+                "  run  SCN-0001 red \"tests/b.rs\" \"cafe\"\n",
+                "}\n",
+            );
+            let canonical = concat!(
+                "change CHG-0001 \"x\" {\n",
+                "  status implementing\n",
+                "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+                "\n",
+                "  bind \"a.rs\" -> INT-0001\n",
+                "  run  SCN-0001 red \"tests/b.rs\" \"cafe\"\n",
+                "}\n",
+            );
+            assert_eq!(emit_change(&parse(dense)), canonical);
+            assert_eq!(emit_change(&parse(canonical)), canonical);
+        }
+
+        #[test]
+        fn a_run_line_wants_a_scenario_id_and_two_strings() {
+            let cases = [
+                (
+                    "run  INT-0001 red \"t.rs\" \"cafe\"",
+                    "expected a scenario id, found `INT-0001`",
+                ),
+                (
+                    "run  SCN-0001",
+                    "expected `red` or `green`, found end of line",
+                ),
+                (
+                    "run  SCN-0001 red",
+                    "expected a test reference, found end of line",
+                ),
+                (
+                    "run  SCN-0001 red \"t.rs\"",
+                    "expected the blob oid string after the test reference, found end of line",
+                ),
+                (
+                    "run  SCN-0001 red \"t.rs\" \"cafe\" \"extra\"",
+                    "expected end of line, found `\"extra\"`",
+                ),
+                ("bind \"a.rs\" INT-0001", "expected `->`, found `INT-0001`"),
+                (
+                    "bind INT-0001 -> INT-0001",
+                    "expected a code path, found `INT-0001`",
+                ),
+                (
+                    "bind \"a.rs\" -> SCN-0001",
+                    "expected an intent id, found `SCN-0001`",
+                ),
+            ];
+            for (line, expected) in cases {
+                let src = journalled(&format!("  {line}\n"));
+                let found = diags(&src);
+                assert_eq!(found.len(), 1, "for `{line}`: {found:#?}");
+                assert_eq!(found[0].message, expected, "for `{line}`");
+            }
+        }
+
+        #[test]
+        fn a_broken_journal_line_does_not_swallow_the_next_one() {
+            let src = journalled(concat!(
+                "  run  SCN-0001 blue \"tests/b.rs\" \"cafe\"\n",
+                "  bind \"a.rs\" -> INT-0001\n",
+            ));
+            let found = diags(&src);
+            assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
+            assert_eq!(found[0].message, "expected `red` or `green`, found `blue`");
         }
     }
 }

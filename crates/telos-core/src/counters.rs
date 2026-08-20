@@ -311,6 +311,7 @@ mod tests {
             status: ChangeStatus::Drafted,
             approved_digest: None,
             ops,
+            journal: vec![],
         }
     }
 

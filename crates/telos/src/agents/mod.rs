@@ -168,16 +168,15 @@ where
     for (index, staging) in staged {
         let write = &plan.writes[index];
         let relative = write.relative();
+        validate_expected(&plan.root, write, &staging)?;
         before_publish(relative)
             .map_err(|error| io_error("prepare publication for", relative, error))?;
-        // Recheck merges next to their replacement too. There is no portable
-        // filesystem-wide multi-file CAS; the seal's non-adversarial model
-        // therefore permits only the syscall-sized check/rename gap here.
-        validate_expected(&plan.root, write, &staging)?;
         match write {
             PlannedWrite::AlreadyExact { .. } => unreachable!("no-op writes are not staged"),
             PlannedWrite::CreateOnly { .. } => staging.publish_create_only(),
-            PlannedWrite::MergeExisting { .. } => staging.publish_replace(),
+            PlannedWrite::MergeExisting { expected, .. } => {
+                staging.publish_replace_if_matches(expected)
+            }
         }
         .map_err(|error| safe_error("publish", relative, error))?;
     }
@@ -433,16 +432,39 @@ fn config_shape_error(field: &str, expected: &str) -> TelosError {
     .hint("repair the existing host configuration and rerun `telos init`")
 }
 
-pub(crate) fn merge_owned_block(existing: &str, start: &str, end: &str, block: &str) -> String {
-    if let Some(start_at) = existing.find(start)
-        && let Some(relative_end) = existing[start_at + start.len()..].find(end)
+pub(crate) fn merge_owned_block(
+    existing: &str,
+    start: &str,
+    end: &str,
+    block: &str,
+) -> Result<String, TelosError> {
+    let starts = existing
+        .match_indices(start)
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    let ends = existing
+        .match_indices(end)
+        .map(|(at, _)| at)
+        .collect::<Vec<_>>();
+    if !matches!((starts.len(), ends.len()), (0, 0) | (1, 1))
+        || (starts.len() == 1 && starts[0] >= ends[0])
     {
-        let end_at = start_at + start.len() + relative_end + end.len();
+        return Err(TelosError::new(
+            ErrorCode::TelosChangeStateInvalid,
+            "host configuration contains malformed or duplicate Telos-owned block markers",
+        )
+        .hint(
+            "repair the owned block markers without deleting user content, then rerun `telos init`",
+        ));
+    }
+
+    if let (Some(&start_at), Some(&end_start)) = (starts.first(), ends.first()) {
+        let end_at = end_start + end.len();
         let mut merged = String::with_capacity(existing.len() - (end_at - start_at) + block.len());
         merged.push_str(&existing[..start_at]);
         merged.push_str(block);
         merged.push_str(&existing[end_at..]);
-        return merged;
+        return Ok(merged);
     }
 
     let mut merged = existing.to_string();
@@ -456,7 +478,7 @@ pub(crate) fn merge_owned_block(existing: &str, start: &str, end: &str, block: &
     if !merged.ends_with('\n') {
         merged.push('\n');
     }
-    merged
+    Ok(merged)
 }
 
 pub(crate) fn read_optional_text(
@@ -634,6 +656,31 @@ mod tests {
     }
 
     #[test]
+    fn existing_merge_target_save_after_validation_is_restored_by_publication_cas() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("AGENTS.md");
+        fs::write(&agents, b"initial owner\n").unwrap();
+        let plan = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+
+        let error = render_with_hooks(
+            &plan,
+            |_relative, file, bytes| file.write_all(bytes),
+            || Ok(()),
+            |relative| {
+                if relative == Path::new("AGENTS.md") {
+                    fs::write(&agents, b"late IDE save\n")?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
+        assert_eq!(fs::read(&agents).unwrap(), b"late IDE save\n");
+        assert_no_staging_files(tmp.path());
+    }
+
+    #[test]
     fn partial_staging_write_publishes_no_agent_file() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("AGENTS.md"), b"original owner\n").unwrap();
@@ -731,6 +778,42 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
         assert_eq!(fs::read(skill).unwrap(), b"owner bytes\n");
+    }
+
+    #[test]
+    fn malformed_owned_block_markers_are_rejected_before_any_agent_write() {
+        for (target, bytes) in [
+            (
+                "AGENTS.md",
+                "owner\n<!-- telos-sdd:start -->\nunterminated\n",
+            ),
+            (
+                "AGENTS.md",
+                "<!-- telos-sdd:end -->\nowner\n<!-- telos-sdd:start -->\n",
+            ),
+            (
+                "AGENTS.md",
+                "<!-- telos-sdd:start -->\na\n<!-- telos-sdd:end -->\n<!-- telos-sdd:start -->\nb\n<!-- telos-sdd:end -->\n",
+            ),
+            (
+                ".codex/rules/telos.rules",
+                "# telos-sdd:start\nowner\n# telos-sdd:start\n# telos-sdd:end\n",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join(target);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+
+            let error = match preflight(tmp.path(), &[AgentHost::Codex]) {
+                Ok(_) => panic!("accepted malformed markers in {target}"),
+                Err(error) => error,
+            };
+
+            assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
+            assert_eq!(fs::read_to_string(path).unwrap(), bytes);
+            assert!(!tmp.path().join(".agents").exists());
+        }
     }
 
     #[cfg(unix)]

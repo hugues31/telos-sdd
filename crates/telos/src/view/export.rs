@@ -39,6 +39,7 @@ struct EntryIdentity {
 struct StagingDirectory {
     parent: Dir,
     parent_path: PathBuf,
+    parent_identity: EntryIdentity,
     target: OsString,
     name: OsString,
     path: PathBuf,
@@ -145,6 +146,7 @@ where
             .map_err(|error| io_error("finish staging verification for", destination, error))?;
         staging.refuse_existing_destination(destination)?;
         staging.verify_entry()?;
+        staging.verify_announced_parent(destination)?;
         publish_no_replace(&mut staging, destination, existing_destination)?;
         staging.published = true;
         Ok(rendered.into_iter().map(|(path, _)| path).collect())
@@ -238,8 +240,13 @@ impl StagingDirectory {
                 ),
             )
         })?;
-        let parent = Dir::open_ambient_dir(parent_path, ambient_authority())
+        let parent = open_ambient_directory_nofollow(parent_path)
             .map_err(|error| io_error("open parent of", destination, error))?;
+        let parent_identity = identity(
+            &parent
+                .dir_metadata()
+                .map_err(|error| io_error("inspect parent of", destination, error))?,
+        );
 
         for _ in 0..128 {
             let name = random_staging_name(destination)?;
@@ -277,6 +284,7 @@ impl StagingDirectory {
                     let staging = Self {
                         parent,
                         parent_path: parent_path.to_path_buf(),
+                        parent_identity,
                         target: target.to_os_string(),
                         name,
                         path,
@@ -371,6 +379,76 @@ impl StagingDirectory {
             Err(error) => Err(io_error("inspect", destination, error)),
         }
     }
+
+    fn verify_announced_parent(&self, destination: &Path) -> Result<(), TelosError> {
+        let reopened = open_ambient_directory_nofollow(&self.parent_path)
+            .map_err(|error| stale_parent(destination, error))?;
+        let current = identity(
+            &reopened
+                .dir_metadata()
+                .map_err(|error| stale_parent(destination, error))?,
+        );
+        let held = identity(
+            &self
+                .parent
+                .dir_metadata()
+                .map_err(|error| stale_parent(destination, error))?,
+        );
+        if current == self.parent_identity && held == self.parent_identity {
+            Ok(())
+        } else {
+            Err(stale_parent(
+                destination,
+                "the announced destination parent changed identity",
+            ))
+        }
+    }
+}
+
+fn open_ambient_directory_nofollow(path: &Path) -> io::Result<Dir> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "destination parent escapes its filesystem root",
+                    ));
+                }
+            }
+            std::path::Component::Normal(name) => normalized.push(name),
+        }
+    }
+
+    let mut anchor = PathBuf::new();
+    let mut names = Vec::new();
+    for component in normalized.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => anchor.push(prefix.as_os_str()),
+            std::path::Component::RootDir => anchor.push(component.as_os_str()),
+            std::path::Component::Normal(name) => names.push(name.to_os_string()),
+            std::path::Component::CurDir | std::path::Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "destination parent is not normalized",
+                ));
+            }
+        }
+    }
+    let mut current = Dir::open_ambient_dir(&anchor, ambient_authority())?;
+    for name in names {
+        current = current.open_dir_nofollow(name)?;
+    }
+    Ok(current)
 }
 
 impl Drop for StagingDirectory {
@@ -453,6 +531,16 @@ fn stale_staging(path: &Path, reason: impl std::fmt::Display) -> TelosError {
         format!(
             "refusing stale export staging entry {}: {reason}",
             path.display()
+        ),
+    )
+}
+
+fn stale_parent(destination: &Path, reason: impl std::fmt::Display) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        format!(
+            "export destination parent changed before publication for `{}`: {reason}",
+            destination.display()
         ),
     )
 }
@@ -1093,6 +1181,38 @@ mod tests {
         assert_eq!(
             fs::read_to_string(replacement.join("hostile.txt")).unwrap(),
             "post-check replacement"
+        );
+    }
+
+    #[test]
+    fn a_rotated_destination_parent_is_refused_and_its_new_owner_is_preserved() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("publish");
+        let rotated = temporary.path().join("rotated-publish");
+        fs::create_dir(&parent).unwrap();
+        let destination = parent.join("site");
+
+        let error = export_with_writer_and_before_publish(
+            &fixture_snapshot(),
+            &destination,
+            |_staging_path, staging, relative, bytes| write_relative(staging, relative, bytes),
+            |_staging| {
+                fs::rename(&parent, &rotated)?;
+                fs::create_dir(&parent)?;
+                fs::write(parent.join("owner.txt"), "replacement parent owner")
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code,
+            telos_core::error::ErrorCode::TelosChangeStateInvalid
+        );
+        assert!(!destination.exists());
+        assert!(!rotated.join("site").exists());
+        assert_eq!(
+            fs::read_to_string(parent.join("owner.txt")).unwrap(),
+            "replacement parent owner"
         );
     }
 

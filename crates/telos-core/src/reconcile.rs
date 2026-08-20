@@ -131,7 +131,6 @@
 //! change file is gone, because the entities themselves are now in the spec.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 
 use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
 use crate::config::{Config, TddPolicy};
@@ -142,12 +141,13 @@ use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::NodeRef;
 use crate::ids::{ConstraintId, IntentId, RepoPath, ScenarioId};
-use crate::lock::{Lock, seal};
+use crate::lock::Lock;
 use crate::model::{
     Binding, Change, ChangeStatus, Constraint, IntentStatus, JournalEntry, Scope, StagedOp,
     TelFile, TelosModel, TestRef,
 };
 use crate::overlay::{apply_config_ops, apply_ops_idempotent, fold_journal_bindings, parse_base};
+use crate::repo_fs::RepoFs;
 use crate::semantic::build_model;
 use crate::state::{DRIFT_HINT, compute_state};
 use crate::witness::{WitnessVerdict, required_witnesses, witness_verdict};
@@ -223,18 +223,27 @@ pub fn reconcile_change(
     let witness_warnings = check_witnesses(&effective_ws, git, &base, &model, change)?;
     require_sealable_structure(&effective_ws, &model)?;
 
+    let proven = capture_seal_snapshot(ws, &model, git)?;
     let impacted = impacted_nodes(ws, &model, &change.ops);
     let checks_run = run_constraint_checks(&effective_ws, &model, Some(&impacted))?;
     let tests_run = run_tests(&effective_ws, &model, &impacted)?;
+    require_unchanged_snapshot(ws, git, &proven)?;
 
     // --- D6: everything above passed, so and only so, write. ---
     for op in &change.ops {
         apply_op(ws, op)?;
     }
     write_bindings(ws, &model)?;
-    let mut fresh = seal(ws, &model, git, Some(change.id))?;
+    let spec_paths = ws.spec_files()?;
+    let spec = git.blob_oids(&spec_paths)?;
+    require_complete_map("specification", &spec_paths, &spec)?;
+    require_code_snapshot(git, &proven.code)?;
+    let publication_spec = spec.clone();
+    let mut fresh = lock_from_maps(spec, proven.code.clone(), Some(change.id));
     carry_over(&mut fresh, lock, &carried);
-    fresh.write(&ws.lock_path())?;
+    require_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
+    fresh.write_to_workspace(ws)?;
+    require_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
     delete_change(ws, change.id)?;
 
     Ok(ReconcileOutcome {
@@ -311,6 +320,7 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
     require_no_orphan_code(ws, &model, &BTreeSet::new())?;
     require_sealable_structure(ws, &model)?;
 
+    let proven = capture_seal_snapshot(ws, &model, git)?;
     let checks_run = run_constraint_checks(ws, &model, None)?;
     let tests_run = if model
         .intents
@@ -322,8 +332,11 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
         0
     };
 
-    let lock = seal(ws, &model, git, None)?;
-    lock.write(&ws.lock_path())?;
+    require_unchanged_snapshot(ws, git, &proven)?;
+    let lock = lock_from_maps(proven.spec.clone(), proven.code.clone(), None);
+    require_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
+    lock.write_to_workspace(ws)?;
+    require_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
 
     Ok(ReconcileOutcome {
         ops_applied: 0,
@@ -335,6 +348,122 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
         witness_warnings: Vec::new(),
         lock,
     })
+}
+
+#[derive(Debug, Clone)]
+struct SealSnapshot {
+    spec: BTreeMap<RepoPath, Oid>,
+    code: BTreeMap<RepoPath, Oid>,
+}
+
+/// Captures exactly the spec and bound-code bytes about to be exercised.
+/// `blob_oids` itself rejects a path that changes while Git filters it.
+fn capture_seal_snapshot(
+    ws: &Workspace,
+    model: &TelosModel,
+    git: &GitRepo,
+) -> Result<SealSnapshot, TelosError> {
+    git.ensure_matches_workspace_root(&ws.repo_root)?;
+    let spec_paths = ws.spec_files()?;
+    let spec = git.blob_oids(&spec_paths)?;
+    require_complete_map("specification", &spec_paths, &spec)?;
+
+    let code_paths = model
+        .bindings
+        .iter()
+        .map(|binding| binding.code_path().clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let code = git.blob_oids(&code_paths)?;
+    require_complete_map("binding", &code_paths, &code)?;
+    Ok(SealSnapshot { spec, code })
+}
+
+fn require_complete_map(
+    kind: &str,
+    paths: &[RepoPath],
+    oids: &BTreeMap<RepoPath, Oid>,
+) -> Result<(), TelosError> {
+    if let Some(path) = paths.iter().find(|path| !oids.contains_key(*path)) {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            format!("{kind} path `{path}` disappeared before it could be proven"),
+        ));
+    }
+    Ok(())
+}
+
+fn require_unchanged_snapshot(
+    ws: &Workspace,
+    git: &GitRepo,
+    snapshot: &SealSnapshot,
+) -> Result<(), TelosError> {
+    let current_spec_paths = ws.spec_files()?;
+    let expected_spec_paths = snapshot.spec.keys().cloned().collect::<Vec<_>>();
+    if current_spec_paths != expected_spec_paths {
+        return Err(snapshot_changed("the specification tree"));
+    }
+    require_exact_oids(git, &snapshot.spec, "the specification tree")?;
+    require_exact_oids(git, &snapshot.code, "bound code or proof files")
+}
+
+fn require_code_snapshot(
+    git: &GitRepo,
+    expected: &BTreeMap<RepoPath, Oid>,
+) -> Result<(), TelosError> {
+    require_exact_oids(git, expected, "bound code or proof files")
+}
+
+fn require_publication_snapshot(
+    ws: &Workspace,
+    git: &GitRepo,
+    spec: &BTreeMap<RepoPath, Oid>,
+    code: &BTreeMap<RepoPath, Oid>,
+) -> Result<(), TelosError> {
+    let current_spec_paths = ws.spec_files()?;
+    let expected_spec_paths = spec.keys().cloned().collect::<Vec<_>>();
+    if current_spec_paths != expected_spec_paths {
+        return Err(snapshot_changed("the specification tree"));
+    }
+    require_exact_oids(git, spec, "the specification tree")?;
+    require_exact_oids(git, code, "bound code or proof files")
+}
+
+fn require_exact_oids(
+    git: &GitRepo,
+    expected: &BTreeMap<RepoPath, Oid>,
+    subject: &str,
+) -> Result<(), TelosError> {
+    let paths = expected.keys().cloned().collect::<Vec<_>>();
+    let current = git.blob_oids(&paths)?;
+    if &current != expected {
+        return Err(snapshot_changed(subject));
+    }
+    Ok(())
+}
+
+fn snapshot_changed(subject: &str) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosIntegrityViolation,
+        format!("{subject} changed while checks or tests were running"),
+    )
+    .hint("restore the intended bytes and reconcile again")
+}
+
+fn lock_from_maps(
+    spec: BTreeMap<RepoPath, Oid>,
+    code: BTreeMap<RepoPath, Oid>,
+    sealed_by: Option<crate::ids::ChangeId>,
+) -> Lock {
+    Lock {
+        version: 1,
+        tool: format!("telos {}", crate::VERSION),
+        sealed_by,
+        spec_digest: Lock::compute_digest(&spec),
+        spec,
+        code,
+    }
 }
 
 /// The write-time half of §3.3 rule 4.
@@ -1076,8 +1205,8 @@ fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
     }
 
     let command = substitute_filter(cmd, "");
-    match run_shell(&command, &ws.repo_root) {
-        Ok(result) if result.status == 0 => Ok(1),
+    match run_shell_with_filter(cmd, "", &ws.repo_root) {
+        Ok(run) if run.result.status == 0 => Ok(1),
         Ok(_) | Err(_) => Err(test_failed("the whole suite", &command)),
     }
 }
@@ -1093,7 +1222,7 @@ fn test_failed(target: &str, command: &str) -> TelosError {
         ErrorCode::TelosIntegrityViolation,
         format!("the test run for `{target}` failed: `{command}`"),
     )
-    .hint("run the command directly to see why it fails, then reconcile again")
+    .hint("run the configured executable with the displayed arguments, then reconcile again")
 }
 
 // --- the writes (D6) ---------------------------------------------------------
@@ -1110,7 +1239,8 @@ fn test_failed(target: &str, command: &str) -> TelosError {
 /// A `remove` whose file is already absent is not an error: an earlier op of
 /// this very change may have been the only reason it would have existed.
 fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
-    let path = ws.abs_path(&op.target_path());
+    let repo_fs = RepoFs::open(&ws.repo_root)?;
+    let path = op.target_path();
 
     let content = match op {
         StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => emit_file(&TelFile::Notion(n.clone())),
@@ -1121,18 +1251,11 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
         StagedOp::EditConfig(config) => crate::emit::emit_config(config)?,
         StagedOp::Accept { .. } => return Ok(()),
         StagedOp::RemoveNotion(_) | StagedOp::RemoveIntent(_) | StagedOp::RemoveConstraint(_) => {
-            return match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(io_error("delete", &op.target_path(), e)),
-            };
+            return repo_fs.remove_file(&path);
         }
     };
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| io_error("create", &op.target_path(), e))?;
-    }
-    fs::write(&path, content).map_err(|e| io_error("write", &op.target_path(), e))
+    repo_fs.write(&path, content.as_bytes())
 }
 
 /// Writes `telos/bindings.tel` from the folded model (D2), through the
@@ -1152,23 +1275,13 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
 /// tree that was assembled by hand.)
 fn write_bindings(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
     let path = RepoPath::new(BINDINGS_PATH);
-    let abs = ws.abs_path(&path);
-    if model.bindings.is_empty() && !abs.is_file() {
+    let repo_fs = RepoFs::open(&ws.repo_root)?;
+    if model.bindings.is_empty() && repo_fs.read_optional(&path)?.is_none() {
         return Ok(());
     }
 
     let content = emit_file(&TelFile::Bindings(model.bindings.clone()));
-    if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent).map_err(|e| io_error("create", &path, e))?;
-    }
-    fs::write(&abs, content).map_err(|e| io_error("write", &path, e))
-}
-
-fn io_error(verb: &str, path: &RepoPath, e: std::io::Error) -> TelosError {
-    TelosError::new(
-        ErrorCode::TelosInternal,
-        format!("failed to {verb} {path}: {e}"),
-    )
+    repo_fs.write(&path, content.as_bytes())
 }
 
 #[cfg(test)]

@@ -48,13 +48,12 @@
 //! [`crate::overlay::validate_ops_idempotent`] at the CLI layer, with the
 //! semantic pass' own diagnostics.
 
-use std::fs;
-
 use crate::error::{Diagnostic, ErrorCode, TelosError};
 use crate::git::GitRepo;
 use crate::ids::{ConstraintId, IntentId, NotionName, RepoPath};
 use crate::lock::Lock;
 use crate::model::{StagedOp, constraint_path, intent_path, notion_path};
+use crate::repo_fs::RepoFs;
 use crate::state::{DriftEntry, DriftKind};
 use crate::syntax::{parse_constraint_file, parse_intent_file, parse_notion_file};
 use crate::workspace::Workspace;
@@ -175,9 +174,10 @@ pub fn revert(
 ) -> Result<RevertOutcome, TelosError> {
     let mut restored = Vec::new();
     let mut deleted = Vec::new();
+    let repo_fs = RepoFs::open(&ws.repo_root)?;
 
     for entry in drift {
-        let abs = ws.abs_path(&entry.path);
+        entry.path.validate()?;
         match entry.kind {
             DriftKind::Modified | DriftKind::Missing => {
                 let oid = lock
@@ -186,19 +186,11 @@ pub fn revert(
                     .or_else(|| lock.code.get(&entry.path))
                     .ok_or_else(|| unsealed(&entry.path))?;
                 let bytes = git.cat_blob(oid)?;
-                if let Some(parent) = abs.parent() {
-                    fs::create_dir_all(parent).map_err(|e| io_error("create", &entry.path, e))?;
-                }
-                fs::write(&abs, bytes).map_err(|e| io_error("restore", &entry.path, e))?;
+                repo_fs.write(&entry.path, &bytes)?;
                 restored.push(entry.path.clone());
             }
             DriftKind::Untracked => {
-                match fs::remove_file(&abs) {
-                    Ok(()) => {}
-                    // Already gone: the outcome this asked for.
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(io_error("delete", &entry.path, e)),
-                }
+                repo_fs.remove_file(&entry.path)?;
                 deleted.push(entry.path.clone());
             }
         }
@@ -269,7 +261,7 @@ fn entity_op(
         };
     }
 
-    let src = fs::read_to_string(ws.abs_path(path)).map_err(|e| io_error("read", path, e))?;
+    let src = ws.read_to_string(path)?;
     // `Untracked` means the seal never held this path, which is what an
     // `add` says; `Modified` means it did, which is what an `edit` says.
     let adding = kind == DriftKind::Untracked;
@@ -388,13 +380,6 @@ fn unsealed(path: &RepoPath) -> TelosError {
         format!("`{path}` is not sealed; there is nothing to restore it from"),
     )
     .hint("run `telos change reconcile --full` to reseal the project")
-}
-
-fn io_error(verb: &str, path: &RepoPath, e: std::io::Error) -> TelosError {
-    TelosError::new(
-        ErrorCode::TelosInternal,
-        format!("failed to {verb} {path}: {e}"),
-    )
 }
 
 #[cfg(test)]

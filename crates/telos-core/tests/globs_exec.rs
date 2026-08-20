@@ -317,19 +317,9 @@ fn run_shell_runs_with_the_given_cwd() {
 #[test]
 fn filtered_shell_run_preserves_display_but_passes_metacharacters_as_one_argument() {
     let tmp = tempfile::tempdir().unwrap();
-    let (filter, template, displayed) = if cfg!(windows) {
-        (
-            "proof&mkdir injected",
-            "if exist {filter} (exit 0) else (exit 1)",
-            "if exist proof&mkdir injected (exit 0) else (exit 1)",
-        )
-    } else {
-        (
-            "proof;mkdir injected",
-            "test -f {filter}",
-            "test -f proof;mkdir injected",
-        )
-    };
+    let filter = "proof&mkdir injected";
+    let template = "git hash-object {filter}";
+    let displayed = "git hash-object proof&mkdir injected";
     fs::write(tmp.path().join(filter), "proof\n").unwrap();
 
     let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
@@ -351,19 +341,9 @@ fn filtered_shell_run_keeps_leading_display_whitespace() {
 #[test]
 fn filtered_shell_run_supports_a_placeholder_already_quoted_as_one_argument() {
     let tmp = tempfile::tempdir().unwrap();
-    let (filter, template, displayed) = if cfg!(windows) {
-        (
-            "proof&mkdir injected",
-            "if exist \"{filter}\" (exit 0) else (exit 1)",
-            "if exist \"proof&mkdir injected\" (exit 0) else (exit 1)",
-        )
-    } else {
-        (
-            "proof;mkdir injected",
-            "test -f \"{filter}\"",
-            "test -f \"proof;mkdir injected\"",
-        )
-    };
+    let filter = "proof&mkdir injected";
+    let template = "git hash-object \"{filter}\"";
+    let displayed = "git hash-object \"proof&mkdir injected\"";
     fs::write(tmp.path().join(filter), "proof\n").unwrap();
 
     let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
@@ -376,19 +356,9 @@ fn filtered_shell_run_supports_a_placeholder_already_quoted_as_one_argument() {
 #[test]
 fn filtered_shell_run_supports_a_placeholder_embedded_in_double_quotes() {
     let tmp = tempfile::tempdir().unwrap();
-    let (filter, template, file) = if cfg!(windows) {
-        (
-            "proof&mkdir injected",
-            "if exist \"prefix-{filter}-suffix\" (exit 0) else (exit 1)",
-            "prefix-proof&mkdir injected-suffix",
-        )
-    } else {
-        (
-            "proof;mkdir injected",
-            "test -f \"prefix-{filter}-suffix\"",
-            "prefix-proof;mkdir injected-suffix",
-        )
-    };
+    let filter = "proof&mkdir injected";
+    let template = "git hash-object \"prefix-{filter}-suffix\"";
+    let file = "prefix-proof&mkdir injected-suffix";
     fs::write(tmp.path().join(file), "proof\n").unwrap();
 
     let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
@@ -418,55 +388,74 @@ fn filtered_shell_run_supports_a_placeholder_embedded_in_single_quotes() {
 }
 
 #[test]
-fn filtered_shell_run_supports_unquoted_prefix_suffix_and_multiple_occurrences() {
+fn filtered_runner_rejects_shell_control_even_with_safe_placeholder_words() {
     let tmp = tempfile::tempdir().unwrap();
-    let (filter, template, file) = if cfg!(windows) {
-        (
-            "proof&mkdir injected",
-            "if exist prefix-{filter}-suffix (if exist \"prefix-{filter}-suffix\" (exit 0) else (exit 1)) else (exit 1)",
-            "prefix-proof&mkdir injected-suffix",
-        )
-    } else {
-        (
-            "proof;mkdir injected",
-            "test -f prefix-{filter}-suffix && test -f \"prefix-{filter}-suffix\"",
-            "prefix-proof;mkdir injected-suffix",
-        )
-    };
+    let filter = "proof&mkdir injected";
+    let template =
+        "git hash-object prefix-{filter}-suffix && git hash-object \"prefix-{filter}-suffix\"";
+    let file = "prefix-proof&mkdir injected-suffix";
     fs::write(tmp.path().join(file), "proof\n").unwrap();
 
-    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+    let error = run_shell_with_filter(template, filter, tmp.path()).unwrap_err();
 
-    assert_eq!(run.command, template.replace("{filter}", filter).trim_end());
-    assert_eq!(run.result.status, 0);
+    assert_eq!(error.code, ErrorCode::TelosParseError);
     assert!(!tmp.path().join("injected-suffix").exists());
 }
 
-#[cfg(windows)]
 #[test]
-fn filtered_shell_run_disables_windows_injection_metacharacters() {
+fn arithmetic_and_quote_payloads_remain_data_in_a_real_process() {
     let tmp = tempfile::tempdir().unwrap();
-    let filter = "proof&mkdir injected|echo bad^caret%PATH%!delayed!";
+    let filter = "x[$(touch injected)]\"'&call bad";
 
-    let run = run_shell_with_filter("echo {filter} > observed.txt", filter, tmp.path()).unwrap();
+    let run = run_shell_with_filter("git hash-object {filter}", filter, tmp.path()).unwrap();
 
-    assert_eq!(run.result.status, 0);
+    assert_ne!(run.result.status, 0);
     assert!(!tmp.path().join("injected").exists());
-    assert!(
-        fs::read_to_string(tmp.path().join("observed.txt"))
-            .unwrap()
-            .contains(filter)
-    );
+    assert!(!tmp.path().join("bad").exists());
+    assert_eq!(run.command, format!("git hash-object {filter}"));
+}
+
+#[test]
+fn control_byte_filters_fail_closed_before_spawn() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    for filter in ["proof\rpayload", "proof\npayload", "proof\0payload"] {
+        let err =
+            run_shell_with_filter("git hash-object {filter}", filter, tmp.path()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TelosParseError);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nested_shell_and_eval_templates_fail_before_real_injection() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    for template in [
+        "sh -c 'touch injected; git hash-object {filter}'",
+        "eval git hash-object {filter}",
+        "git hash-object $(({filter}))",
+        "git hash-object $(touch injected)",
+        "git hash-object `touch injected`",
+    ] {
+        let err = run_shell_with_filter(template, "1", tmp.path()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TelosParseError, "accepted {template}");
+    }
+    assert!(!tmp.path().join("injected").exists());
 }
 
 #[cfg(windows)]
 #[test]
-fn filtered_shell_run_rejects_a_windows_quote_before_spawn() {
+fn nested_cmd_and_call_templates_fail_before_real_injection() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let err =
-        run_shell_with_filter("echo {filter}", "proof\"&mkdir injected", tmp.path()).unwrap_err();
-
-    assert_eq!(err.code, ErrorCode::TelosParseError);
+    for template in [
+        "cmd /C echo {filter} & mkdir injected",
+        "call git hash-object {filter}",
+        "powershell -Command git hash-object {filter}",
+    ] {
+        let err = run_shell_with_filter(template, "proof", tmp.path()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TelosParseError, "accepted {template}");
+    }
     assert!(!tmp.path().join("injected").exists());
 }

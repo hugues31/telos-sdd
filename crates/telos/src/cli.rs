@@ -140,9 +140,16 @@ enum Command {
         /// opening a new one.
         #[arg(long, value_name = "CHG-NNNN")]
         into: Option<String>,
+        /// Require the exact drift token displayed by `telos status`.
+        #[arg(long, value_name = "SHA256")]
+        expected_state: Option<String>,
     },
     /// Restore every drifted path to the state the seal records.
-    Revert,
+    Revert {
+        /// Require the exact drift token displayed by `telos status`.
+        #[arg(long, value_name = "SHA256")]
+        expected_state: Option<String>,
+    },
     /// Run a scenario's test and seal the verdict as a witness in the change
     /// that owns it.
     Test {
@@ -206,7 +213,7 @@ impl Command {
             Command::Remove { .. } => "remove",
             // The two exits from drift, each its own command (Annex E).
             Command::Adopt { .. } => "adopt",
-            Command::Revert => "revert",
+            Command::Revert { .. } => "revert",
             Command::Test { .. } => "test",
             Command::Bind { .. } => "bind",
         }
@@ -289,8 +296,13 @@ fn execute(command: &Command) -> CmdResult {
         Command::Remove { kind, key, change } => {
             commands::mutate::remove(&ctx()?, *kind, key, change)
         }
-        Command::Adopt { into } => commands::adopt::run(&ctx()?, into.as_deref()),
-        Command::Revert => commands::revert::run(&ctx()?),
+        Command::Adopt {
+            into,
+            expected_state,
+        } => commands::adopt::run(&ctx()?, into.as_deref(), expected_state.as_deref()),
+        Command::Revert { expected_state } => {
+            commands::revert::run(&ctx()?, expected_state.as_deref())
+        }
         Command::Test {
             scenario,
             all,

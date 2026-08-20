@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::changes::OpenChangeInfo;
 use crate::error::TelosError;
@@ -82,6 +83,36 @@ pub struct StateReport {
     /// (D15) -- see [`compute_state`].
     pub drift: Vec<DriftEntry>,
     pub open_changes: Vec<ChangeSummary>,
+}
+
+/// Stable authorization token for one exact seal plus its unclaimed drift
+/// scope. It is displayed by `status` and may be required by drift-mutating
+/// commands at their final decision boundary.
+pub fn drift_token(lock: &Lock, drift: &[DriftEntry]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"telos-drift-v1\0");
+    hasher.update(lock.spec_digest.as_bytes());
+    hasher.update(b"\0");
+    for (table, entries) in [(b's', &lock.spec), (b'c', &lock.code)] {
+        for (path, oid) in entries {
+            hasher.update([table]);
+            hasher.update(path.as_str().as_bytes());
+            hasher.update(b"\0");
+            hasher.update(oid.0.as_bytes());
+            hasher.update(b"\n");
+        }
+    }
+    for entry in drift {
+        hasher.update(entry.path.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(match entry.kind {
+            DriftKind::Modified => b"modified".as_slice(),
+            DriftKind::Missing => b"missing".as_slice(),
+            DriftKind::Untracked => b"untracked".as_slice(),
+        });
+        hasher.update(b"\n");
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 /// Compares `lock` against the live working tree, by OID only, then folds

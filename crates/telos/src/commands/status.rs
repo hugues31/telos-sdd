@@ -16,7 +16,7 @@
 
 use serde_json::{Value, json};
 
-use telos_core::state::{Coverage, ProjectStateKind, StateReport, coverage};
+use telos_core::state::{Coverage, ProjectStateKind, StateReport, coverage, drift_token};
 
 use crate::commands::{Ctx, project, require_sealed_integrity};
 use crate::envelope::{CmdResult, Outcome};
@@ -39,6 +39,7 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     if project.state.state == ProjectStateKind::Coherent {
         require_sealed_integrity(&project)?;
     }
+    let token = drift_token(&project.lock, &project.state.drift);
     let report = project.state;
 
     let cov = project
@@ -50,7 +51,7 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     let drifted = !report.drift.is_empty();
     let drift_value = if drifted {
         let paths: Vec<&str> = report.drift.iter().map(|d| d.path.as_str()).collect();
-        json!({ "paths": paths, "suggestion": "telos adopt" })
+        json!({ "paths": paths, "suggestion": "telos adopt", "token": token.clone() })
     } else {
         Value::Null
     };
@@ -58,7 +59,10 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     // ranks it above `changing` for exactly that reason), and a `changing`
     // project's single next step is to look at what is open.
     let next_actions = match report.state {
-        ProjectStateKind::Drifted => vec!["telos adopt".to_string(), "telos revert".to_string()],
+        ProjectStateKind::Drifted => vec![
+            format!("telos adopt --expected-state {token}"),
+            format!("telos revert --expected-state {token}"),
+        ],
         ProjectStateKind::Changing => vec!["telos change list".to_string()],
         ProjectStateKind::Coherent => Vec::new(),
     };
@@ -72,7 +76,7 @@ pub fn run(ctx: &Ctx) -> CmdResult {
 
     Ok(Outcome {
         result,
-        human: human_summary(&report, drifted, cov),
+        human: human_summary(&report, drifted, cov, &token),
         next_actions,
     })
 }
@@ -80,7 +84,7 @@ pub fn run(ctx: &Ctx) -> CmdResult {
 /// A compact, terse human-readable summary: the state, the drifted paths
 /// (if any), one per line, then the coverage counters. Exact wording is
 /// free -- there is no golden test for it, only for `--json`.
-fn human_summary(report: &StateReport, drifted: bool, cov: Coverage) -> String {
+fn human_summary(report: &StateReport, drifted: bool, cov: Coverage, token: &str) -> String {
     let state_name = match report.state {
         ProjectStateKind::Coherent => "coherent",
         ProjectStateKind::Changing => "changing",
@@ -93,6 +97,7 @@ fn human_summary(report: &StateReport, drifted: bool, cov: Coverage) -> String {
         for entry in &report.drift {
             lines.push(format!("  {}", entry.path));
         }
+        lines.push(format!("drift token: {token}"));
     }
     if !report.open_changes.is_empty() {
         lines.push("changes:".to_string());

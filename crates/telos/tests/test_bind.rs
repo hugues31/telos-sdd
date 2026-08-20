@@ -22,6 +22,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -80,6 +83,39 @@ fn fixture_with_runner() -> TempDir {
         fs::write(
             &path,
             src.replace("cmd = \"\"", &format!("cmd = \"{RUNNER}\"")),
+        )
+        .unwrap();
+    })
+}
+
+/// A direct executable runner that deliberately rewrites the proof file
+/// while it is executing.  The trigger is created only after the fixture is
+/// sealed, so setup itself remains deterministic.
+#[cfg(unix)]
+fn fixture_with_self_rewriting_runner() -> TempDir {
+    with_fixture_mut(|root| {
+        let runner = root.join("rewrite-proof-during-run");
+        fs::write(
+            &runner,
+            "#!/bin/sh\n\
+             if test -f .rewrite-proof-during-run; then\n\
+               printf '\\n// rewritten by the runner\\n' >> tests/billing.rs\n\
+             fi\n\
+             exit 0\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&runner).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&runner, permissions).unwrap();
+
+        let config = root.join("telos/telos.toml");
+        let source = fs::read_to_string(&config).unwrap();
+        fs::write(
+            config,
+            source.replace(
+                "cmd = \"\"",
+                "cmd = \"./rewrite-proof-during-run {filter}\"",
+            ),
         )
         .unwrap();
     })
@@ -257,9 +293,15 @@ fn writing_the_test_into_a_sealed_file_drifts_the_project_first() {
     let envelope = run_json(tmp.path(), &["status", "--json"]);
 
     assert_eq!(envelope["result"]["state"], json!("drifted"));
+    assert_eq!(envelope["result"]["drift"]["paths"], json!([BILLING_TEST]));
     assert_eq!(
-        envelope["result"]["drift"],
-        json!({ "paths": [BILLING_TEST], "suggestion": "telos adopt" })
+        envelope["result"]["drift"]["suggestion"],
+        json!("telos adopt")
+    );
+    assert!(
+        envelope["result"]["drift"]["token"]
+            .as_str()
+            .is_some_and(|token| token.starts_with("sha256:"))
     );
 }
 
@@ -290,6 +332,43 @@ fn test_records_a_green_witness_with_the_annex_c_result() {
             "error": null,
             "next_actions": ["telos change reconcile CHG-0001"]
         })
+    );
+}
+
+/// The verdict belongs to the exact bytes that were executed.  A runner
+/// that edits its own proof target may finish green, but Telos must refuse
+/// before appending any journal evidence.
+#[cfg(unix)]
+#[test]
+fn test_refuses_when_the_runner_rewrites_its_own_test() {
+    let tmp = fixture_with_self_rewriting_runner();
+    open_change(tmp.path());
+    assert_eq!(stage_new_scenario(tmp.path()), SCN);
+    approve(tmp.path());
+    append_test_fn(tmp.path());
+    fs::write(tmp.path().join(".rewrite-proof-during-run"), "go\n").unwrap();
+    let change_before = change_file(tmp.path());
+
+    let out = telos(tmp.path(), &["test", SCN, "--json"])
+        .output()
+        .unwrap();
+    let envelope = json_stdout(&out);
+
+    assert!(!out.status.success(), "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"],
+        json!("TELOS_INTEGRITY_VIOLATION")
+    );
+    assert_eq!(
+        change_file(tmp.path()),
+        change_before,
+        "a verdict for moved bytes must not be journalled"
+    );
+    assert!(
+        fs::read_to_string(tmp.path().join(BILLING_TEST))
+            .unwrap()
+            .contains("rewritten by the runner"),
+        "the mutation runner did not reach its deterministic barrier"
     );
 }
 
@@ -1036,9 +1115,15 @@ fn editing_the_bound_file_drifts_the_project_first() {
     let envelope = run_json(tmp.path(), &["status", "--json"]);
 
     assert_eq!(envelope["result"]["state"], json!("drifted"));
+    assert_eq!(envelope["result"]["drift"]["paths"], json!([INVOICE_CODE]));
     assert_eq!(
-        envelope["result"]["drift"],
-        json!({ "paths": [INVOICE_CODE], "suggestion": "telos adopt" })
+        envelope["result"]["drift"]["suggestion"],
+        json!("telos adopt")
+    );
+    assert!(
+        envelope["result"]["drift"]["token"]
+            .as_str()
+            .is_some_and(|token| token.starts_with("sha256:"))
     );
 }
 

@@ -5,9 +5,9 @@
 //! file is opened through the already-held parent directory handle.
 
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io::{self, Read};
 use std::path::{Component, Path};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::{
@@ -18,8 +18,6 @@ use cap_std::{
 pub(crate) struct SafeRoot {
     dir: Dir,
 }
-
-static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// A complete sibling file that is not visible at its final name yet.
 pub(crate) struct StagedWrite {
@@ -81,6 +79,26 @@ impl SafeRoot {
     pub(crate) fn validate_directory(&self, relative: &Path) -> io::Result<bool> {
         let components = directories(relative)?;
         Ok(self.open_parent(&components, false)?.is_some())
+    }
+
+    /// Lists one directory through the held root without following any
+    /// component symlink. The boolean says whether the entry itself is a
+    /// real directory (symlinks are always `false`).
+    pub(crate) fn directory_entries(
+        &self,
+        relative: &Path,
+    ) -> io::Result<Option<Vec<(OsString, bool)>>> {
+        let components = directories(relative)?;
+        let Some(directory) = self.open_parent(&components, false)? else {
+            return Ok(None);
+        };
+        let mut entries = Vec::new();
+        for entry in directory.entries()? {
+            let entry = entry?;
+            entries.push((entry.file_name(), entry.file_type()?.is_dir()));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(Some(entries))
     }
 
     /// Creates a directory path below the held root, opening every component
@@ -242,6 +260,50 @@ impl StagedWrite {
         Ok(())
     }
 
+    /// Atomically displaces the current owner, validates its exact bytes,
+    /// and publishes only if it is still the owner captured at preflight.
+    /// A stale displaced owner is restored create-only; if another save has
+    /// already acquired the target, the displaced bytes remain at the
+    /// high-entropy backup name rather than being lost.
+    pub(crate) fn publish_replace_if_matches(mut self, expected: &[u8]) -> io::Result<()> {
+        self.validate_staging_identity()?;
+        let backup = unused_private_name(&self.parent, &self.target, "backup")?;
+        self.parent.rename(&self.target, &self.parent, &backup)?;
+
+        let displaced = read_optional_from(&self.parent, &backup);
+        let displaced_matches = displaced
+            .as_ref()
+            .is_ok_and(|bytes| bytes.as_deref() == Some(expected));
+        if !displaced_matches {
+            restore_displaced(&self.parent, &backup, &self.target);
+            return match displaced {
+                Ok(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "target bytes changed before CAS publication",
+                )),
+                Err(error) => Err(error),
+            };
+        }
+
+        match self
+            .parent
+            .hard_link(&self.staging, &self.parent, &self.target)
+        {
+            Ok(()) => {
+                self.published = true;
+                remove_if_owned(&self.parent, &self.staging, self.staging_identity);
+                let _ = self.parent.remove_file(&backup);
+                Ok(())
+            }
+            Err(error) => {
+                // A concurrent owner at the final name wins. Keep the
+                // displaced preflight bytes at `backup` so neither version
+                // is destroyed.
+                Err(error)
+            }
+        }
+    }
+
     fn validate_staging_identity(&self) -> io::Result<()> {
         match self.parent.symlink_metadata(&self.staging) {
             Ok(metadata) if file_identity(&metadata) == self.staging_identity => Ok(()),
@@ -283,12 +345,7 @@ fn reserve_staging(
     target: &std::ffi::OsStr,
 ) -> io::Result<(OsString, cap_std::fs::File)> {
     for _ in 0..128 {
-        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let candidate = OsString::from(format!(
-            ".{}.telos-staging-{}-{sequence}",
-            target.to_string_lossy(),
-            std::process::id()
-        ));
+        let candidate = private_name(target, "staging")?;
         let mut options = OpenOptions::new();
         options
             .write(true)
@@ -304,6 +361,46 @@ fn reserve_staging(
         io::ErrorKind::AlreadyExists,
         "failed to reserve a unique staging file",
     ))
+}
+
+fn unused_private_name(
+    parent: &Dir,
+    target: &std::ffi::OsStr,
+    label: &str,
+) -> io::Result<OsString> {
+    for _ in 0..128 {
+        let candidate = private_name(target, label)?;
+        match parent.symlink_metadata(&candidate) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "failed to reserve a unique private file name",
+    ))
+}
+
+fn private_name(target: &std::ffi::OsStr, label: &str) -> io::Result<OsString> {
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        io::Error::other(format!("failed to generate staging entropy: {error}"))
+    })?;
+    let mut suffix = String::with_capacity(entropy.len() * 2);
+    for byte in entropy {
+        write!(&mut suffix, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(OsString::from(format!(
+        ".{}.telos-{label}-{suffix}",
+        target.to_string_lossy()
+    )))
+}
+
+fn restore_displaced(parent: &Dir, backup: &std::ffi::OsStr, target: &std::ffi::OsStr) {
+    if parent.hard_link(backup, parent, target).is_ok() {
+        let _ = parent.remove_file(backup);
+    }
 }
 
 fn read_optional_from(parent: &Dir, name: &std::ffi::OsStr) -> io::Result<Option<Vec<u8>>> {

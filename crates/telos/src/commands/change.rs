@@ -58,6 +58,9 @@ pub enum ChangeCommand {
     Approve {
         /// The change to approve (`CHG-0001`).
         id: String,
+        /// Require the exact digest displayed by `telos change diff`.
+        #[arg(long, value_name = "SHA256")]
+        expected_digest: Option<String>,
     },
     /// Apply an approved change (write its spec files, reseal, close it),
     /// or reseal the whole project with `--full`.
@@ -78,7 +81,10 @@ pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
         ChangeCommand::List => list(ctx),
         ChangeCommand::Abandon { id } => abandon(ctx, id),
         ChangeCommand::Diff { id } => diff(ctx, id),
-        ChangeCommand::Approve { id } => approve(ctx, id),
+        ChangeCommand::Approve {
+            id,
+            expected_digest,
+        } => approve(ctx, id, expected_digest.as_deref()),
         // `conflicts_with` and `required_unless_present` leave exactly two
         // shapes: an id alone, or `--full` alone.
         ChangeCommand::Reconcile { id: Some(id), .. } => reconcile(ctx, id),
@@ -289,10 +295,18 @@ fn op_human(n: usize, op: &StagedOp, before: &Option<String>, after: &Option<Str
 fn diff_next_actions(change: &Change, stale: bool) -> Vec<String> {
     match change.status {
         ChangeStatus::Open | ChangeStatus::Drafted => {
-            vec![format!("telos change approve {}", change.id)]
+            vec![format!(
+                "telos change approve {} --expected-digest {}",
+                change.id,
+                change.ops_digest()
+            )]
         }
         ChangeStatus::Approved | ChangeStatus::Implementing if stale => {
-            vec![format!("telos change approve {}", change.id)]
+            vec![format!(
+                "telos change approve {} --expected-digest {}",
+                change.id,
+                change.ops_digest()
+            )]
         }
         ChangeStatus::Approved | ChangeStatus::Implementing => {
             vec![format!("telos change reconcile {}", change.id)]
@@ -326,12 +340,20 @@ fn diff_next_actions(change: &Change, stale: bool) -> Vec<String> {
 /// move is the digest -- the freshly staged ops are what was just reviewed
 /// -- while the witnesses already recorded stay judged by the reconcile's
 /// own per-scenario, per-oid gate, never by the digest.
-fn approve(ctx: &Ctx, id: &str) -> CmdResult {
+fn approve(ctx: &Ctx, id: &str, expected_digest: Option<&str>) -> CmdResult {
     let id = parse_change_id(id)?;
     let project = project(ctx)?;
     require_no_unclaimed_drift(&project)?;
 
     let mut change = read_change(&project.ws, id)?;
+    let current_digest = change.ops_digest();
+    if expected_digest.is_some_and(|expected| expected != current_digest) {
+        return Err(TelosError::new(
+            ErrorCode::TelosChangeStateInvalid,
+            format!("change {id} no longer matches the expected digest"),
+        )
+        .hint("run `telos change diff` again and review the new digest"));
+    }
     if change.ops.is_empty() {
         return Err(TelosError::new(
             ErrorCode::TelosChangeStateInvalid,
@@ -347,7 +369,7 @@ fn approve(ctx: &Ctx, id: &str) -> CmdResult {
         _ => ChangeStatus::Approved,
     };
     change.status = status;
-    change.approved_digest = Some(change.ops_digest());
+    change.approved_digest = Some(current_digest);
     write_change(&project.ws, &change)?;
 
     let digest = change.approved_digest.expect("just set above");

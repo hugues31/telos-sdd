@@ -34,8 +34,10 @@ use serde_json::json;
 use telos_core::adopt::plan_adopt;
 use telos_core::changes::{read_change, write_change};
 use telos_core::counters::write_counters;
+use telos_core::error::{ErrorCode, TelosError};
 use telos_core::model::{Change, ChangeStatus};
 use telos_core::overlay::validate_ops_idempotent;
+use telos_core::state::drift_token;
 
 use crate::commands::change::parse_change_id;
 use crate::commands::mutate::require_unclaimed;
@@ -49,7 +51,7 @@ use crate::envelope::{CmdResult, Outcome};
 const MOTIVATION: &str = "adopted drift";
 
 /// `telos adopt`, and `telos adopt --into CHG-NNNN`.
-pub fn run(ctx: &Ctx, into: Option<&str>) -> CmdResult {
+pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdResult {
     // A malformed id is the caller's mistake and saying so needs no
     // workspace -- the same order `change abandon` and the staging verbs
     // use.
@@ -57,6 +59,7 @@ pub fn run(ctx: &Ctx, into: Option<&str>) -> CmdResult {
 
     let project = project(ctx)?;
     require_drift(&project, "adopt")?;
+    require_expected_state(&project, expected_state)?;
 
     // Before the allocator, deliberately: [`allocator`] loads the model, and
     // a spec that does not parse is exactly what an unparseable drifted file
@@ -120,4 +123,19 @@ pub fn run(ctx: &Ctx, into: Option<&str>) -> CmdResult {
             format!("telos change approve {id}"),
         ],
     })
+}
+
+fn require_expected_state(
+    project: &crate::commands::Project,
+    expected: Option<&str>,
+) -> Result<(), TelosError> {
+    let current = drift_token(&project.lock, &project.state.drift);
+    if expected.is_some_and(|expected| expected != current) {
+        return Err(TelosError::new(
+            ErrorCode::TelosChangeStateInvalid,
+            "project drift no longer matches the expected state token",
+        )
+        .hint("run `telos status` again and review the new drift scope"));
+    }
+    Ok(())
 }

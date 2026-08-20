@@ -52,7 +52,7 @@ pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
     let agents = read_optional_text(root, "AGENTS.md")?;
     writes.push(planned_merged_text(
         "AGENTS.md",
-        merge_owned_block(&agents.value, START, END, AGENTS_BLOCK),
+        merge_owned_block(&agents.value, START, END, AGENTS_BLOCK)?,
         agents.initial,
     ));
 
@@ -74,7 +74,7 @@ pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
         "# telos-sdd:start",
         "# telos-sdd:end",
         RULES_BLOCK,
-    );
+    )?;
     writes.push(planned_merged_text(
         ".codex/rules/telos.rules",
         merged,

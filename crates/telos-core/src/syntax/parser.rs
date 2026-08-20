@@ -1264,7 +1264,8 @@ impl<'a> P<'a> {
             let intent = self.expect_intent_id()?;
             self.end_of_field()?;
             return Ok(Binding::Implements {
-                path: RepoPath::new(path.node),
+                path: RepoPath::parse_outside_telos(path.node)
+                    .map_err(|err| self.diag_at(path.span, err.message, err.hint))?,
                 intent,
             });
         }
@@ -1594,8 +1595,8 @@ impl<'a> P<'a> {
     /// decide the phase; the final `Err` is unreachable in practice and
     /// kept so the rule reads on its own.
     ///
-    /// Both line kinds name a path, and neither may name one under
-    /// `telos/` ([`P::code_path_outside_the_spec_tree`]) -- the rule that
+    /// Both line kinds name a validated path, and neither may name one under
+    /// `telos/` -- the rule that
     /// makes [`crate::model::Change::claims`]'s guarantee a property of the
     /// grammar rather than of the commands that usually write these lines.
     fn journal_line(&mut self) -> Result<JournalEntry, Diagnostic> {
@@ -1606,7 +1607,6 @@ impl<'a> P<'a> {
             let text = self.expect_str("a test reference")?;
             let test = TestRef::from_str(&text.node)
                 .map_err(|err| self.diag_at(text.span, err.message, err.hint))?;
-            self.code_path_outside_the_spec_tree(&test.path, text.span)?;
             // The oid is opaque (D1): 40 hex in a sha1 repository, 64 in a
             // sha256 one, and never anything this parser should adjudicate.
             let oid = self.expect_str("the blob oid string after the test reference")?;
@@ -1621,8 +1621,8 @@ impl<'a> P<'a> {
         if self.at_kw("bind") {
             self.advance();
             let text = self.expect_str("a code path")?;
-            let path = RepoPath::new(text.node);
-            self.code_path_outside_the_spec_tree(&path, text.span)?;
+            let path = RepoPath::parse_outside_telos(text.node)
+                .map_err(|err| self.diag_at(text.span, err.message, err.hint))?;
             self.expect(&TokKind::Arrow, "`->`")?;
             let intent = self.expect_intent_id()?.node;
             self.end_of_field()?;
@@ -1648,21 +1648,6 @@ impl<'a> P<'a> {
     /// Enforced here rather than in the commands that normally write these
     /// lines, because a change file is a plain text file an agent may edit
     /// by hand: the invariant has to be a property of what parses.
-    fn code_path_outside_the_spec_tree(
-        &self,
-        path: &RepoPath,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
-        if !path.as_str().starts_with("telos/") {
-            return Ok(());
-        }
-        Err(self.diag_at(
-            span,
-            "a journal line cannot name a path under telos/".to_string(),
-            Some("journal lines name code and test files; the spec tree is written by ops and by reconcile".to_string()),
-        ))
-    }
-
     /// The two verdicts a run may carry.
     fn witness(&mut self) -> Result<Witness, Diagnostic> {
         self.listed_word(WITNESS_WORDS, &WITNESSES)
@@ -1675,7 +1660,8 @@ impl<'a> P<'a> {
         let oid = self.expect_str("the blob oid string after the path")?;
         self.end_of_field()?;
         Ok(StagedOp::Accept {
-            path: RepoPath::new(path.node),
+            path: RepoPath::parse(path.node)
+                .map_err(|err| self.diag_at(path.span, err.message, err.hint))?,
             oid: Oid(oid.node),
         })
     }

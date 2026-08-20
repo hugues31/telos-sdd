@@ -4,9 +4,10 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use serde_json::json;
+use telos_core::changes::scan_changes;
 use telos_core::error::{ErrorCode, TelosError};
 
-use telos_core::state::ProjectStateKind;
+use telos_core::state::{ProjectStateKind, compute_state};
 
 use crate::commands::{
     Ctx, diagnostics_to_error, project, require_no_open_changes, require_no_unclaimed_drift,
@@ -18,7 +19,7 @@ use crate::view::model::ViewSnapshot;
 use crate::view::server::LiveServer;
 
 pub fn export(ctx: &Ctx, destination: &str) -> CmdResult {
-    let project = project(ctx)?;
+    let mut project = project(ctx)?;
     // Match `check --sealed` gate order exactly: damage wins over work in
     // progress, and neither state is permitted to publish as a sealed view.
     require_no_unclaimed_drift(&project)?;
@@ -26,6 +27,15 @@ pub fn export(ctx: &Ctx, destination: &str) -> CmdResult {
 
     debug_assert_eq!(project.state.state, ProjectStateKind::Coherent);
     let model = project.ws.load_model().map_err(diagnostics_to_error)?;
+    // Authenticate the exact model read above. A normal save between the
+    // first state pass and model loading is now visible here, and a newly
+    // opened change is included by the fresh single scan.
+    let scan = scan_changes(&project.ws)?;
+    project.state = compute_state(&project.ws, &project.lock, &project.git, &scan.infos)?;
+    project.changes = scan.infos;
+    project.parsed = scan.parsed;
+    require_no_unclaimed_drift(&project)?;
+    require_no_open_changes(&project)?;
     let snapshot = ViewSnapshot::build(&project.state, &model);
     let files = export_snapshot(&snapshot, destination.as_ref())?;
     let files: Vec<String> = files

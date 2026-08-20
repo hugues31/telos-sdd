@@ -13,6 +13,7 @@
 //! necessarily a question about the working tree.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::fs;
 
 use crate::emit::emit_scenario_fragment;
@@ -77,7 +78,7 @@ pub fn find_test_for(
     let pattern = scenario_pattern(id);
 
     if let Some(path) = file {
-        if !ws.abs_path(path).is_file() {
+        if ws.read_optional_bytes(path)?.is_none() {
             return Err(TelosError::new(
                 ErrorCode::TelosTestNotFound,
                 format!("the file passed with --file does not exist: `{path}`"),
@@ -118,13 +119,7 @@ pub fn find_test_for(
 /// and a file vanishing between the glob walk and this read is a filesystem
 /// race, not a modelling question.
 fn read_bytes(ws: &Workspace, path: &RepoPath) -> Result<Vec<u8>, TelosError> {
-    let abs = ws.abs_path(path);
-    fs::read(&abs).map_err(|e| {
-        TelosError::new(
-            ErrorCode::TelosInternal,
-            format!("failed to read {path}: {e}"),
-        )
-    })
+    ws.read_bytes(path)
 }
 
 /// Finds `pattern` as a raw byte substring of `bytes`, at an *identifier

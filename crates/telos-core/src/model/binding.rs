@@ -57,7 +57,7 @@ impl FromStr for TestRef {
             ));
         }
         Ok(TestRef {
-            path: RepoPath::new(path),
+            path: RepoPath::parse_outside_telos(path)?,
             name,
         })
     }
@@ -141,6 +141,16 @@ mod tests {
     #[test]
     fn test_ref_rejects_an_empty_path_before_the_separator() {
         assert!("::scn_0107".parse::<TestRef>().is_err());
+    }
+
+    #[test]
+    fn test_ref_rejects_repository_escapes_and_spec_paths() {
+        for reference in ["../outside.rs", "tests/../outside.rs", "telos/a.tel"] {
+            assert!(
+                reference.parse::<TestRef>().is_err(),
+                "accepted {reference}"
+            );
+        }
     }
 
     #[test]

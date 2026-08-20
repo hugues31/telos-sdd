@@ -151,42 +151,15 @@ fn known_intents(project: &Project) -> Result<BTreeSet<IntentId>, TelosError> {
 /// any platform), with no `..` component escaping the tree, and not naming
 /// anything under `telos/`.
 fn parse_repo_path(arg: &str) -> Result<RepoPath, TelosError> {
-    if !is_repo_relative(arg) {
-        return Err(TelosError::new(
+    RepoPath::parse_outside_telos(arg).map_err(|error| {
+        if error.message == "a journal line cannot name a path under telos/" {
+            return error;
+        }
+        TelosError::new(
             ErrorCode::TelosReferenceUnknown,
             format!("cannot parse `{arg}` as a repository-relative path"),
-        ));
-    }
-    if arg.starts_with("telos/") {
-        // The grammar refuses this too, and for the same reason (D2, D3,
-        // D9) -- see the module doc's second ruling. Same message and same
-        // hint, whether it is this check or `parse_change_file` reading the
-        // line back afterwards that catches it.
-        return Err(TelosError::new(
-            ErrorCode::TelosReferenceUnknown,
-            "a journal line cannot name a path under telos/",
         )
-        .hint(
-            "journal lines name code and test files; the spec tree is written by ops and by reconcile",
-        ));
-    }
-    Ok(RepoPath::new(arg))
-}
-
-/// Whether `arg` is usable as a repo-relative path (see
-/// [`parse_repo_path`]): not empty, not absolute, and free of any `..`
-/// component.
-fn is_repo_relative(arg: &str) -> bool {
-    if arg.is_empty() || arg.starts_with('/') {
-        return false;
-    }
-    let path = std::path::Path::new(arg);
-    if path.is_absolute() {
-        return false;
-    }
-    !path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
+    })
 }
 
 /// D5's ownership rule: the open change whose delta adds or edits the

@@ -137,7 +137,7 @@ fn walk(root: &Path, dir: &Path, set: &GlobSet, out: &mut Vec<RepoPath>) -> Resu
         };
         let repo_path = to_repo_path_str(rel);
         if set.is_match(&repo_path) {
-            out.push(RepoPath::new(repo_path));
+            out.push(RepoPath::parse_outside_telos(repo_path)?);
         }
     }
     Ok(())

@@ -53,41 +53,25 @@ pub fn run_shell(cmd: &str, cwd: &Path) -> Result<RunResult, TelosError> {
     Ok(run_result(output))
 }
 
-/// Displays D10's exact literal substitution while executing a non-empty
-/// filter through one quoted environment expansion.
-///
-/// Shell syntax inside a spec-owned test locator must stay data. The command
-/// returned in [`FilteredRun::command`] remains byte-for-byte
-/// [`substitute_filter`], preserving the public contract. The process itself
-/// receives the filter through a private environment variable referenced
-/// inside shell quotes, so spaces and metacharacters cannot split it into
-/// more commands. Empty filters and templates without `{filter}` retain the
-/// historical exact execution path.
+/// Displays D10's exact literal substitution while executing a deliberately
+/// restricted runner template as a direct process argv. No shell sees the
+/// filter; it remains data even in embedded words such as `module::{filter}`.
 pub fn run_shell_with_filter(
     template: &str,
     filter: &str,
     cwd: &Path,
 ) -> Result<FilteredRun, TelosError> {
     let command = substitute_filter(template, filter);
-    if filter.is_empty() || !template.contains("{filter}") {
-        return Ok(FilteredRun {
-            result: run_shell(&command, cwd)?,
-            command,
-        });
-    }
-
-    const FILTER_ENV: &str = "TELOS_INTERNAL_TEST_FILTER";
-    let shell = ShellFlavor::current();
-    validate_filter_data(filter, shell)?;
-    let executable = rewrite_filter_template(template, shell)?;
-    let output = filtered_shell_command(&executable)
-        .env(FILTER_ENV, filter)
+    validate_filter_data(filter)?;
+    let argv = parse_runner_template(template, filter)?;
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
         .current_dir(cwd)
         .output()
         .map_err(|e| {
             TelosError::new(
                 ErrorCode::TelosInternal,
-                format!("failed to spawn the platform shell to run `{command}`: {e}"),
+                format!("failed to spawn the test runner displayed as `{command}`: {e}"),
             )
         })?;
 
@@ -97,70 +81,39 @@ pub fn run_shell_with_filter(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ShellFlavor {
-    Unix,
-    Windows,
-}
-
-impl ShellFlavor {
-    fn current() -> Self {
-        if cfg!(windows) {
-            Self::Windows
-        } else {
-            Self::Unix
-        }
-    }
-
-    fn expansion(self, quote: Option<char>) -> &'static str {
-        match (self, quote) {
-            (Self::Unix, None) => "\"$TELOS_INTERNAL_TEST_FILTER\"",
-            (Self::Unix, Some('"')) => "$TELOS_INTERNAL_TEST_FILTER",
-            (Self::Unix, Some('\'')) => "'\"$TELOS_INTERNAL_TEST_FILTER\"'",
-            (Self::Windows, None) => "\"%TELOS_INTERNAL_TEST_FILTER%\"",
-            (Self::Windows, Some('"')) => "%TELOS_INTERNAL_TEST_FILTER%",
-            _ => unreachable!("only the shell's active quote styles are tracked"),
-        }
-    }
-}
-
-/// Refuses filter bytes `cmd.exe` cannot keep inside one quoted data argument.
-/// Delayed expansion is disabled separately, so `!` remains ordinary data;
-/// `%` expansion is not recursive, and the other cmd metacharacters stay
-/// inert inside the quotes introduced by [`rewrite_filter_template`].
-fn validate_filter_data(filter: &str, shell: ShellFlavor) -> Result<(), TelosError> {
-    let invalid = filter.contains('\0')
-        || (shell == ShellFlavor::Windows
-            && (filter.contains('"') || filter.contains('\r') || filter.contains('\n')));
-    if invalid {
+fn validate_filter_data(filter: &str) -> Result<(), TelosError> {
+    if filter.chars().any(char::is_control) {
         return Err(TelosError::new(
             ErrorCode::TelosParseError,
-            "test filter contains bytes that cannot be passed safely to the platform shell",
+            "test filter contains control bytes that cannot be passed safely",
         ));
     }
     Ok(())
 }
 
-/// Rewrites every `{filter}` according to its shell quote context.
-///
-/// Outside quotes the environment expansion receives its own double quotes.
-/// Inside double quotes the surrounding template already provides them. A
-/// Unix single-quoted region is closed for one quoted expansion and reopened,
-/// preserving normal shell concatenation for embedded forms such as
-/// `'module::{filter}'`. The public displayed command remains the independent
-/// literal substitution produced before this function is called.
-fn rewrite_filter_template(template: &str, shell: ShellFlavor) -> Result<String, TelosError> {
+fn parse_runner_template(template: &str, filter: &str) -> Result<Vec<String>, TelosError> {
     const FILTER: &str = "{filter}";
-
-    let mut executable = String::with_capacity(template.len() + 32);
-    let mut quote = None;
+    let unsafe_template = || {
+        TelosError::new(
+            ErrorCode::TelosParseError,
+            "unsafe [test] cmd: use one direct executable with simple quoted arguments; shell operators, substitutions, eval/call and nested interpreters are not supported",
+        )
+        .hint("use a dedicated runner script and pass `{filter}` as one direct argument")
+    };
+    let mut argv = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
     let mut index = 0;
 
     while index < template.len() {
         let rest = &template[index..];
 
         if rest.starts_with(FILTER) {
-            executable.push_str(shell.expansion(quote));
+            if !filter.is_empty() {
+                word.push_str(filter);
+                in_word = true;
+            }
             index += FILTER.len();
             continue;
         }
@@ -169,40 +122,86 @@ fn rewrite_filter_template(template: &str, shell: ShellFlavor) -> Result<String,
             .chars()
             .next()
             .expect("index is within the command string");
-        executable.push(character);
         index += character.len_utf8();
 
-        if is_shell_escape(character, quote, shell) {
-            if template[index..].starts_with(FILTER) {
-                return Err(TelosError::new(
-                    ErrorCode::TelosParseError,
-                    "unsafe [test] cmd: {filter} cannot be shell-escaped",
-                ));
-            }
-            if let Some(escaped) = template[index..].chars().next() {
-                executable.push(escaped);
-                index += escaped.len_utf8();
+        if character.is_control() && !character.is_whitespace() {
+            return Err(unsafe_template());
+        }
+        if quote.is_none() && character.is_whitespace() {
+            if in_word {
+                argv.push(std::mem::take(&mut word));
+                in_word = false;
             }
             continue;
         }
-
+        if "$`;&|<>()".contains(character) {
+            return Err(unsafe_template());
+        }
         match quote {
-            Some(active) if character == active => quote = None,
-            None if character == '"' || (shell == ShellFlavor::Unix && character == '\'') => {
-                quote = Some(character)
+            Some(active) if character == active => {
+                quote = None;
+                in_word = true;
             }
-            _ => {}
+            None if matches!(character, '\'' | '"') => {
+                quote = Some(character);
+                in_word = true;
+            }
+            Some('\'') => {
+                word.push(character);
+                in_word = true;
+            }
+            _ if character == '\\' => {
+                let Some(escaped) = template[index..].chars().next() else {
+                    return Err(unsafe_template());
+                };
+                if matches!(escaped, '\n' | '\r') {
+                    return Err(unsafe_template());
+                }
+                word.push(escaped);
+                in_word = true;
+                index += escaped.len_utf8();
+            }
+            _ => {
+                word.push(character);
+                in_word = true;
+            }
         }
     }
-
-    Ok(executable.trim_end().to_string())
-}
-
-fn is_shell_escape(character: char, quote: Option<char>, shell: ShellFlavor) -> bool {
-    match shell {
-        ShellFlavor::Windows => character == '^',
-        ShellFlavor::Unix => character == '\\' && quote != Some('\''),
+    if quote.is_some() {
+        return Err(unsafe_template());
     }
+    if in_word {
+        argv.push(word);
+    }
+    if argv.is_empty() {
+        return Err(unsafe_template());
+    }
+    const INTERPRETERS: &[&str] = &[
+        "sh",
+        "bash",
+        "dash",
+        "zsh",
+        "fish",
+        "cmd",
+        "cmd.exe",
+        "powershell",
+        "powershell.exe",
+        "pwsh",
+        "eval",
+        "call",
+        "env",
+    ];
+    if argv.iter().any(|arg| {
+        let basename = std::path::Path::new(arg)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(arg)
+            .to_ascii_lowercase();
+        INTERPRETERS.contains(&basename.as_str())
+    }) {
+        return Err(unsafe_template());
+    }
+    Ok(argv)
 }
 
 fn run_result(output: std::process::Output) -> RunResult {
@@ -229,19 +228,6 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-/// Builds the shell command used only for data-bearing filtered runs.
-/// Windows explicitly disables AutoRun and delayed `!name!` expansion so an
-/// exclamation mark originating in the environment value remains data.
-fn filtered_shell_command(cmd: &str) -> Command {
-    if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.args(["/D", "/V:OFF", "/C", cmd]);
-        command
-    } else {
-        shell_command(cmd)
-    }
-}
-
 /// Replaces every occurrence of the literal `{filter}` in `cmd` with
 /// `filter`, then `trim_end`s the whole result (D10).
 ///
@@ -256,61 +242,67 @@ pub fn substitute_filter(cmd: &str, filter: &str) -> String {
 
 #[cfg(test)]
 mod filter_rewrite_tests {
-    use super::{ShellFlavor, rewrite_filter_template, validate_filter_data};
-    use crate::error::ErrorCode;
-
-    const UNIX_ENV: &str = "TELOS_INTERNAL_TEST_FILTER";
+    use super::{parse_runner_template, validate_filter_data};
 
     #[test]
-    fn unix_rewrite_preserves_composition_in_every_quote_context() {
+    fn direct_runner_preserves_composition_in_every_quote_context() {
         assert_eq!(
-            rewrite_filter_template(
+            parse_runner_template(
                 "runner module::{filter}_case \"double::{filter}\" 'single::{filter}'",
-                ShellFlavor::Unix,
+                "proof;still-data",
             )
             .unwrap(),
-            format!(
-                "runner module::\"${UNIX_ENV}\"_case \"double::${UNIX_ENV}\" \
-                 'single::'\"${UNIX_ENV}\"''"
-            )
+            [
+                "runner",
+                "module::proof;still-data_case",
+                "double::proof;still-data",
+                "single::proof;still-data",
+            ]
         );
     }
 
     #[test]
-    fn unix_rewrite_handles_whole_quoted_and_multiple_placeholders() {
+    fn an_empty_trailing_filter_does_not_create_an_empty_argument() {
         assert_eq!(
-            rewrite_filter_template(
-                "runner \"{filter}\" '{filter}' {filter}-{filter}",
-                ShellFlavor::Unix,
-            )
-            .unwrap(),
-            format!(
-                "runner \"${UNIX_ENV}\" ''\"${UNIX_ENV}\"'' \
-                 \"${UNIX_ENV}\"-\"${UNIX_ENV}\""
-            )
+            parse_runner_template("git hash-object {filter}", "").unwrap(),
+            ["git", "hash-object"]
         );
-    }
-
-    #[test]
-    fn windows_rewrite_uses_the_existing_double_quote_context() {
         assert_eq!(
-            rewrite_filter_template(
-                "runner module::{filter}_case \"double::{filter}\" \"{filter}\"",
-                ShellFlavor::Windows,
-            )
-            .unwrap(),
-            "runner module::\"%TELOS_INTERNAL_TEST_FILTER%\"_case \
-             \"double::%TELOS_INTERNAL_TEST_FILTER%\" \
-             \"%TELOS_INTERNAL_TEST_FILTER%\""
+            parse_runner_template("runner prefix-{filter}-suffix", "").unwrap(),
+            ["runner", "prefix--suffix"]
+        );
+        assert_eq!(
+            parse_runner_template("runner \"{filter}\"", "").unwrap(),
+            ["runner", ""]
         );
     }
 
     #[test]
-    fn windows_validation_accepts_metacharacters_but_rejects_quote_and_controls() {
-        validate_filter_data("proof&other|caret^percent%bang!", ShellFlavor::Windows).unwrap();
-        for invalid in ["bad\"quote", "bad\rreturn", "bad\nline", "bad\0nul"] {
-            let err = validate_filter_data(invalid, ShellFlavor::Windows).unwrap_err();
-            assert_eq!(err.code, ErrorCode::TelosParseError);
+    fn nested_interpretation_is_rejected() {
+        for template in [
+            "sh -c 'runner {filter}'",
+            "cmd /C runner {filter}",
+            "eval runner {filter}",
+            "runner $(({filter}))",
+            "runner $(echo {filter})",
+            "runner `echo {filter}`",
+            "runner {filter} && second",
+        ] {
+            assert!(
+                parse_runner_template(template, "proof").is_err(),
+                "accepted {template}"
+            );
         }
+    }
+
+    #[test]
+    fn filter_controls_are_rejected_but_quotes_are_plain_data() {
+        for filter in ["line\nbreak", "line\rbreak", "nul\0byte"] {
+            assert!(validate_filter_data(filter).is_err());
+        }
+        assert_eq!(
+            parse_runner_template("runner {filter}", "proof\"'literal").unwrap(),
+            ["runner", "proof\"'literal"]
+        );
     }
 }

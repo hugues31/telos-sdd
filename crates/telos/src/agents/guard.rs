@@ -44,11 +44,11 @@ struct SimpleCommand {
     native_rule_covered: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HumanAction {
-    Approve(ChangeId),
-    Adopt,
-    Revert,
+    Approve(ChangeId, String),
+    Adopt(String),
+    Revert(String),
 }
 
 /// Reads one official hook event from stdin and prints the host's structured
@@ -172,7 +172,7 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
             Err(()) => return deny_unbound_action(),
         };
         if let Some(action) = action {
-            let Ok(context) = decision_context(action, &cwd) else {
+            let Ok(context) = decision_context(&action, &cwd) else {
                 return deny_unbound_action();
             };
             if host == AgentHost::Claude {
@@ -885,11 +885,11 @@ fn is_read_only_git_subcommand(subcommand: &str) -> bool {
 }
 
 impl HumanAction {
-    fn name(self) -> &'static str {
+    fn name(&self) -> &'static str {
         match self {
-            Self::Approve(_) => "telos change approve",
-            Self::Adopt => "telos adopt",
-            Self::Revert => "telos revert",
+            Self::Approve(_, _) => "telos change approve",
+            Self::Adopt(_) => "telos adopt",
+            Self::Revert(_) => "telos revert",
         }
     }
 }
@@ -917,19 +917,26 @@ fn human_action(commands: &[SimpleCommand]) -> Result<Option<HumanAction>, ()> {
     }
 
     match command.argv.as_slice() {
-        [program, change, approve, id]
+        [program, change, approve, id, flag, digest]
             if program == "telos" && change == "change" && approve == "approve" =>
         {
+            if flag != "--expected-digest" {
+                return Err(());
+            }
             id.parse::<ChangeId>()
-                .map(HumanAction::Approve)
+                .map(|id| HumanAction::Approve(id, digest.clone()))
                 .map(Some)
                 .map_err(|_| ())
         }
-        [program, action] if program == "telos" && action == "adopt" => {
-            Ok(Some(HumanAction::Adopt))
+        [program, action, flag, token]
+            if program == "telos" && action == "adopt" && flag == "--expected-state" =>
+        {
+            Ok(Some(HumanAction::Adopt(token.clone())))
         }
-        [program, action] if program == "telos" && action == "revert" => {
-            Ok(Some(HumanAction::Revert))
+        [program, action, flag, token]
+            if program == "telos" && action == "revert" && flag == "--expected-state" =>
+        {
+            Ok(Some(HumanAction::Revert(token.clone())))
         }
         _ if is_human_action_attempt(command) => Err(()),
         _ => Ok(None),
@@ -950,20 +957,28 @@ fn is_human_action_attempt(command: &SimpleCommand) -> bool {
             .any(|word| matches!(word.as_str(), "adopt" | "revert")))
 }
 
-fn decision_context(action: HumanAction, cwd: &Path) -> Result<DecisionContext, ()> {
+fn decision_context(action: &HumanAction, cwd: &Path) -> Result<DecisionContext, ()> {
     let workspace = Workspace::discover(cwd).map_err(|_| ())?;
     let text = match action {
-        HumanAction::Approve(id) => {
-            let change = read_change(&workspace, id).map_err(|_| ())?;
-            format!("change {id} digest {}", change.ops_digest())
+        HumanAction::Approve(id, expected) => {
+            let change = read_change(&workspace, *id).map_err(|_| ())?;
+            let digest = change.ops_digest();
+            if digest != expected.as_str() {
+                return Err(());
+            }
+            format!("change {id} digest {digest}; token-bound command confirmed")
         }
-        HumanAction::Adopt | HumanAction::Revert => {
+        HumanAction::Adopt(expected) | HumanAction::Revert(expected) => {
             let lock = Lock::read(&workspace.lock_path())
                 .map_err(|_| ())?
                 .ok_or(())?;
             let git = GitRepo::discover(cwd).map_err(|_| ())?;
             let changes = scan_changes(&workspace).map_err(|_| ())?;
             let state = compute_state(&workspace, &lock, &git, &changes.infos).map_err(|_| ())?;
+            let token = telos_core::state::drift_token(&lock, &state.drift);
+            if token != expected.as_str() {
+                return Err(());
+            }
             let paths = state
                 .drift
                 .iter()

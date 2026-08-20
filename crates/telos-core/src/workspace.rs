@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::error::{Diagnostic, ErrorCode, TelosError};
 use crate::ids::RepoPath;
 use crate::model::{TelFile, TelosModel};
+use crate::repo_fs::RepoFs;
 use crate::semantic::build_model;
 use crate::syntax::{
     parse_bindings_file, parse_constraint_file, parse_intent_file, parse_notion_file,
@@ -52,9 +53,10 @@ impl Workspace {
         let mut dir = cwd.to_path_buf();
         loop {
             let telos_dir = dir.join("telos");
-            let config_path = telos_dir.join("telos.toml");
-            if config_path.is_file() {
-                let config = load_config(&config_path)?;
+            let safe_root = RepoFs::open(&dir)?;
+            let config_path = RepoPath::new("telos/telos.toml");
+            if let Some(bytes) = safe_root.read_optional(&config_path)? {
+                let config = load_config_bytes(&bytes)?;
                 return Ok(Workspace {
                     repo_root: dir,
                     telos_dir,
@@ -125,13 +127,12 @@ impl Workspace {
                 continue;
             }
 
-            let abs_path = self.abs_path(&repo_path);
-            let src = match fs::read_to_string(&abs_path) {
+            let src = match self.read_to_string(&repo_path) {
                 Ok(src) => src,
                 Err(e) => {
                     diagnostics.push(Diagnostic {
                         code: ErrorCode::TelosInternal,
-                        message: format!("failed to read {repo_path}: {e}"),
+                        message: format!("failed to read {repo_path}: {}", e.message),
                         hint: None,
                         file: Some(repo_path),
                         line: None,
@@ -174,12 +175,33 @@ impl Workspace {
     /// ops name, and an op names its target as a [`RepoPath`] -- resolving
     /// it anywhere else would be a second, independently-maintained answer
     /// to "where does this path live on this OS".
-    pub fn abs_path(&self, repo_path: &RepoPath) -> PathBuf {
+    pub fn abs_path(&self, repo_path: &RepoPath) -> Result<PathBuf, TelosError> {
+        repo_path.validate()?;
         let mut path = self.repo_root.clone();
         for component in repo_path.as_str().split('/') {
             path.push(component);
         }
-        path
+        Ok(path)
+    }
+
+    /// Reads a repository file through a root capability and refuses every
+    /// symlink encountered along the path.
+    pub fn read_bytes(&self, repo_path: &RepoPath) -> Result<Vec<u8>, TelosError> {
+        RepoFs::open(&self.repo_root)?.read(repo_path)
+    }
+
+    pub fn read_optional_bytes(&self, repo_path: &RepoPath) -> Result<Option<Vec<u8>>, TelosError> {
+        RepoFs::open(&self.repo_root)?.read_optional(repo_path)
+    }
+
+    pub fn read_to_string(&self, repo_path: &RepoPath) -> Result<String, TelosError> {
+        let bytes = self.read_bytes(repo_path)?;
+        String::from_utf8(bytes).map_err(|error| {
+            TelosError::new(
+                ErrorCode::TelosParseError,
+                format!("repository path `{repo_path}` is not UTF-8: {error}"),
+            )
+        })
     }
 }
 
@@ -203,14 +225,11 @@ fn parse_spec_file(repo_path: &RepoPath, src: &str) -> Result<TelFile, Vec<Diagn
 }
 
 /// Reads `telos.toml` at `path` and parses it into a [`Config`].
-fn load_config(path: &Path) -> Result<Config, TelosError> {
-    let src = fs::read_to_string(path).map_err(|e| {
-        TelosError::new(
-            ErrorCode::TelosInternal,
-            format!("failed to read {}: {e}", path.display()),
-        )
+fn load_config_bytes(bytes: &[u8]) -> Result<Config, TelosError> {
+    let src = std::str::from_utf8(bytes).map_err(|e| {
+        TelosError::new(ErrorCode::TelosParseError, format!("telos/telos.toml: {e}"))
     })?;
-    let mut config: Config = toml::from_str(&src).map_err(|e| {
+    let mut config: Config = toml::from_str(src).map_err(|e| {
         TelosError::new(ErrorCode::TelosParseError, format!("telos/telos.toml: {e}"))
     })?;
     config.normalize();
@@ -239,15 +258,23 @@ fn collect_tel_files(dir: &Path, prefix: &str, out: &mut Vec<RepoPath>) -> Resul
                 format!("failed to read {}: {e}", dir.display()),
             )
         })?;
-        let path = entry.path();
-        if !path.is_file() {
+        if !entry
+            .file_type()
+            .map_err(|e| {
+                TelosError::new(
+                    ErrorCode::TelosInternal,
+                    format!("failed to inspect {}: {e}", entry.path().display()),
+                )
+            })?
+            .is_file()
+        {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
         if name.ends_with(".tel") {
-            out.push(RepoPath::new(format!("{prefix}/{name}")));
+            out.push(RepoPath::parse(format!("{prefix}/{name}"))?);
         }
     }
     Ok(())

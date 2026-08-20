@@ -12,7 +12,7 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,6 +24,7 @@ use telos_core::emit::emit_config;
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::lock::{Lock, seal};
+use telos_core::reconcile::require_sealable_structure;
 use telos_core::workspace::Workspace;
 
 use crate::ci::{self, CiProvider};
@@ -179,8 +180,8 @@ where
             if config_exists {
                 return Err(already_initialized(&config_path));
             }
-            validate_directory_shapes(&safe_root, false)?;
-            let core = CorePlan::capture(&safe_root, config_bytes)?;
+            validate_telos_tree(&safe_root, false)?;
+            let core = CorePlan::fresh(&safe_root, config_bytes)?;
             let marker = InitMarker {
                 format: "telos-init-v2".to_string(),
                 agents: requested_agents,
@@ -264,11 +265,8 @@ where
 }
 
 impl CorePlan {
-    fn capture(safe_root: &SafeRoot, config: Vec<u8>) -> Result<Self, TelosError> {
-        let initial_bindings = read_core(safe_root, BINDINGS_PATH)?;
-        let initial_counters = read_core(safe_root, COUNTERS_PATH)?;
+    fn fresh(safe_root: &SafeRoot, config: Vec<u8>) -> Result<Self, TelosError> {
         let initial_gitattributes = read_core(safe_root, GITATTRIBUTES_PATH)?;
-        let initial_lock = read_core(safe_root, LOCK_PATH)?;
         let desired_gitattributes = gitattributes_bytes(initial_gitattributes.as_deref())?;
 
         Ok(Self {
@@ -277,18 +275,18 @@ impl CorePlan {
                 desired: config,
             },
             bindings: CoreFile {
-                initial: initial_bindings,
+                initial: None,
                 desired: Vec::new(),
             },
             counters: CoreFile {
-                initial: initial_counters,
+                initial: None,
                 desired: COUNTERS_BYTES.to_vec(),
             },
             gitattributes: CoreFile {
                 initial: initial_gitattributes,
                 desired: desired_gitattributes,
             },
-            initial_lock,
+            initial_lock: None,
         })
     }
 
@@ -432,6 +430,7 @@ fn validate_resume_core(
             validate_preparing_core(safe_root, root, git, &marker.core)
         }
         InitPhase::Sealed { lock } | InitPhase::Integrating { lock } => {
+            validate_telos_tree(safe_root, true)?;
             validate_directory_shapes(safe_root, true)?;
             validate_deterministic_core_exact(safe_root, &marker.core)?;
             validate_core_file_exact(safe_root, LOCK_PATH, lock)?;
@@ -449,7 +448,7 @@ fn validate_preparing_core(
     git: &GitRepo,
     core: &CorePlan,
 ) -> Result<(), TelosError> {
-    validate_directory_shapes(safe_root, false)?;
+    validate_telos_tree(safe_root, true)?;
     let mut deterministic_complete = true;
     for (relative, plan) in core_files(core) {
         let current = read_core(safe_root, relative)?;
@@ -579,6 +578,59 @@ fn validate_core_file_exact(
     }
 }
 
+/// A fresh init may reuse only empty canonical Telos directories. Every
+/// byte-bearing entry is somebody else's owner until a matching init marker
+/// proves otherwise. During resume, only the exact transaction-owned core
+/// names are additionally admitted; their bytes are checked separately.
+fn validate_telos_tree(safe_root: &SafeRoot, resuming: bool) -> Result<(), TelosError> {
+    let invalid = |path: &Path| {
+        if resuming {
+            core_changed(path)
+        } else {
+            foreign_telos_owner(path)
+        }
+    };
+    let Some(top) = safe_root
+        .directory_entries(Path::new("telos"))
+        .map_err(|_| invalid(Path::new("telos")))?
+    else {
+        return Ok(());
+    };
+
+    for (name, is_directory) in top {
+        let path = PathBuf::from("telos").join(&name);
+        let Some(name) = name.to_str() else {
+            return Err(invalid(&path));
+        };
+        match name {
+            "notions" | "intents" | "constraints" | "changes" if is_directory => {}
+            "telos.toml" | "bindings.tel" | "telos.lock" if resuming && !is_directory => {}
+            _ => return Err(invalid(&path)),
+        }
+    }
+
+    for relative in ["telos/notions", "telos/intents", "telos/constraints"] {
+        if let Some(entries) = safe_root
+            .directory_entries(Path::new(relative))
+            .map_err(|_| invalid(Path::new(relative)))?
+            && !entries.is_empty()
+        {
+            return Err(invalid(Path::new(relative)));
+        }
+    }
+    if let Some(entries) = safe_root
+        .directory_entries(Path::new("telos/changes"))
+        .map_err(|_| invalid(Path::new("telos/changes")))?
+    {
+        for (name, is_directory) in entries {
+            if !(resuming && name == "counters.toml" && !is_directory) {
+                return Err(invalid(&PathBuf::from("telos/changes").join(name)));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_directory_shapes(
     safe_root: &SafeRoot,
     require_present: bool,
@@ -608,7 +660,9 @@ fn create_required_directories(safe_root: &SafeRoot) -> Result<(), TelosError> {
 
 fn compute_lock_bytes(root: &Path, git: &GitRepo) -> Result<Vec<u8>, TelosError> {
     let ws = Workspace::discover(root)?;
+    ws.config.validate_self()?;
     let model = ws.load_model().map_err(first_error)?;
+    require_sealable_structure(&ws, &model)?;
     Ok(render_lock(&seal(&ws, &model, git, None)?).into_bytes())
 }
 
@@ -687,6 +741,14 @@ fn core_changed(path: &Path) -> TelosError {
     .hint(format!(
         "preserve `{INIT_MARKER_PATH}` and restore the transaction-owned path before retrying"
     ))
+}
+
+fn foreign_telos_owner(path: &Path) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosAlreadyInitialized,
+        format!("`{}` already has a foreign owner", display_path(path)),
+    )
+    .hint("move the pre-existing Telos entry aside before retrying `telos init`")
 }
 
 fn initial_config_bytes(hosts: &[AgentHost]) -> Result<Vec<u8>, TelosError> {
@@ -1118,6 +1180,119 @@ mod tests {
         );
         assert!(!tmp.path().join("telos").exists());
         assert!(!tmp.path().join(".agents").exists());
+    }
+
+    #[test]
+    fn fresh_init_refuses_every_foreign_telos_owner_without_a_marker() {
+        for (relative, directory) in [
+            ("telos/bindings.tel", false),
+            ("telos/changes/counters.toml", false),
+            ("telos/telos.lock", false),
+            ("telos/notions/Foreign.tel", false),
+            ("telos/foreign", true),
+            ("telos/bindings.tel", true),
+        ] {
+            let tmp = repo();
+            let target = tmp.path().join(relative);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            if directory {
+                fs::create_dir(&target).unwrap();
+            } else {
+                fs::write(&target, b"foreign owner\n").unwrap();
+            }
+            let before = non_git_tree(tmp.path());
+            let ctx = Ctx {
+                cwd: tmp.path().to_path_buf(),
+            };
+
+            assert_eq!(
+                error_code(run(&ctx, &[AgentHost::Codex], None)),
+                ErrorCode::TelosAlreadyInitialized,
+                "{relative} directory={directory}"
+            );
+            assert_eq!(non_git_tree(tmp.path()), before);
+            assert!(!tmp.path().join(INIT_MARKER_PATH).exists());
+            assert!(!tmp.path().join(".agents").exists());
+        }
+    }
+
+    #[test]
+    fn fresh_init_accepts_only_empty_canonical_telos_directories() {
+        let tmp = repo();
+        for relative in [
+            "telos/notions",
+            "telos/intents",
+            "telos/constraints",
+            "telos/changes",
+        ] {
+            fs::create_dir_all(tmp.path().join(relative)).unwrap();
+        }
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+
+        run(&ctx, &[], None).unwrap();
+        assert!(tmp.path().join(LOCK_PATH).is_file());
+    }
+
+    #[test]
+    fn fresh_init_refuses_an_active_unproved_prepopulation_without_sealing_it() {
+        let tmp = repo();
+        fs::create_dir_all(tmp.path().join("telos/intents")).unwrap();
+        fs::write(
+            tmp.path().join("telos/telos.toml"),
+            b"[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("telos/intents/INT-0001.tel"),
+            b"intent INT-0001 \"Unproved\"\n  status active\n",
+        )
+        .unwrap();
+        let before = non_git_tree(tmp.path());
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+
+        assert_eq!(
+            error_code(run(&ctx, &[AgentHost::Codex], Some(CiProvider::Github))),
+            ErrorCode::TelosAlreadyInitialized
+        );
+        assert_eq!(non_git_tree(tmp.path()), before);
+        assert!(!tmp.path().join(INIT_MARKER_PATH).exists());
+        assert!(!tmp.path().join("telos/telos.lock").exists());
+        assert!(!tmp.path().join(".agents").exists());
+        assert!(!tmp.path().join(".github/workflows/telos.yml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_init_refuses_live_and_dangling_telos_symlinks_without_touching_owner() {
+        use std::os::unix::fs::symlink;
+
+        for dangling in [false, true] {
+            let tmp = repo();
+            let outside = tempfile::tempdir().unwrap();
+            let owner = outside.path().join("owner");
+            if !dangling {
+                fs::write(&owner, b"outside owner\n").unwrap();
+            }
+            fs::create_dir_all(tmp.path().join("telos")).unwrap();
+            symlink(&owner, tmp.path().join("telos/bindings.tel")).unwrap();
+            let before = non_git_tree(tmp.path());
+            let outside_before = non_git_tree(outside.path());
+            let ctx = Ctx {
+                cwd: tmp.path().to_path_buf(),
+            };
+
+            assert_eq!(
+                error_code(run(&ctx, &[], None)),
+                ErrorCode::TelosAlreadyInitialized
+            );
+            assert_eq!(non_git_tree(tmp.path()), before);
+            assert_eq!(non_git_tree(outside.path()), outside_before);
+            assert!(!tmp.path().join(INIT_MARKER_PATH).exists());
+        }
     }
 
     #[test]

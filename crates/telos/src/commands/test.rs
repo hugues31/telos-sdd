@@ -61,7 +61,7 @@ use crate::envelope::{CmdResult, Outcome};
 /// dispatch below never has to answer for the other two combinations.
 pub fn run(ctx: &Ctx, scenario: Option<&str>, all: bool, file: Option<&str>) -> CmdResult {
     let project = project(ctx)?;
-    let file = file.map(RepoPath::new);
+    let file = file.map(RepoPath::parse_outside_telos).transpose()?;
 
     if all {
         return every(&project, file.as_ref());
@@ -327,8 +327,9 @@ struct RunReport {
     witness: Witness,
     test: TestRef,
     change: ChangeId,
-    /// The command as it actually ran -- `{filter}` already substituted --
-    /// so a caller can rerun character for character what this did.
+    /// D10's display form, with `{filter}` literally substituted. Execution
+    /// uses the validated direct-process argv; this display is not a shell
+    /// replay contract.
     command: String,
 }
 
@@ -362,6 +363,13 @@ fn journal_run(
         .name
         .clone()
         .unwrap_or_else(|| test.path.as_str().to_string());
+    let mut before = project.git.blob_oids(std::slice::from_ref(&test.path))?;
+    let oid = before.remove(&test.path).ok_or_else(|| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!("the test file {} disappeared before the run", test.path),
+        )
+    })?;
     let execution = run_shell_with_filter(cmd, &filter, &project.ws.repo_root)?;
     let witness = if execution.result.status == 0 {
         Witness::Green
@@ -370,16 +378,17 @@ fn journal_run(
     };
     let command = execution.command;
 
-    let mut oids = project.git.blob_oids(std::slice::from_ref(&test.path))?;
-    let oid = oids.remove(&test.path).ok_or_else(|| {
-        TelosError::new(
-            ErrorCode::TelosInternal,
+    let after = project.git.blob_oids(std::slice::from_ref(&test.path))?;
+    if after.get(&test.path) != Some(&oid) {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
             format!(
-                "the test file {} disappeared between its discovery and the run",
+                "the test file {} changed while its test was running",
                 test.path
             ),
         )
-    })?;
+        .hint("restore the intended test bytes and run `telos test` again"));
+    }
 
     change.journal.push(JournalEntry::Run(TestRun {
         scenario,

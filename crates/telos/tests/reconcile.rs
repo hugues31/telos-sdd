@@ -22,6 +22,9 @@ mod common;
 use std::fs;
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde_json::{Value, json};
 
 use common::{repo, telos, unsealed_fixture, with_fixture, with_fixture_mut};
@@ -836,6 +839,26 @@ fn set_test_cmd_to(root: &Path, cmd: &str) {
     fs::write(&path, replaced).unwrap();
 }
 
+#[cfg(unix)]
+fn install_snapshot_mutation_runner(root: &Path) {
+    let runner = root.join("mutate-during-reconcile");
+    fs::write(
+        &runner,
+        "#!/bin/sh\n\
+         if test -f .mutate-code-during-run; then\n\
+           printf '\\n// changed during reconcile\\n' >> src/billing.rs\n\
+         fi\n\
+         if test -f .mutate-spec-during-run; then\n\
+           printf '\\n# changed during reconcile\\n' >> telos/intents/INT-0017.tel\n\
+         fi\n\
+         git hash-object .fake-green >/dev/null 2>&1\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&runner).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&runner, permissions).unwrap();
+}
+
 // --- `reconcile --full` (D12) ------------------------------------------------
 //
 // The lock-merge exit, and the one legitimate way to seal a spec tree that
@@ -1037,6 +1060,40 @@ fn complete_unsealed_for_full(dir: &Path) {
         .unwrap();
     }
     set_test_cmd_to(dir, "git --version");
+}
+
+/// A full reconcile must seal the snapshot it actually proved.  This runner
+/// edits a specification file after the pre-run OIDs were captured; the
+/// command must fail and must not publish a lock for the new bytes.
+#[cfg(unix)]
+#[test]
+fn full_reconcile_refuses_spec_bytes_changed_by_its_runner() {
+    let tmp = unsealed_fixture();
+    complete_unsealed_for_full(tmp.path());
+    install_snapshot_mutation_runner(tmp.path());
+    let config_path = tmp.path().join("telos/telos.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    let configured = config.replace(
+        "cmd = \"git --version\"",
+        "cmd = \"./mutate-during-reconcile {filter}\"",
+    );
+    assert_ne!(configured, config, "the full fixture runner moved");
+    fs::write(config_path, configured).unwrap();
+    fs::write(tmp.path().join(MARKER), "green\n").unwrap();
+    fs::write(tmp.path().join(".mutate-spec-during-run"), "go\n").unwrap();
+
+    let envelope = reconcile_full(tmp.path());
+
+    assert_eq!(envelope["ok"], json!(false), "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"],
+        json!("TELOS_INTEGRITY_VIOLATION")
+    );
+    assert!(read(tmp.path(), "telos/intents/INT-0017.tel").contains("changed during reconcile"));
+    assert!(
+        !tmp.path().join(LOCK).exists(),
+        "a moved snapshot must not receive a successful seal"
+    );
 }
 
 #[test]
@@ -1247,13 +1304,17 @@ fn reconcile_id_err(dir: &Path, id: &str) -> Value {
 /// `CHG-0001` is the config change, so every helper below takes the change id
 /// it works on rather than assuming one.
 fn configured(tdd: &str) -> tempfile::TempDir {
+    configured_with_runner(tdd, RUNNER)
+}
+
+fn configured_with_runner(tdd: &str, runner: &str) -> tempfile::TempDir {
     let tmp = fresh();
     fs::write(
         tmp.path().join("telos/telos.toml"),
         format!(
             "[code]\nglobs = [\"src/**/*.rs\"]\n\n\
              [tests]\nglobs = [\"tests/**/*.rs\"]\n\n\
-             [test]\ncmd = \"{RUNNER}\"\n\n\
+             [test]\ncmd = \"{runner}\"\n\n\
              [policy]\ntdd = \"{tdd}\"\n"
         ),
     )
@@ -1423,6 +1484,51 @@ fn reconciling_an_implemented_change_folds_its_journal_and_runs_its_test() {
             "tests_run": 1,
             "witness_warnings": []
         })
+    );
+}
+
+/// Ordinary reconcile snapshots every bound proof/code owner before the
+/// runner starts.  A successful runner that edits bound code therefore
+/// cannot cause those unexecuted bytes to enter the lock or remove the
+/// reviewed change.
+#[cfg(unix)]
+#[test]
+fn ordinary_reconcile_refuses_code_bytes_changed_by_its_runner() {
+    let tmp = configured_with_runner("strict", "./mutate-during-reconcile {filter}");
+    install_snapshot_mutation_runner(tmp.path());
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+    write_test_file(tmp.path(), &[feature.scenario()], "");
+    witness(tmp.path(), feature.scenario(), "red");
+    set_marker(tmp.path());
+    witness(tmp.path(), feature.scenario(), "green");
+    write_and_bind_code(tmp.path(), &feature.intent);
+    fs::write(tmp.path().join(".mutate-code-during-run"), "go\n").unwrap();
+    let lock_before = read(tmp.path(), LOCK);
+    let change_path = format!("telos/changes/{}.tel", feature.change);
+    let change_before = read(tmp.path(), &change_path);
+
+    let envelope = reconcile_id(tmp.path(), &feature.change);
+
+    assert_eq!(envelope["ok"], json!(false), "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"],
+        json!("TELOS_INTEGRITY_VIOLATION")
+    );
+    assert!(read(tmp.path(), CODE_FILE).contains("changed during reconcile"));
+    assert_eq!(read(tmp.path(), LOCK), lock_before, "the lock moved");
+    assert_eq!(
+        read(tmp.path(), &change_path),
+        change_before,
+        "the reviewed change was removed or rewritten"
+    );
+    assert!(
+        !tmp.path()
+            .join(format!("telos/intents/{}.tel", feature.intent))
+            .exists(),
+        "spec ops were applied despite the snapshot mismatch"
     );
 }
 

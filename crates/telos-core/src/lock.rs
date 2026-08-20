@@ -27,6 +27,7 @@ use crate::error::{ErrorCode, TelosError};
 use crate::git::{GitRepo, Oid};
 use crate::ids::{ChangeId, RepoPath};
 use crate::model::TelosModel;
+use crate::repo_fs::RepoFs;
 use crate::workspace::Workspace;
 
 /// A parsed or in-memory `telos.lock`.
@@ -88,8 +89,8 @@ impl Lock {
             tool: raw.tool,
             sealed_by,
             spec_digest: raw.spec_digest,
-            spec: into_oid_map(raw.spec),
-            code: into_oid_map(raw.code),
+            spec: into_oid_map(raw.spec, path)?,
+            code: into_oid_map(raw.code, path)?,
         }))
     }
 
@@ -106,6 +107,11 @@ impl Lock {
                 format!("failed to write {}: {e}", path.display()),
             )
         })
+    }
+
+    pub(crate) fn write_to_workspace(&self, ws: &Workspace) -> Result<(), TelosError> {
+        RepoFs::open(&ws.repo_root)?
+            .write(&RepoPath::new("telos/telos.lock"), self.render().as_bytes())
     }
 
     fn render(&self) -> String {
@@ -257,9 +263,25 @@ struct RawLock {
     code: BTreeMap<String, String>,
 }
 
-fn into_oid_map(raw: BTreeMap<String, String>) -> BTreeMap<RepoPath, Oid> {
+fn into_oid_map(
+    raw: BTreeMap<String, String>,
+    lock_path: &Path,
+) -> Result<BTreeMap<RepoPath, Oid>, TelosError> {
     raw.into_iter()
-        .map(|(path, oid)| (RepoPath::new(path), Oid(oid)))
+        .map(|(path, oid)| {
+            RepoPath::parse(path.clone())
+                .map(|path| (path, Oid(oid)))
+                .map_err(|error| {
+                    TelosError::new(
+                        ErrorCode::TelosParseError,
+                        format!(
+                            "{}: invalid repository path `{path}`: {}",
+                            lock_path.display(),
+                            error.message
+                        ),
+                    )
+                })
+        })
         .collect()
 }
 

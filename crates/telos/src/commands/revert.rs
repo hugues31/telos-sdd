@@ -24,13 +24,23 @@
 use serde_json::json;
 
 use telos_core::adopt::revert;
+use telos_core::error::{ErrorCode, TelosError};
+use telos_core::state::drift_token;
 
 use crate::commands::{Ctx, project, require_drift};
 use crate::envelope::{CmdResult, Outcome};
 
-pub fn run(ctx: &Ctx) -> CmdResult {
+pub fn run(ctx: &Ctx, expected_state: Option<&str>) -> CmdResult {
     let project = project(ctx)?;
     require_drift(&project, "revert")?;
+    let current = drift_token(&project.lock, &project.state.drift);
+    if expected_state.is_some_and(|expected| expected != current) {
+        return Err(TelosError::new(
+            ErrorCode::TelosChangeStateInvalid,
+            "project drift no longer matches the expected state token",
+        )
+        .hint("run `telos status` again and review the new drift scope"));
+    }
 
     let outcome = revert(
         &project.ws,

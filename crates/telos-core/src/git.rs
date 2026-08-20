@@ -28,11 +28,13 @@ use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 
 use serde::Serialize;
 
 use crate::error::{ErrorCode, TelosError};
 use crate::ids::RepoPath;
+use crate::repo_fs::RepoFs;
 
 /// The frozen hint of the one `TELOS_GIT_ERROR` [`GitRepo::cat_blob`]
 /// raises: an OID the seal records that the object store does not hold.
@@ -155,22 +157,27 @@ impl GitRepo {
     /// makes the resulting OID identical across OSes for the same logical
     /// content).
     ///
-    /// Implementation note on avoiding a pipe deadlock: all of stdin is
-    /// written and then dropped (closing the write end) *before* stdout is
-    /// read. A stricter implementation would shuttle stdin writes and
-    /// stdout reads concurrently (e.g. from a second thread), which is
-    /// necessary once output could grow large enough to fill the OS pipe
-    /// buffer while stdin is still being written. Here output is one short
-    /// hex line per input path -- on the batch sizes a spec or a code tree
-    /// actually has, it never approaches that buffer size, so writing
-    /// everything up front and reading the (small) output afterwards is
-    /// both simpler and safe. If `blob_oids` ever needs to hash tens of
-    /// thousands of paths in one call, revisit this.
+    /// Stdin is written from a dedicated thread while the calling thread
+    /// drains stdout/stderr through `wait_with_output`, so neither pipe can
+    /// block the other for large path sets.
     pub fn blob_oids(&self, paths: &[RepoPath]) -> Result<BTreeMap<RepoPath, Oid>, TelosError> {
-        let existing: Vec<&RepoPath> = paths
-            .iter()
-            .filter(|p| std::fs::metadata(self.abs_path(p)).is_ok())
-            .collect();
+        let safe_root = RepoFs::open(&self.root)?;
+        let mut existing = Vec::new();
+        for path in paths {
+            path.validate()?;
+            let bytes = safe_root.read_optional(path).map_err(|error| {
+                TelosError::new(
+                    ErrorCode::TelosIntegrityViolation,
+                    format!(
+                        "repository path `{path}` resolves outside the repository or through a symlink: {}",
+                        error.message
+                    ),
+                )
+            })?;
+            if let Some(bytes) = bytes {
+                existing.push((path, bytes));
+            }
+        }
 
         if existing.is_empty() {
             return Ok(BTreeMap::new());
@@ -191,20 +198,17 @@ impl GitRepo {
                 )
             })?;
 
-        {
-            // Scoped so `stdin` is dropped (closing the pipe) before
-            // `wait_with_output` reads stdout below -- see the doc comment
-            // above on why writing everything first is safe here.
-            let mut stdin = child.stdin.take().expect("stdin was piped");
-            for path in &existing {
-                writeln!(stdin, "{}", path.as_str()).map_err(|e| {
-                    TelosError::new(
-                        ErrorCode::TelosGitError,
-                        format!("failed to write to `git hash-object` stdin: {e}"),
-                    )
-                })?;
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        let input_paths = existing
+            .iter()
+            .map(|(path, _)| path.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let writer = thread::spawn(move || -> std::io::Result<()> {
+            for path in input_paths {
+                writeln!(stdin, "{path}")?;
             }
-        }
+            Ok(())
+        });
 
         let output = child.wait_with_output().map_err(|e| {
             TelosError::new(
@@ -212,6 +216,20 @@ impl GitRepo {
                 format!("failed to read `git hash-object` output: {e}"),
             )
         })?;
+        writer
+            .join()
+            .map_err(|_| {
+                TelosError::new(
+                    ErrorCode::TelosGitError,
+                    "the `git hash-object` stdin writer panicked",
+                )
+            })?
+            .map_err(|e| {
+                TelosError::new(
+                    ErrorCode::TelosGitError,
+                    format!("failed to write to `git hash-object` stdin: {e}"),
+                )
+            })?;
 
         if !output.status.success() {
             return Err(TelosError::new(
@@ -237,10 +255,28 @@ impl GitRepo {
             ));
         }
 
+        for (path, before) in &existing {
+            let after = safe_root.read_optional(path).map_err(|error| {
+                TelosError::new(
+                    ErrorCode::TelosIntegrityViolation,
+                    format!(
+                        "repository path `{path}` changed identity while it was hashed: {}",
+                        error.message
+                    ),
+                )
+            })?;
+            if after.as_deref() != Some(before.as_slice()) {
+                return Err(TelosError::new(
+                    ErrorCode::TelosIntegrityViolation,
+                    format!("repository path `{path}` changed while it was hashed"),
+                ));
+            }
+        }
+
         Ok(existing
             .into_iter()
             .zip(lines)
-            .map(|(path, oid)| (path.clone(), Oid(oid.to_string())))
+            .map(|((path, _), oid)| (path.clone(), Oid(oid.to_string())))
             .collect())
     }
 
@@ -290,19 +326,6 @@ impl GitRepo {
         }
 
         Ok(output.stdout)
-    }
-
-    /// Converts a repo-relative, `/`-separated [`RepoPath`] into an
-    /// absolute, OS-native path under `root` -- splitting on `/` rather
-    /// than handing the raw string to `PathBuf::join` so the conversion is
-    /// explicit and correct on every OS (mirrors
-    /// `Workspace::abs_path`).
-    fn abs_path(&self, repo_path: &RepoPath) -> PathBuf {
-        let mut path = self.root.clone();
-        for component in repo_path.as_str().split('/') {
-            path.push(component);
-        }
-        path
     }
 }
 

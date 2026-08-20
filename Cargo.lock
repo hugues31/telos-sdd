@@ -968,6 +968,8 @@ dependencies = [
 name = "telos-core"
 version = "0.7.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "globset",
  "serde",
  "serde_json",

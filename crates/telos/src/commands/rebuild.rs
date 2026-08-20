@@ -2,14 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Component;
 
 use clap::Subcommand;
 use serde_json::{Value, json};
 
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::exec::{run_shell_with_filter, substitute_filter};
-use telos_core::ids::{IntentId, ScenarioId};
+use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, Change, TelosModel, TestRef};
 use telos_core::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
 use telos_core::rebuild;
@@ -287,20 +286,7 @@ fn proof_resolves(
         return Ok(false);
     }
 
-    let absolute = ws.abs_path(&test.path);
-    if !absolute.is_file() {
-        return Ok(false);
-    }
-    let Ok(root) = fs::canonicalize(&ws.repo_root) else {
-        return Ok(false);
-    };
-    let Ok(canonical) = fs::canonicalize(&absolute) else {
-        return Ok(false);
-    };
-    let Ok(telos) = fs::canonicalize(&ws.telos_dir) else {
-        return Ok(false);
-    };
-    if !canonical.starts_with(root) || canonical.starts_with(telos) {
+    if ws.read_optional_bytes(&test.path)?.is_none() {
         return Ok(false);
     }
 
@@ -312,29 +298,7 @@ fn proof_resolves(
 }
 
 fn is_safe_test_path(raw: &str) -> bool {
-    if raw.is_empty()
-        || raw.starts_with('/')
-        || raw.starts_with('\\')
-        || raw.contains('\\')
-        || raw.contains('\0')
-        || raw.as_bytes().get(1).is_some_and(|second| *second == b':')
-    {
-        return false;
-    }
-
-    let mut first = None;
-    for component in std::path::Path::new(raw).components() {
-        match component {
-            Component::Normal(part) => {
-                if first.is_none() {
-                    first = part.to_str();
-                }
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
-        }
-    }
-    first.is_some_and(|part| part != "telos")
+    RepoPath::parse_outside_telos(raw).is_ok()
 }
 
 fn require_runner(ws: &Workspace) -> Result<String, TelosError> {

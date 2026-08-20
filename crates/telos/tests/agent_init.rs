@@ -223,6 +223,139 @@ fn guard_denies_direct_file_writes_under_telos() {
 }
 
 #[test]
+fn guard_resolves_file_tool_paths_from_hook_cwd_not_repo_root() {
+    let tmp = repo();
+    let cwd = tmp.path().join("crates");
+    fs::create_dir_all(&cwd).unwrap();
+
+    for (tool_name, tool_input) in [
+        ("Edit", json!({"file_path": "../telos/bindings.tel"})),
+        (
+            "apply_patch",
+            json!({"command": "*** Update File: ../telos/telos.toml"}),
+        ),
+    ] {
+        assert_eq!(
+            tool_decision(tmp.path(), &cwd, "claude", tool_name, tool_input),
+            "deny"
+        );
+    }
+
+    assert_eq!(
+        tool_decision(
+            tmp.path(),
+            &cwd,
+            "claude",
+            "Edit",
+            json!({"file_path": "telos/not-the-spec"}),
+        ),
+        "allow"
+    );
+}
+
+#[test]
+fn guard_resolves_bash_paths_from_hook_cwd_not_repo_root() {
+    let tmp = repo();
+    let cwd = tmp.path().join("crates");
+    fs::create_dir_all(&cwd).unwrap();
+
+    assert_eq!(
+        bash_decision_at(tmp.path(), &cwd, "claude", "touch ../telos/bindings.tel",),
+        "deny"
+    );
+    assert_eq!(
+        bash_decision_at(tmp.path(), &cwd, "claude", "touch telos/not-the-spec",),
+        "allow"
+    );
+}
+
+#[test]
+fn guard_checks_newline_background_and_supported_shell_wrappers() {
+    let tmp = repo();
+    for command in [
+        "echo ok\ntouch telos/bindings.tel",
+        "echo ok & touch telos/bindings.tel",
+        "bash -c \"touch telos/bindings.tel\"",
+        "sh -c \"rm telos/bindings.tel\"",
+        "command touch telos/bindings.tel",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "deny",
+            "{command}"
+        );
+    }
+
+    for command in [
+        "cat telos/telos.toml",
+        "bash -c \"cat telos/telos.toml\"",
+        "command cat telos/telos.toml",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "allow",
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn guard_finds_human_actions_after_separators_and_wrappers() {
+    let tmp = repo();
+    for command in [
+        "bash -c \"telos revert\"",
+        "command telos adopt",
+        "echo ok\ntelos change approve CHG-0001",
+        "echo ok & telos revert",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "ask",
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn guard_fails_closed_on_ambiguous_shell_syntax() {
+    let tmp = repo();
+    for command in [
+        "bash -c \"$TELOS_COMMAND\"",
+        "touch $(printf telos/bindings.tel)",
+        "touch `printf telos/bindings.tel`",
+        "touch \"telos/bindings.tel",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "deny",
+            "{command}"
+        );
+    }
+}
+
+fn tool_decision(
+    root: &Path,
+    cwd: &Path,
+    host: &str,
+    tool_name: &str,
+    tool_input: Value,
+) -> String {
+    hook(
+        root,
+        host,
+        json!({
+            "cwd": cwd,
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+        }),
+    )["hookSpecificOutput"]["permissionDecision"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
 fn guard_denies_direct_shell_mutations_but_allows_inspection_and_source_edits() {
     let tmp = repo();
     for command in [
@@ -268,11 +401,15 @@ fn guard_denies_direct_shell_mutations_but_allows_inspection_and_source_edits() 
 }
 
 fn bash_decision(root: &Path, host: &str, command: &str) -> String {
+    bash_decision_at(root, root, host, command)
+}
+
+fn bash_decision_at(root: &Path, cwd: &Path, host: &str, command: &str) -> String {
     hook(
         root,
         host,
         json!({
-            "cwd": root,
+            "cwd": cwd,
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": command},

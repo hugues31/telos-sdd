@@ -71,12 +71,13 @@ pub fn run(host: AgentHost) -> ExitCode {
 /// native prompts are supplied by the generated `.rules` file instead.
 pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> GuardDecision {
     let tool = normalize_tool(tool_name);
-    let root = repo_root(cwd);
+    let cwd = absolute_cwd(cwd);
+    let root = repo_root(&cwd);
 
     if matches!(tool.as_str(), "edit" | "write") {
         if input_paths(input)
             .iter()
-            .any(|path| is_telos_path(path, &root))
+            .any(|path| is_telos_path(path, &cwd, &root))
         {
             return deny_manual_write();
         }
@@ -91,7 +92,7 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
             .unwrap_or("");
         if patch_paths(patch)
             .iter()
-            .any(|path| is_telos_path(path, &root))
+            .any(|path| is_telos_path(path, &cwd, &root))
         {
             return deny_manual_write();
         }
@@ -100,12 +101,15 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
 
     if tool == "bash" {
         let command = input.get("command").and_then(Value::as_str).unwrap_or("");
-        let tokens = shell_tokens(command);
-        if directly_mutates_telos(&tokens, &root) {
+        let commands = match simple_commands(command) {
+            Ok(commands) => commands,
+            Err(()) => return deny_ambiguous_shell(),
+        };
+        if directly_mutates_telos(&commands, &cwd, &root) {
             return deny_manual_write();
         }
 
-        if let Some(action) = human_action(&tokens) {
+        if let Some(action) = human_action(&commands) {
             if host == AgentHost::Claude {
                 let context = input
                     .get("description")
@@ -160,7 +164,7 @@ fn patch_paths(patch: &str) -> Vec<&str> {
         .collect()
 }
 
-fn repo_root(cwd: &Path) -> PathBuf {
+fn absolute_cwd(cwd: &Path) -> PathBuf {
     let absolute = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
@@ -168,14 +172,17 @@ fn repo_root(cwd: &Path) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(cwd)
     };
-    absolute
-        .ancestors()
+    lexical_normalize(&absolute)
+}
+
+fn repo_root(cwd: &Path) -> PathBuf {
+    cwd.ancestors()
         .find(|path| path.join(".git").exists())
-        .unwrap_or(&absolute)
+        .unwrap_or(cwd)
         .to_path_buf()
 }
 
-fn is_telos_path(raw: &str, root: &Path) -> bool {
+fn is_telos_path(raw: &str, cwd: &Path, root: &Path) -> bool {
     let cleaned = raw
         .trim()
         .trim_matches(|c: char| matches!(c, '\'' | '"' | ',' | ';' | ':' | '(' | ')'))
@@ -187,8 +194,12 @@ fn is_telos_path(raw: &str, root: &Path) -> bool {
     let joined = if path.is_absolute() {
         lexical_normalize(path)
     } else {
-        lexical_normalize(&root.join(path))
+        lexical_normalize(&cwd.join(path))
     };
+    let root = lexical_normalize(root);
+    if !joined.starts_with(&root) {
+        return false;
+    }
     let telos = lexical_normalize(&root.join("telos"));
     joined == telos || joined.starts_with(&telos)
 }
@@ -207,7 +218,77 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     normalized
 }
 
-fn shell_tokens(command: &str) -> Vec<String> {
+fn simple_commands(command: &str) -> Result<Vec<Vec<String>>, ()> {
+    let tokens = shell_tokens(command)?;
+    let mut commands = Vec::new();
+    for slice in tokens.split(|token| is_separator(token)) {
+        expand_command(slice, &mut commands)?;
+    }
+    Ok(commands)
+}
+
+fn expand_command(tokens: &[String], commands: &mut Vec<Vec<String>>) -> Result<(), ()> {
+    if tokens.is_empty() {
+        return Ok(());
+    }
+
+    let mut command = tokens;
+    let mut wrappers = 0;
+    loop {
+        wrappers += 1;
+        if wrappers > 8 {
+            return Err(());
+        }
+        match command.first().map(|word| program_name(word)) {
+            Some("rtk") => command = &command[1..],
+            Some("command") => {
+                command = &command[1..];
+                if command.first().map(String::as_str) == Some("--") {
+                    command = &command[1..];
+                }
+            }
+            _ => break,
+        }
+        if command.is_empty() {
+            return Err(());
+        }
+    }
+
+    let program = program_name(command.first().ok_or(())?);
+    if matches!(program, "bash" | "sh" | "zsh") {
+        let option = command.get(1).map(String::as_str).ok_or(())?;
+        if !option.starts_with('-') || !option.chars().skip(1).any(|ch| ch == 'c') {
+            return Err(());
+        }
+        let nested = command.get(2).ok_or(())?;
+        commands.extend(simple_commands(nested)?);
+        return Ok(());
+    }
+
+    if matches!(
+        program,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "for"
+            | "select"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "case"
+            | "esac"
+            | "function"
+    ) {
+        return Err(());
+    }
+
+    commands.push(command.to_vec());
+    Ok(())
+}
+
+fn shell_tokens(command: &str) -> Result<Vec<String>, ()> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quote = None;
@@ -216,6 +297,10 @@ fn shell_tokens(command: &str) -> Vec<String> {
         if let Some(active) = quote {
             if ch == active {
                 quote = None;
+            } else if active == '"' && matches!(ch, '$' | '`') {
+                return Err(());
+            } else if active == '"' && ch == '\\' {
+                current.push(chars.next().ok_or(())?);
             } else {
                 current.push(ch);
             }
@@ -223,8 +308,29 @@ fn shell_tokens(command: &str) -> Vec<String> {
         }
         match ch {
             '\'' | '"' => quote = Some(ch),
-            ' ' | '\t' | '\r' | '\n' => push_token(&mut tokens, &mut current),
+            ' ' | '\t' => push_token(&mut tokens, &mut current),
+            '\r' | '\n' => {
+                push_token(&mut tokens, &mut current);
+                tokens.push(";".into());
+            }
+            '\\' => current.push(chars.next().ok_or(())?),
+            '$' | '`' | '(' | ')' | '{' | '}' => return Err(()),
             '>' | '<' => {
+                push_token(&mut tokens, &mut current);
+                let mut op = ch.to_string();
+                if chars.peek() == Some(&ch) {
+                    op.push(chars.next().expect("peeked character exists"));
+                }
+                if op == "<<" {
+                    return Err(());
+                }
+                tokens.push(op);
+            }
+            ';' => {
+                push_token(&mut tokens, &mut current);
+                tokens.push(ch.to_string());
+            }
+            '|' | '&' => {
                 push_token(&mut tokens, &mut current);
                 let mut op = ch.to_string();
                 if chars.peek() == Some(&ch) {
@@ -232,20 +338,14 @@ fn shell_tokens(command: &str) -> Vec<String> {
                 }
                 tokens.push(op);
             }
-            ';' | '|' => {
-                push_token(&mut tokens, &mut current);
-                tokens.push(ch.to_string());
-            }
-            '&' if chars.peek() == Some(&'&') => {
-                push_token(&mut tokens, &mut current);
-                chars.next();
-                tokens.push("&&".into());
-            }
             _ => current.push(ch),
         }
     }
+    if quote.is_some() {
+        return Err(());
+    }
     push_token(&mut tokens, &mut current);
-    tokens
+    Ok(tokens)
 }
 
 fn push_token(tokens: &mut Vec<String>, current: &mut String) {
@@ -254,35 +354,37 @@ fn push_token(tokens: &mut Vec<String>, current: &mut String) {
     }
 }
 
-fn command_slices(tokens: &[String]) -> impl Iterator<Item = &[String]> {
-    tokens.split(|token| matches!(token.as_str(), ";" | "|" | "&&" | "||"))
+fn is_separator(token: &str) -> bool {
+    matches!(token, ";" | "|" | "||" | "&" | "&&")
 }
 
-fn strip_rtk(tokens: &[String]) -> &[String] {
-    if tokens.first().map(String::as_str) == Some("rtk") {
-        &tokens[1..]
-    } else {
-        tokens
-    }
+fn program_name(program: &str) -> &str {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
 }
 
-fn directly_mutates_telos(tokens: &[String], root: &Path) -> bool {
-    command_slices(tokens).any(|slice| {
-        let command = strip_rtk(slice);
+fn directly_mutates_telos(commands: &[Vec<String>], cwd: &Path, root: &Path) -> bool {
+    commands.iter().any(|command| {
         let Some(program) = command.first().map(String::as_str) else {
             return false;
         };
+        let program = program_name(program);
         if program == "telos" {
             return false;
         }
 
         for pair in command.windows(2) {
-            if matches!(pair[0].as_str(), ">" | ">>") && is_telos_path(&pair[1], root) {
+            if matches!(pair[0].as_str(), ">" | ">>") && is_telos_path(&pair[1], cwd, root) {
                 return true;
             }
         }
 
-        let any_telos = command.iter().skip(1).any(|arg| is_telos_path(arg, root));
+        let any_telos = command
+            .iter()
+            .skip(1)
+            .any(|arg| is_telos_path(arg, cwd, root));
         match program {
             "touch" | "mkdir" | "rm" | "rmdir" | "unlink" | "truncate" | "mv" | "cp"
             | "install" | "tee" | "chmod" | "chown" => any_telos,
@@ -299,18 +401,29 @@ fn directly_mutates_telos(tokens: &[String], root: &Path) -> bool {
                     Some("checkout" | "restore" | "clean")
                 ) && any_telos
             }
-            _ => false,
+            _ => any_telos && !is_proven_read_only(program, command),
         }
     })
 }
 
-fn human_action(tokens: &[String]) -> Option<&'static str> {
-    command_slices(tokens).find_map(|slice| {
-        let command = strip_rtk(slice);
+fn is_proven_read_only(program: &str, command: &[String]) -> bool {
+    match program {
+        "cat" | "head" | "tail" | "less" | "more" | "rg" | "grep" | "find" | "ls" | "stat"
+        | "wc" | "file" | "diff" | "cmp" | "echo" | "printf" => true,
+        "git" => matches!(
+            command.get(1).map(String::as_str),
+            Some("diff" | "status" | "show" | "log" | "grep" | "ls-files")
+        ),
+        _ => false,
+    }
+}
+
+fn human_action(commands: &[Vec<String>]) -> Option<&'static str> {
+    commands.iter().find_map(|command| {
         let words: Vec<&str> = command
             .iter()
             .filter(|word| word.as_str() != "--json")
-            .map(String::as_str)
+            .map(|word| program_name(word))
             .collect();
         match words.as_slice() {
             ["telos", "change", "approve", ..] => Some("telos change approve"),
@@ -325,6 +438,14 @@ fn deny_manual_write() -> GuardDecision {
     GuardDecision {
         decision: Decision::Deny,
         reason: "Direct writes under repository telos/ are forbidden; use the Telos CLI".into(),
+    }
+}
+
+fn deny_ambiguous_shell() -> GuardDecision {
+    GuardDecision {
+        decision: Decision::Deny,
+        reason: "Shell syntax is not proven safe by the Telos guard; use a direct, simple command"
+            .into(),
     }
 }
 

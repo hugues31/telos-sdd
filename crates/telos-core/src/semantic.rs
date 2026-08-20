@@ -342,24 +342,47 @@ impl<'a> Checker<'a> {
     /// A literal must have the shape the attribute's type demands.
     ///
     /// The match is exact -- an `int` literal does not stand in for a
-    /// `decimal` attribute -- with three types that are more than a shape:
-    /// `money` is a string of a fixed form, `enum` admits only its declared
-    /// symbols, and `ref(...)` has no literal form at all in M1 (nothing to
-    /// check).
+    /// `decimal` attribute -- with five types that are more than a variant
+    /// match: `money`, `date` and `datetime` are strings of a fixed lexical
+    /// form, `enum` admits only its declared symbols, and `ref(...)` has no
+    /// literal form at all in M1 (nothing to check).
+    ///
+    /// The three lexeme checks are not redundant with the lexer, which only
+    /// ever produces well-formed ones: since M2, a literal can also come
+    /// from a JSON payload ([`crate::payload`]), which copies the string
+    /// verbatim because it has no attribute type in hand at that point. This
+    /// is where that string finally meets its type.
     fn check_value(&mut self, notion: &NotionName, attr: &Attr, value: &Literal) {
         let qualified = format!("{notion}.{}", attr.name);
         let matches = match (&attr.ty, value) {
             (AttrType::String, Literal::Str(_))
             | (AttrType::Int, Literal::Int(_))
             | (AttrType::Decimal, Literal::Decimal(_))
-            | (AttrType::Bool, Literal::Bool(_))
-            | (AttrType::Date, Literal::Date(_))
-            | (AttrType::Datetime, Literal::Datetime(_)) => true,
+            | (AttrType::Bool, Literal::Bool(_)) => true,
             (AttrType::Money, Literal::Str(amount)) => {
                 if !is_money(amount) {
                     self.integrity(format!(
                         "attribute `{qualified}` has type `money`, \
                          but `{amount}` is not an amount of the form `0.00 EUR`"
+                    ));
+                }
+                return;
+            }
+            (AttrType::Date, Literal::Date(lexeme)) => {
+                if !is_date(lexeme) {
+                    self.integrity(format!(
+                        "attribute `{qualified}` has type `date`, \
+                         but `{lexeme}` is not a date of the form `2026-08-19`"
+                    ));
+                }
+                return;
+            }
+            (AttrType::Datetime, Literal::Datetime(lexeme)) => {
+                if !is_datetime(lexeme) {
+                    self.integrity(format!(
+                        "attribute `{qualified}` has type `datetime`, \
+                         but `{lexeme}` is not a timestamp of the form \
+                         `2026-08-19T12:00:00Z`"
                     ));
                 }
                 return;
@@ -546,7 +569,11 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&AttrRef, Option<&Literal>)) {
 }
 
 /// Every notion an expression names.
-fn expr_notions(expr: &Expr, out: &mut BTreeSet<NotionName>) {
+///
+/// `pub(crate)` for [`crate::overlay`], which answers the same question in
+/// the other direction: not "what does this entity use?" but "does anything
+/// still use the notion this op removes?" (rule 2 of §3.3).
+pub(crate) fn expr_notions(expr: &Expr, out: &mut BTreeSet<NotionName>) {
     walk_expr(expr, &mut |r, _| {
         out.insert(r.notion.node.clone());
     });
@@ -559,8 +586,8 @@ fn action_notions(action: &Action, out: &mut BTreeSet<NotionName>) {
 }
 
 /// Every notion an intent's statement names -- the `uses` edges of an
-/// intent.
-fn statement_notions(statement: &Statement) -> BTreeSet<NotionName> {
+/// intent. `pub(crate)` for the same reason as [`expr_notions`].
+pub(crate) fn statement_notions(statement: &Statement) -> BTreeSet<NotionName> {
     let mut out = BTreeSet::new();
     match statement {
         Statement::Ubiquitous { action } | Statement::Optional { action, .. } => {
@@ -589,7 +616,8 @@ fn statement_notions(statement: &Statement) -> BTreeSet<NotionName> {
 
 /// Every notion a scenario names -- the `uses` edges of a scenario, which
 /// hang off the scenario itself, not off the intent nesting it.
-fn scenario_notions(scenario: &Scenario) -> BTreeSet<NotionName> {
+/// `pub(crate)` for the same reason as [`expr_notions`].
+pub(crate) fn scenario_notions(scenario: &Scenario) -> BTreeSet<NotionName> {
     let mut out = BTreeSet::new();
     for step in &scenario.given {
         out.insert(step.notion.node.clone());
@@ -755,6 +783,36 @@ fn is_money(s: &str) -> bool {
         && cents.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// `^\d{4}-\d{2}-\d{2}$` -- the `date-lit` lexeme of Annex C.1.
+///
+/// A *shape*, not a calendar: `2026-13-99` passes, exactly as it does
+/// through the lexer, which reads the same positional shape. Rejecting an
+/// impossible month is a different check, and one no other layer of the
+/// engine makes either.
+fn is_date(s: &str) -> bool {
+    matches_shape(s, "dddd-dd-dd")
+}
+
+/// `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?$` -- the `datetime-lit` lexeme of
+/// Annex C.1, whose trailing `Z` is optional.
+fn is_datetime(s: &str) -> bool {
+    matches_shape(s.strip_suffix('Z').unwrap_or(s), "dddd-dd-ddTdd:dd:dd")
+}
+
+/// Matches `s` against a positional shape in which `d` stands for one ASCII
+/// digit and every other byte stands for itself -- the hand-rolled stand-in
+/// for the two anchored regexes above, which the crate depends on no engine
+/// to run.
+fn matches_shape(s: &str, shape: &str) -> bool {
+    s.len() == shape.len()
+        && s.bytes()
+            .zip(shape.bytes())
+            .all(|(byte, expected)| match expected {
+                b'd' => byte.is_ascii_digit(),
+                other => byte == other,
+            })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +857,34 @@ mod tests {
         assert!(!is_money(".00 EUR"), "at least one unit digit");
         assert!(!is_money("-1.00 EUR"), "digits only");
         assert!(!is_money(""), "and an empty string is not an amount");
+    }
+
+    #[test]
+    fn date_accepts_the_annex_c_lexeme_only() {
+        assert!(is_date("2026-08-19"));
+        // A shape, not a calendar -- the same reading the lexer makes.
+        assert!(is_date("2026-13-99"));
+
+        assert!(!is_date("2026-8-19"), "two digits of month");
+        assert!(!is_date("26-08-19"), "four digits of year");
+        assert!(!is_date("2026-08-19T12:00:00Z"), "a date carries no time");
+        assert!(!is_date("2026/08/19"), "dashes, not slashes");
+        assert!(!is_date("2026-08-19 "), "no trailing space");
+        assert!(!is_date("aaaa-bb-cc"), "digits only");
+        assert!(!is_date(""), "and an empty string is not a date");
+    }
+
+    #[test]
+    fn datetime_accepts_the_annex_c_lexeme_only() {
+        assert!(is_datetime("2026-08-19T12:00:00Z"));
+        assert!(is_datetime("2026-08-19T12:00:00"), "the `Z` is optional");
+
+        assert!(!is_datetime("2026-08-19"), "a timestamp carries a time");
+        assert!(!is_datetime("2026-08-19 12:00:00Z"), "`T`, not a space");
+        assert!(!is_datetime("2026-08-19T12:00Z"), "seconds are mandatory");
+        assert!(!is_datetime("2026-08-19T12:00:00z"), "an uppercase `Z`");
+        assert!(!is_datetime("2026-08-19T12:00:00+02:00"), "no offset form");
+        assert!(!is_datetime(""), "and an empty string is not a timestamp");
     }
 
     #[test]

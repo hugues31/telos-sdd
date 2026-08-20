@@ -1,0 +1,365 @@
+//! The overlay: the sealed spec with a change's staged ops applied on top,
+//! in memory, and the rules that decide whether that is even legal.
+//!
+//! A change never writes a `.tel` file while it is open -- it writes *ops*.
+//! So the only way to answer "would this delta leave the spec coherent?" is
+//! to build the spec the delta describes and check that one, which is what
+//! this module is: [`parse_base`] reads the sealed tree, [`apply_ops`]
+//! replays a change's ops over it, and [`validate_ops`] runs the whole
+//! semantic pass ([`build_model`]) on the result. Nothing here touches the
+//! filesystem beyond that one read, and nothing here ever writes.
+//!
+//! Three properties are load-bearing:
+//!
+//! - **Order is data** (D1). The ops replay sequentially against one
+//!   another's output, so `add X` then `remove X` is a different transaction
+//!   from `remove X` then `add X`, and rule 2 below is judged at the point
+//!   in the sequence where the removal happens. What order does *not* change
+//!   is the verdict of the semantic pass: [`validate_ops`] builds one model,
+//!   from the state the last op leaves behind.
+//! - **A path is an identity** ([`StagedOp::target_path`]). The base is
+//!   keyed by repo-relative path, and an entity's path is a function of its
+//!   kind and its id, so two ops on one entity always meet on one slot.
+//! - **Rule 2 of §3.3 lives here** ([`apply_ops`]): removing an entity that
+//!   something still references is refused, naming the referrer. It is
+//!   checked against the state *after* the removal, so a change that drops
+//!   the referrer first and the referred-to entity second is allowed --
+//!   again, order is data.
+//!
+//! The rules this module does *not* enforce are the ones that need more than
+//! the spec tree: no-code-without-telos (rule 5) needs `telos.toml`'s globs
+//! and the working tree, and the red-witness discipline needs test runs.
+//! Both belong to reconcile.
+
+use std::collections::BTreeMap;
+
+use crate::emit::{emit_constraint, emit_intent, emit_notion};
+use crate::error::{Diagnostic, ErrorCode, TelosError};
+use crate::ids::{NotionName, RepoPath};
+use crate::model::{Binding, Notion, Rule, Scope, StagedOp, TelFile, TelosModel};
+use crate::semantic::{build_model, expr_notions, scenario_notions, statement_notions};
+use crate::suggest::closest;
+use crate::workspace::{Workspace, telos_error_as_diagnostic};
+
+/// Reads and parses the sealed spec tree, without building a model from it.
+///
+/// The distinction matters: [`Workspace::load_model`] would reject a base
+/// that does not resolve on its own, but the whole job of a change is to
+/// carry the spec from one coherent state to another, and the ops are what
+/// close the gap. So the base is only required to *parse*; whether it holds
+/// together is decided once the ops are on top of it ([`validate_ops`]).
+pub fn parse_base(ws: &Workspace) -> Result<Vec<(RepoPath, TelFile)>, Vec<Diagnostic>> {
+    ws.parse_spec_files()
+}
+
+/// Every notion of a base, by name -- the map
+/// [`crate::payload::intent_from_json`] types a scenario's `fields`
+/// against, which for a staged op must include the notions this very change
+/// added earlier.
+pub fn notions_of(base: &[(RepoPath, TelFile)]) -> BTreeMap<NotionName, Notion> {
+    base.iter()
+        .filter_map(|(_, file)| match file {
+            TelFile::Notion(notion) => Some((notion.name.clone(), notion.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The entity a base holds at `path`, if any.
+pub fn find_file<'a>(base: &'a [(RepoPath, TelFile)], path: &RepoPath) -> Option<&'a TelFile> {
+    base.iter().find(|(p, _)| p == path).map(|(_, file)| file)
+}
+
+/// « unknown intent `INT-9999` », with the `closest is …` suffix when one of
+/// the base's own entities of that kind is close enough.
+///
+/// `entity` is a [`StagedOp::entity`] word (`"notion"`, `"intent"`,
+/// `"constraint"`). Public because the CLI resolves an `edit`/`remove`
+/// target itself -- it needs the base entity to patch -- and must report a
+/// miss exactly as [`apply_ops`] would.
+pub fn unknown_entity(base: &[(RepoPath, TelFile)], entity: &str, key: &str) -> TelosError {
+    let known: Vec<String> = base
+        .iter()
+        .filter_map(|(_, file)| match (entity, file) {
+            ("notion", TelFile::Notion(n)) => Some(n.name.to_string()),
+            ("intent", TelFile::Intent(i)) => Some(i.id.to_string()),
+            ("constraint", TelFile::Constraint(c)) => Some(c.id.to_string()),
+            _ => None,
+        })
+        .collect();
+    let candidates: Vec<&str> = known.iter().map(String::as_str).collect();
+    let message = format!("unknown {entity} `{key}`");
+    let message = match closest(key, candidates.iter().copied()) {
+        Some(known) => format!("{message}; closest is `{known}`"),
+        None => message,
+    };
+    TelosError::new(ErrorCode::TelosReferenceUnknown, message)
+}
+
+/// Replays `ops` over `base`, in staged order, and hands back the spec they
+/// describe.
+///
+/// The three refusals, each with its own dedicated message:
+///
+/// - **add** of something the base already holds --
+///   `` notion `Invoice` already exists `` (`TELOS_INTEGRITY_VIOLATION`).
+/// - **edit**/**remove** of something it does not --
+///   `` unknown intent `INT-9999` `` (`TELOS_REFERENCE_UNKNOWN`).
+/// - **remove** of something still referenced (rule 2) --
+///   `cannot remove intent INT-0017: INT-0042 requires it`
+///   (`TELOS_INTEGRITY_VIOLATION`), see [`first_referrer`].
+///
+/// An `accept` op is inert: it seals the current bytes of a path the model
+/// does not represent (`telos/telos.toml`, a code file), which is a
+/// reconcile-time concern, not an overlay one.
+///
+/// Everything else the spec must satisfy -- that references resolve, that an
+/// active intent has a scenario, that literals match their attribute types
+/// -- is [`build_model`]'s, and runs in [`validate_ops`] once the whole
+/// overlay exists. Splitting it that way is deliberate: the three rules
+/// above are about the *op* (it contradicts what the base holds), and their
+/// messages name the op's own target, while a semantic diagnostic is about
+/// the *spec* and names a file.
+pub fn apply_ops(
+    mut base: Vec<(RepoPath, TelFile)>,
+    ops: &[StagedOp],
+) -> Result<Vec<(RepoPath, TelFile)>, TelosError> {
+    for op in ops {
+        apply_one(&mut base, op)?;
+    }
+    Ok(base)
+}
+
+/// Applies one op in place. On `Err` the vector is left in whatever state
+/// the failing op reached, which no caller can observe: [`apply_ops`] owns
+/// it and drops it.
+fn apply_one(base: &mut Vec<(RepoPath, TelFile)>, op: &StagedOp) -> Result<(), TelosError> {
+    if let StagedOp::Accept { .. } = op {
+        return Ok(());
+    }
+
+    let path = op.target_path();
+    let slot = base.iter().position(|(p, _)| *p == path);
+
+    match op.verb() {
+        "add" => {
+            if slot.is_some() {
+                return Err(TelosError::new(
+                    ErrorCode::TelosIntegrityViolation,
+                    format!("{} already exists", label(op)),
+                ));
+            }
+            base.push((path, post_state(op).expect("an `add` op carries an entity")));
+            base.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+            Ok(())
+        }
+        "edit" => {
+            let Some(slot) = slot else {
+                return Err(unknown_entity(base, op.entity(), &op.key()));
+            };
+            base[slot].1 = post_state(op).expect("an `edit` op carries an entity");
+            Ok(())
+        }
+        _ => {
+            let Some(slot) = slot else {
+                return Err(unknown_entity(base, op.entity(), &op.key()));
+            };
+            let (_, removed) = base.remove(slot);
+            match first_referrer(base, &removed) {
+                Some(referrer) => Err(TelosError::new(
+                    ErrorCode::TelosIntegrityViolation,
+                    format!("cannot remove {}: {referrer}", label(op)),
+                )),
+                None => Ok(()),
+            }
+        }
+    }
+}
+
+/// The file an `add`/`edit` op writes; `None` for the ops that write none.
+fn post_state(op: &StagedOp) -> Option<TelFile> {
+    match op {
+        StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => Some(TelFile::Notion(n.clone())),
+        StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => Some(TelFile::Intent(i.clone())),
+        StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => {
+            Some(TelFile::Constraint(c.clone()))
+        }
+        StagedOp::RemoveNotion(_)
+        | StagedOp::RemoveIntent(_)
+        | StagedOp::RemoveConstraint(_)
+        | StagedOp::Accept { .. } => None,
+    }
+}
+
+/// How an op's target is named in a message: a notion by its quoted name, an
+/// id-bearing entity by its bare id -- the same two shapes
+/// [`crate::semantic`] already uses for a duplicate declaration.
+fn label(op: &StagedOp) -> String {
+    match op.entity() {
+        "notion" => format!("notion `{}`", op.key()),
+        entity => format!("{entity} {}", op.key()),
+    }
+}
+
+/// Rule 2 of §3.3: the first thing in `base` that still points at `removed`,
+/// rendered as the tail of the refusal message (`INT-0042 requires it`).
+///
+/// `base` is the state *after* the removal, so what it finds is exactly what
+/// would be left dangling. `removed` is the whole file rather than its key
+/// because an intent takes its scenarios with it: a `proves` binding on one
+/// of them is broken by the removal just as surely as a `requires` edge.
+///
+/// Nothing in the model points at a constraint (a constraint's own `scope`
+/// points *out*, at intents), so removing one is never refused here.
+///
+/// The scan is deterministic: `base` is ordered by path, and each file is
+/// examined in a fixed order, so the same removal always names the same
+/// referrer.
+fn first_referrer(base: &[(RepoPath, TelFile)], removed: &TelFile) -> Option<String> {
+    match removed {
+        TelFile::Notion(notion) => first_notion_referrer(base, &notion.name),
+        TelFile::Intent(intent) => {
+            let scenarios: Vec<_> = intent.scenarios.iter().map(|s| s.id).collect();
+            first_intent_referrer(base, intent.id, &scenarios)
+        }
+        TelFile::Constraint(_) | TelFile::Bindings(_) => None,
+    }
+}
+
+fn first_notion_referrer(base: &[(RepoPath, TelFile)], name: &NotionName) -> Option<String> {
+    for (_, file) in base {
+        match file {
+            TelFile::Notion(other) => {
+                let targeted = other.rels.iter().any(|rel| rel.target.node == *name)
+                    || other.attrs.iter().any(|attr| match &attr.ty {
+                        crate::model::AttrType::Ref(target) => target == name,
+                        _ => false,
+                    });
+                if targeted {
+                    return Some(format!("notion `{}` references it", other.name));
+                }
+            }
+            TelFile::Intent(intent) => {
+                if statement_notions(&intent.statement).contains(name) {
+                    return Some(format!("{} uses it", intent.id));
+                }
+                for scenario in &intent.scenarios {
+                    if scenario_notions(scenario).contains(name) {
+                        return Some(format!("{} uses it", scenario.id));
+                    }
+                }
+            }
+            TelFile::Constraint(constraint) => {
+                if let Rule::Machine(expr) = &constraint.rule {
+                    let mut notions = Default::default();
+                    expr_notions(expr, &mut notions);
+                    if notions.contains(name) {
+                        return Some(format!("{} uses it", constraint.id));
+                    }
+                }
+            }
+            TelFile::Bindings(_) => {}
+        }
+    }
+    None
+}
+
+fn first_intent_referrer(
+    base: &[(RepoPath, TelFile)],
+    id: crate::ids::IntentId,
+    scenarios: &[crate::ids::ScenarioId],
+) -> Option<String> {
+    for (_, file) in base {
+        match file {
+            TelFile::Intent(other) => {
+                let relations = [
+                    ("refines", &other.refines),
+                    ("requires", &other.requires),
+                    ("excludes", &other.excludes),
+                ];
+                for (verb, ids) in relations {
+                    if ids.iter().any(|other_id| other_id.node == id) {
+                        return Some(format!("{} {verb} it", other.id));
+                    }
+                }
+            }
+            TelFile::Constraint(constraint) => {
+                if let Scope::Intents(ids) = &constraint.scope
+                    && ids.iter().any(|scoped| scoped.node == id)
+                {
+                    return Some(format!("{} constrains it", constraint.id));
+                }
+            }
+            TelFile::Bindings(bindings) => {
+                for binding in bindings {
+                    match binding {
+                        Binding::Implements { path, intent } if intent.node == id => {
+                            return Some(format!("`{path}` implements it"));
+                        }
+                        Binding::Proves { test, scenario }
+                            if scenarios.contains(&scenario.node) =>
+                        {
+                            return Some(format!("`{test}` proves its scenario {}", scenario.node));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TelFile::Notion(_) => {}
+        }
+    }
+    None
+}
+
+/// The full check a staged delta must pass: the base parses, the ops apply,
+/// and the spec they describe builds cleanly.
+///
+/// This is the gate `telos add|edit|remove` runs *before* touching the
+/// change file, which is what makes a refused mutation leave the change
+/// byte-for-byte as it was.
+pub fn validate_ops(ws: &Workspace, ops: &[StagedOp]) -> Result<TelosModel, Vec<Diagnostic>> {
+    let base = parse_base(ws)?;
+    let overlay = apply_ops(base, ops).map_err(|e| vec![telos_error_as_diagnostic(e)])?;
+    build_model(overlay)
+}
+
+/// The canonical text of op `idx`'s target, before and after that op --
+/// `None` on the side where the entity does not exist.
+///
+/// The ops before `idx` are replayed first, so an `edit` of something an
+/// earlier op of the same change added reports that op's output as its
+/// `before`: what a reviewer sees is the delta the op itself introduces, not
+/// the delta against the sealed tree.
+///
+/// Total by construction, because `change diff` (T8) must be able to
+/// describe a change file a human hand-edited into something the overlay
+/// would refuse: an index past the end, an `accept` op (whose target is a
+/// path the model holds no entity for), and a prefix that fails to apply all
+/// answer with what is knowable rather than with an error -- the last of
+/// those by falling back to the unmodified base.
+pub fn op_before_after(
+    base: &[(RepoPath, TelFile)],
+    ops: &[StagedOp],
+    idx: usize,
+) -> (Option<String>, Option<String>) {
+    let Some(op) = ops.get(idx) else {
+        return (None, None);
+    };
+    let pre = apply_ops(base.to_vec(), &ops[..idx]).unwrap_or_else(|_| base.to_vec());
+
+    let before = find_file(&pre, &op.target_path()).map(emit);
+    let after = match op {
+        StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => Some(emit_notion(n)),
+        StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => Some(emit_intent(i)),
+        StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => Some(emit_constraint(c)),
+        StagedOp::RemoveNotion(_)
+        | StagedOp::RemoveIntent(_)
+        | StagedOp::RemoveConstraint(_)
+        | StagedOp::Accept { .. } => None,
+    };
+    (before, after)
+}
+
+fn emit(file: &TelFile) -> String {
+    crate::emit::emit_file(file)
+}

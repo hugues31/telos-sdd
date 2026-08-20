@@ -153,15 +153,24 @@ impl StagedOp {
     }
 }
 
-fn notion_path(name: &NotionName) -> RepoPath {
+/// Where a notion of this name lives in the spec tree.
+///
+/// The three functions below are the single definition of "an entity's
+/// location is a function of its identity" -- [`StagedOp::target_path`] is
+/// their first caller, and every other one (the overlay's lookups, the
+/// reconcile's writes) resolves a path the same way rather than formatting
+/// one of its own.
+pub fn notion_path(name: &NotionName) -> RepoPath {
     RepoPath::new(format!("telos/notions/{name}.tel"))
 }
 
-fn intent_path(id: IntentId) -> RepoPath {
+/// Where an intent of this id lives in the spec tree.
+pub fn intent_path(id: IntentId) -> RepoPath {
     RepoPath::new(format!("telos/intents/{id}.tel"))
 }
 
-fn constraint_path(id: ConstraintId) -> RepoPath {
+/// Where a constraint of this id lives in the spec tree.
+pub fn constraint_path(id: ConstraintId) -> RepoPath {
     RepoPath::new(format!("telos/constraints/{id}.tel"))
 }
 

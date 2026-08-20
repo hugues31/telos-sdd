@@ -6,13 +6,16 @@
 //! stub, so `telos <not-yet-a-command>` is a clap usage error (exit 2) rather
 //! than a command that answers with something meaningless.
 
+use std::io::Read;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
 use telos_core::error::{ErrorCode, TelosError};
 
-use crate::commands::{self, Ctx, change::ChangeCommand, list::EntityType, query::QueryCommand};
+use crate::commands::{
+    self, Ctx, change::ChangeCommand, list::EntityType, mutate::EntityKind, query::QueryCommand,
+};
 use crate::envelope::CmdResult;
 use crate::render::render;
 
@@ -69,6 +72,34 @@ enum Command {
         #[command(subcommand)]
         change: ChangeCommand,
     },
+    /// Stage the creation of an entity into an open change (payload on stdin).
+    Add {
+        /// What kind of entity to add.
+        kind: EntityKind,
+        /// The change to stage into (`CHG-0001`).
+        #[arg(long)]
+        change: String,
+    },
+    /// Stage a modification of an entity into an open change (payload on stdin).
+    Edit {
+        /// What kind of entity to edit.
+        kind: EntityKind,
+        /// The entity's natural key (`Invoice`, `INT-0042`, `CON-0003`).
+        key: String,
+        /// The change to stage into (`CHG-0001`).
+        #[arg(long)]
+        change: String,
+    },
+    /// Stage the deletion of an entity into an open change.
+    Remove {
+        /// What kind of entity to remove.
+        kind: EntityKind,
+        /// The entity's natural key (`Invoice`, `INT-0042`, `CON-0003`).
+        key: String,
+        /// The change to stage into (`CHG-0001`).
+        #[arg(long)]
+        change: String,
+    },
 }
 
 impl Command {
@@ -87,6 +118,11 @@ impl Command {
             // command a caller invoked, and `telos change …` is one command
             // with subcommands, the same way `telos query …` is.
             Command::Change { .. } => "change",
+            // The staging verbs are three commands, not one with an
+            // argument, so each names itself (Annex E).
+            Command::Add { .. } => "add",
+            Command::Edit { .. } => "edit",
+            Command::Remove { .. } => "remove",
         }
     }
 }
@@ -125,7 +161,36 @@ fn execute(command: &Command) -> CmdResult {
         Command::Query { query } => commands::query::run(&ctx()?, query),
         Command::Impact { target } => commands::impact::run(&ctx()?, target),
         Command::Change { change } => commands::change::run(&ctx()?, change),
+        Command::Add { kind, change } => {
+            commands::mutate::add(&ctx()?, *kind, change, &stdin_payload()?)
+        }
+        Command::Edit { kind, key, change } => {
+            commands::mutate::edit(&ctx()?, *kind, key, change, &stdin_payload()?)
+        }
+        Command::Remove { kind, key, change } => {
+            commands::mutate::remove(&ctx()?, *kind, key, change)
+        }
     }
+}
+
+/// Reads the whole of stdin, for the two commands that take a JSON payload
+/// there (Annex D).
+///
+/// Read here rather than inside the command so that the command layer stays
+/// a pure function of its arguments -- the same reason `ctx()` reads the
+/// current directory here. An empty read is not an error at this level: what
+/// "nothing usable arrived" means is the payload parser's judgement
+/// (`commands::mutate`), which reports it under one frozen message whatever
+/// the cause.
+fn stdin_payload() -> Result<String, TelosError> {
+    let mut payload = String::new();
+    std::io::stdin().read_to_string(&mut payload).map_err(|e| {
+        TelosError::new(
+            ErrorCode::TelosParseError,
+            format!("payload: failed to read stdin: {e}"),
+        )
+    })?;
+    Ok(payload)
 }
 
 /// Builds the context commands run in. The current directory is where every

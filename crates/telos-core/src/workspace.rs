@@ -93,15 +93,19 @@ impl Workspace {
         Ok(files)
     }
 
-    /// Reads and parses every spec file, then folds them into a
-    /// [`TelosModel`] via [`build_model`].
+    /// Reads and parses every spec file, in [`Workspace::spec_files`] order.
     ///
-    /// Parse diagnostics from every file are collected first (every file is
-    /// parsed even if another one already failed); if any exist, they are
-    /// returned without running the semantic pass, since a file that failed
-    /// to parse cannot be resolved against. Does not read `telos.lock` and
-    /// does not touch git.
-    pub fn load_model(&self) -> Result<TelosModel, Vec<Diagnostic>> {
+    /// Parse diagnostics from every file are collected (every file is parsed
+    /// even if another one already failed); if any exist, they are returned
+    /// instead of a partial list, since a file that failed to parse cannot
+    /// be resolved against.
+    ///
+    /// This is the half of [`load_model`](Workspace::load_model) that stops
+    /// short of the semantic pass, and it exists because M2's overlay
+    /// ([`crate::overlay`]) needs exactly that: the parsed base, so a
+    /// change's staged ops can be applied to it *before* a model is built
+    /// from the result.
+    pub fn parse_spec_files(&self) -> Result<Vec<(RepoPath, TelFile)>, Vec<Diagnostic>> {
         let spec_files = self
             .spec_files()
             .map_err(|e| vec![telos_error_as_diagnostic(e)])?;
@@ -138,11 +142,19 @@ impl Workspace {
             }
         }
 
-        if !diagnostics.is_empty() {
-            return Err(diagnostics);
+        if diagnostics.is_empty() {
+            Ok(parsed)
+        } else {
+            Err(diagnostics)
         }
+    }
 
-        build_model(parsed)
+    /// Reads and parses every spec file, then folds them into a
+    /// [`TelosModel`] via [`build_model`].
+    ///
+    /// Does not read `telos.lock` and does not touch git.
+    pub fn load_model(&self) -> Result<TelosModel, Vec<Diagnostic>> {
+        build_model(self.parse_spec_files()?)
     }
 
     /// `<telos_dir>/telos.lock`.
@@ -228,7 +240,10 @@ fn collect_tel_files(dir: &Path, prefix: &str, out: &mut Vec<RepoPath>) -> Resul
     Ok(())
 }
 
-fn telos_error_as_diagnostic(e: TelosError) -> Diagnostic {
+/// Lifts a [`TelosError`] into a file-less [`Diagnostic`], for the two
+/// places that must answer with a diagnostics list but can fail with a bare
+/// error: [`Workspace::parse_spec_files`] and [`crate::overlay::validate_ops`].
+pub(crate) fn telos_error_as_diagnostic(e: TelosError) -> Diagnostic {
     Diagnostic {
         code: e.code,
         message: e.message,

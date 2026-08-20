@@ -8,6 +8,7 @@ pub mod check;
 pub mod impact;
 pub mod init;
 pub mod list;
+pub mod mutate;
 pub mod query;
 pub mod show;
 pub mod status;
@@ -16,13 +17,14 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
-use telos_core::changes::open_change_infos;
+use telos_core::changes::{OpenChangeInfo, list_change_ids, open_change_infos, read_change};
+use telos_core::counters::{Alloc, floors, read_counters};
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::graph::NodeRef;
 use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
 use telos_core::lock::Lock;
-use telos_core::model::TelosModel;
+use telos_core::model::{Change, TelosModel};
 use telos_core::state::{ProjectStateKind, StateReport, compute_state};
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
@@ -66,8 +68,11 @@ fn require_lock(ws: &Workspace) -> Result<Lock, TelosError> {
 pub(crate) struct Project {
     pub ws: Workspace,
     pub lock: Lock,
-    /// Includes `open_changes`, best-effort per D15 -- an unparseable change
-    /// file is reported there, never an error.
+    /// Every open change, best-effort per D15 -- an unparseable change file
+    /// is reported here, never an error. Kept alongside the state it was
+    /// computed from because it carries what the state does not: each
+    /// change's `claims`, which is what the D5 gate reads.
+    pub changes: Vec<OpenChangeInfo>,
     pub state: StateReport,
 }
 
@@ -83,9 +88,49 @@ pub(crate) fn project(ctx: &Ctx) -> Result<Project, TelosError> {
     let ws = Workspace::discover(&ctx.cwd)?;
     let lock = require_lock(&ws)?;
     let git = GitRepo::discover(&ctx.cwd)?;
-    let open_changes = open_change_infos(&ws)?;
-    let state = compute_state(&ws, &lock, &git, &open_changes)?;
-    Ok(Project { ws, lock, state })
+    let changes = open_change_infos(&ws)?;
+    let state = compute_state(&ws, &lock, &git, &changes)?;
+    Ok(Project {
+        ws,
+        lock,
+        changes,
+        state,
+    })
+}
+
+/// The allocator for a fresh id: `max(persisted counters, scanned floors)`
+/// (D4).
+///
+/// The floor scan needs the *sealed model* (its highest intent, scenario and
+/// constraint ids), every open change's ops, and the change that produced
+/// the current seal. Two details are worth spelling out:
+///
+/// - A change file that does not parse contributes no op to [`floors`] --
+///   there is nothing trustworthy to scan -- but its **id** still has to
+///   hold the change counter down, or abandoning a corrupted file would let
+///   the next `open` reissue its id. Hence the explicit `max` over
+///   [`list_change_ids`], which reads only file names.
+/// - The model is required to parse. Allocating an id against a spec whose
+///   highest ids cannot be read is how ids get reused. A spec that fails to
+///   parse but has not drifted is rare (it was sealed broken) and is a
+///   `check` problem, reported here as such.
+///
+/// Shared by `change open` and by the three staging verbs: one definition of
+/// "where do the next ids start", so two commands can never disagree.
+pub(crate) fn allocator(ws: &Workspace, lock: &Lock) -> Result<Alloc, TelosError> {
+    let model = ws.load_model().map_err(diagnostics_to_error)?;
+    let ids = list_change_ids(ws)?;
+    let parsed: Vec<Change> = ids
+        .iter()
+        .filter_map(|id| read_change(ws, *id).ok())
+        .collect();
+
+    let mut floor = floors(&model, &parsed, lock.sealed_by);
+    for id in &ids {
+        floor.change = floor.change.max(id.0);
+    }
+
+    Ok(Alloc::new(read_counters(ws)?, floor))
 }
 
 /// The hint on every `TELOS_DRIFT_DETECTED`. Frozen by

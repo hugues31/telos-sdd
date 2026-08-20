@@ -2,8 +2,6 @@
 //! snapshot.  The live server belongs to the next task; without `--export`
 //! this command deliberately remains unavailable at runtime for now.
 
-use std::path::Path;
-
 use serde_json::json;
 
 use telos_core::state::ProjectStateKind;
@@ -15,7 +13,7 @@ use crate::envelope::{CmdResult, Outcome};
 use crate::view::export::export;
 use crate::view::model::ViewSnapshot;
 
-pub fn run(ctx: &Ctx, destination: &Path) -> CmdResult {
+pub fn run(ctx: &Ctx, destination: &str) -> CmdResult {
     let project = project(ctx)?;
     // Match `check --sealed` gate order exactly: damage wins over work in
     // progress, and neither state is permitted to publish as a sealed view.
@@ -25,7 +23,7 @@ pub fn run(ctx: &Ctx, destination: &Path) -> CmdResult {
     debug_assert_eq!(project.state.state, ProjectStateKind::Coherent);
     let model = project.ws.load_model().map_err(diagnostics_to_error)?;
     let snapshot = ViewSnapshot::build(&project.state, &model);
-    let files = export(&snapshot, destination)?;
+    let files = export(&snapshot, destination.as_ref())?;
     let files: Vec<String> = files
         .iter()
         .map(|path| path.to_string_lossy().replace('\\', "/"))
@@ -37,11 +35,7 @@ pub fn run(ctx: &Ctx, destination: &Path) -> CmdResult {
             "destination": destination,
             "files": files,
         }),
-        human: format!(
-            "exported {} files to {}",
-            files.len(),
-            destination.display()
-        ),
+        human: format!("exported {} files to {}", files.len(), destination),
         next_actions: Vec::new(),
     })
 }

@@ -483,6 +483,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "globset",
+ "libc",
  "serde",
  "serde_json",
  "telos-core",

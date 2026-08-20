@@ -24,16 +24,35 @@ pub(crate) fn export(
     snapshot: &ViewSnapshot,
     destination: &Path,
 ) -> Result<Vec<PathBuf>, TelosError> {
-    export_with_writer(snapshot, destination, |path, bytes| fs::write(path, bytes))
+    export_with_writer_and_before_publish(
+        snapshot,
+        destination,
+        |path, bytes| fs::write(path, bytes),
+        || Ok(()),
+    )
 }
 
+#[cfg(test)]
 fn export_with_writer<F>(
     snapshot: &ViewSnapshot,
     destination: &Path,
-    mut write_file: F,
+    write_file: F,
 ) -> Result<Vec<PathBuf>, TelosError>
 where
     F: FnMut(&Path, &[u8]) -> io::Result<()>,
+{
+    export_with_writer_and_before_publish(snapshot, destination, write_file, || Ok(()))
+}
+
+fn export_with_writer_and_before_publish<F, H>(
+    snapshot: &ViewSnapshot,
+    destination: &Path,
+    mut write_file: F,
+    before_publish: H,
+) -> Result<Vec<PathBuf>, TelosError>
+where
+    F: FnMut(&Path, &[u8]) -> io::Result<()>,
+    H: FnOnce() -> io::Result<()>,
 {
     refuse_existing(destination)?;
     let rendered = rendered_files(snapshot)?;
@@ -47,11 +66,13 @@ where
             write_file(&path, bytes).map_err(|error| io_error("write", &path, error))?;
         }
 
-        // A second check prevents the ordinary, already-existing case from
-        // ever reaching `rename`, whose platform behavior may overwrite.
+        // This makes the common already-existing case cheap.  Publication
+        // still uses a no-replace primitive below: another actor can create
+        // the destination between this check and that syscall.
         refuse_existing(destination)?;
-        fs::rename(&staging, destination)
-            .map_err(|error| io_error("rename", destination, error))?;
+        before_publish()
+            .map_err(|error| io_error("prepare publication for", destination, error))?;
+        publish_no_replace(&staging, destination)?;
         Ok(rendered.into_iter().map(|(path, _)| path).collect())
     })();
 
@@ -102,17 +123,127 @@ fn rendered_files(snapshot: &ViewSnapshot) -> Result<Vec<(PathBuf, Vec<u8>)>, Te
 
 fn refuse_existing(destination: &Path) -> Result<(), TelosError> {
     match fs::symlink_metadata(destination) {
-        Ok(_) => Err(TelosError::new(
-            ErrorCode::TelosChangeStateInvalid,
-            format!(
-                "export destination `{}` already exists",
-                destination.display()
-            ),
-        )
-        .hint("choose an empty path that does not exist")),
+        Ok(_) => Err(existing_destination(destination)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_error("inspect", destination, error)),
     }
+}
+
+fn existing_destination(destination: &Path) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        format!(
+            "export destination `{}` already exists",
+            destination.display()
+        ),
+    )
+    .hint("choose an empty path that does not exist")
+}
+
+/// Atomically promotes `staging` only when `destination` does not exist.
+///
+/// A check followed by `std::fs::rename` is not safe: POSIX rename may
+/// replace a directory another process created in between.  Linux's
+/// `renameat2(RENAME_NOREPLACE)` gives this operation one kernel boundary.
+/// Platforms without an equivalent primitive fail closed rather than falling
+/// back to a replacement-capable rename.
+#[cfg(target_os = "linux")]
+fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let staging = CString::new(staging.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export staging path contains a NUL byte: {}",
+                staging.display()
+            ),
+        )
+    })?;
+    let destination_c = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export destination path contains a NUL byte: {}",
+                destination.display()
+            ),
+        )
+    })?;
+
+    // SAFETY: both `CString`s are NUL-terminated and remain alive for this
+    // call. `AT_FDCWD` asks the kernel to resolve the supplied paths exactly
+    // as the surrounding filesystem calls do.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            staging.as_ptr(),
+            libc::AT_FDCWD,
+            destination_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        return Err(existing_destination(destination));
+    }
+    Err(io_error("publish", destination, error))
+}
+
+/// Darwin's `renamex_np(RENAME_EXCL)` has the same no-replacement guarantee
+/// as Linux's `renameat2(RENAME_NOREPLACE)`.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let staging = CString::new(staging.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export staging path contains a NUL byte: {}",
+                staging.display()
+            ),
+        )
+    })?;
+    let destination_c = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosInternal,
+            format!(
+                "export destination path contains a NUL byte: {}",
+                destination.display()
+            ),
+        )
+    })?;
+
+    // SAFETY: both path buffers are valid C strings and remain alive for the
+    // duration of the Darwin no-replace rename syscall.
+    let result =
+        unsafe { libc::renamex_np(staging.as_ptr(), destination_c.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        return Err(existing_destination(destination));
+    }
+    Err(io_error("publish", destination, error))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+fn publish_no_replace(_staging: &Path, destination: &Path) -> Result<(), TelosError> {
+    Err(TelosError::new(
+        ErrorCode::TelosInternal,
+        format!(
+            "atomic no-replace export publication is unsupported on this platform: {}",
+            destination.display()
+        ),
+    ))
 }
 
 fn staging_directory(destination: &Path) -> Result<PathBuf, TelosError> {
@@ -155,13 +286,15 @@ fn io_error(verb: &str, path: &Path, error: io::Error) -> TelosError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
 
     use telos_core::state::{ProjectStateKind, StateReport};
     use telos_core::workspace::Workspace;
 
-    use super::{export_with_writer, staging_prefix};
+    use super::{export_with_writer, export_with_writer_and_before_publish, staging_prefix};
     use crate::view::model::ViewSnapshot;
 
     fn fixture_snapshot() -> ViewSnapshot {
@@ -192,6 +325,58 @@ mod tests {
         assert!(!destination.exists());
         let prefix = staging_prefix(&destination);
         assert!(std::fs::read_dir(temporary.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        }));
+    }
+
+    #[test]
+    fn publication_race_preserves_a_destination_created_after_the_last_check() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("site");
+        let snapshot = fixture_snapshot();
+        let barrier = Arc::new(Barrier::new(2));
+        let actor_barrier = Arc::clone(&barrier);
+        let actor_destination = destination.clone();
+        let actor = std::thread::spawn(move || {
+            actor_barrier.wait();
+            fs::create_dir(&actor_destination)?;
+            fs::write(actor_destination.join("owner.txt"), "concurrent owner")
+        });
+
+        let error = export_with_writer_and_before_publish(
+            &snapshot,
+            &destination,
+            |path, bytes| fs::write(path, bytes),
+            || {
+                barrier.wait();
+                actor
+                    .join()
+                    .map_err(|_| io::Error::other("publication actor panicked"))?
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code,
+            telos_core::error::ErrorCode::TelosChangeStateInvalid
+        );
+        assert_eq!(
+            error.message,
+            format!(
+                "export destination `{}` already exists",
+                destination.display()
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("owner.txt")).unwrap(),
+            "concurrent owner"
+        );
+        let prefix = staging_prefix(&destination);
+        assert!(fs::read_dir(temporary.path()).unwrap().all(|entry| {
             !entry
                 .unwrap()
                 .file_name()

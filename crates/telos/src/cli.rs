@@ -243,7 +243,15 @@ fn execute(command: &Command) -> CmdResult {
         Command::View {
             export: Some(destination),
             ..
-        } => commands::view::run(&ctx()?, destination),
+        } => {
+            let destination = destination.to_str().ok_or_else(|| {
+                TelosError::new(
+                    ErrorCode::TelosParseError,
+                    "export destination must be valid UTF-8",
+                )
+            })?;
+            commands::view::run(&ctx()?, destination)
+        }
         Command::View { export: None, .. } => Err(TelosError::new(
             ErrorCode::TelosInternal,
             "the live view server is not available yet; pass `--export DIR`",

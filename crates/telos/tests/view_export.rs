@@ -262,3 +262,49 @@ fn two_exports_have_identical_sorted_paths_and_bytes() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn export_rejects_a_non_utf8_destination_without_creating_any_path() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = with_fixture();
+    let before = directory_names(tmp.path());
+    let destination = OsString::from_vec(b"site-\xff".to_vec());
+    let mut command = telos(tmp.path(), &[]);
+    let output = command
+        .arg("view")
+        .arg("--export")
+        .arg(&destination)
+        .arg("--json")
+        .output()
+        .expect("run telos view with a non-UTF-8 destination");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        json_stdout(&output),
+        json!({
+            "ok": false,
+            "command": "view",
+            "result": null,
+            "error": {
+                "code": "TELOS_PARSE_ERROR",
+                "message": "export destination must be valid UTF-8",
+                "hint": null
+            },
+            "next_actions": []
+        })
+    );
+    assert_eq!(directory_names(tmp.path()), before);
+}
+
+#[cfg(unix)]
+fn directory_names(directory: &Path) -> Vec<std::ffi::OsString> {
+    let mut names: Vec<_> = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    names
+}

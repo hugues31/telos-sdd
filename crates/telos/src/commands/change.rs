@@ -20,10 +20,11 @@ use serde_json::{Value, json};
 use telos_core::changes::{delete_change, open_change_infos, read_change, write_change};
 use telos_core::counters::write_counters;
 use telos_core::error::{ErrorCode, TelosError};
+use telos_core::git::GitRepo;
 use telos_core::ids::ChangeId;
 use telos_core::model::{Change, ChangeStatus, StagedOp};
 use telos_core::overlay::{op_before_after, parse_base};
-use telos_core::reconcile::reconcile_change;
+use telos_core::reconcile::{reconcile_change, reconcile_full};
 use telos_core::workspace::Workspace;
 
 use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_no_unclaimed_drift};
@@ -55,10 +56,16 @@ pub enum ChangeCommand {
         /// The change to approve (`CHG-0001`).
         id: String,
     },
-    /// Apply an approved change: write its spec files, reseal, close it.
+    /// Apply an approved change (write its spec files, reseal, close it),
+    /// or reseal the whole project with `--full`.
     Reconcile {
         /// The change to reconcile (`CHG-0001`).
-        id: String,
+        #[arg(required_unless_present = "full", conflicts_with = "full")]
+        id: Option<String>,
+        /// Re-prove the whole project and reseal it, ignoring the current
+        /// lock. Takes no change id.
+        #[arg(long)]
+        full: bool,
     },
 }
 
@@ -69,7 +76,10 @@ pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
         ChangeCommand::Abandon { id } => abandon(ctx, id),
         ChangeCommand::Diff { id } => diff(ctx, id),
         ChangeCommand::Approve { id } => approve(ctx, id),
-        ChangeCommand::Reconcile { id } => reconcile(ctx, id),
+        // `conflicts_with` and `required_unless_present` leave exactly two
+        // shapes: an id alone, or `--full` alone.
+        ChangeCommand::Reconcile { id: Some(id), .. } => reconcile(ctx, id),
+        ChangeCommand::Reconcile { .. } => reconcile_full_project(ctx),
     }
 }
 
@@ -332,8 +342,8 @@ fn approve(ctx: &Ctx, id: &str) -> CmdResult {
 /// refuses, which the shared CLI gate cannot do. Running both would only
 /// mean the same verdict reported twice, the less informative one first.
 ///
-/// `--full` (D12) belongs to T11 and is absent rather than stubbed, so
-/// `result.full` is `false` today by construction, not by default.
+/// `result.full` is `false` here by construction: clap refuses an id and
+/// `--full` together, so this function is only ever reached without it.
 fn reconcile(ctx: &Ctx, id: &str) -> CmdResult {
     let id = parse_change_id(id)?;
     let project = project(ctx)?;
@@ -358,6 +368,42 @@ fn reconcile(ctx: &Ctx, id: &str) -> CmdResult {
         human: format!(
             "reconciled {id}: {} op(s) applied, {} check(s), {} test(s)",
             outcome.ops_applied, outcome.checks_run, outcome.tests_run
+        ),
+        next_actions: vec!["telos status".to_string()],
+    })
+}
+
+/// `telos change reconcile --full`: re-prove the whole project and reseal
+/// it (D12), whatever the current `telos.lock` says -- or fails to say.
+///
+/// Deliberately does *not* go through [`project`]: that preamble requires a
+/// readable lock and computes a state against it, and this command exists
+/// precisely for the projects where neither is possible -- a lock left
+/// conflicted by a merge, or a spec tree that was never sealed at all. The
+/// workspace and the repository are all it needs, and it re-proves
+/// everything it seals.
+///
+/// `result.id` is `null` rather than absent: the envelope's `result` shape
+/// is one shape per command (Annex E), and a caller reading `id` should
+/// find the key with nothing in it rather than have to know that this one
+/// invocation omits it.
+fn reconcile_full_project(ctx: &Ctx) -> CmdResult {
+    let ws = Workspace::discover(&ctx.cwd)?;
+    let git = GitRepo::discover(&ctx.cwd)?;
+
+    let outcome = reconcile_full(&ws, &git)?;
+
+    Ok(Outcome {
+        result: json!({
+            "id": Value::Null,
+            "full": true,
+            "ops_applied": outcome.ops_applied,
+            "checks_run": outcome.checks_run,
+            "tests_run": outcome.tests_run,
+        }),
+        human: format!(
+            "resealed the project: {} check(s), {} test(s)",
+            outcome.checks_run, outcome.tests_run
         ),
         next_actions: vec!["telos status".to_string()],
     })

@@ -1,5 +1,7 @@
-//! End-to-end tests for `telos change reconcile CHG-NNNN`: the transaction
-//! that turns a reviewed delta into spec files on disk and a fresh seal.
+//! End-to-end tests for `telos change reconcile`: the transaction that turns
+//! a reviewed delta into spec files on disk and a fresh seal (`CHG-NNNN`),
+//! and the delta-less reseal that proves a whole project from scratch
+//! (`--full`, D12 -- last section).
 //!
 //! The shape of this file follows the frozen gate order of T10 -- drift,
 //! status, digest, accept OIDs, overlay, rule 5, constraint checks, tests,
@@ -21,7 +23,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use common::{repo, telos, with_fixture, with_fixture_mut};
+use common::{repo, telos, unsealed_fixture, with_fixture, with_fixture_mut};
 
 // --- plumbing --------------------------------------------------------------
 
@@ -551,10 +553,195 @@ fn a_failing_test_run_refuses_the_reconcile_and_reports_the_substituted_command(
 
 /// The corpus ships `[test] cmd = ""` (D13); this puts a real, cross-OS
 /// runner in its place before the fixture is sealed.
+///
+/// `git hash-object {filter}` is chosen so that both invocations the suite
+/// needs are meaningful: with a filter it succeeds exactly when the named
+/// file exists (which is how the substitution is proved end to end), and
+/// with the empty filter of a `--full` run -- the one the fixture's own seal
+/// performs -- it degenerates to a bare `git hash-object`, which hashes
+/// nothing and exits 0.
 fn set_test_cmd(root: &Path) {
+    set_test_cmd_to(root, "git hash-object {filter}");
+}
+
+/// Rewrites the corpus' empty `[test] cmd` to `cmd`, before the seal.
+fn set_test_cmd_to(root: &Path, cmd: &str) {
     let path = root.join("telos/telos.toml");
     let content = fs::read_to_string(&path).unwrap();
-    let replaced = content.replace("cmd = \"\"", "cmd = \"git hash-object {filter}\"");
+    let replaced = content.replace("cmd = \"\"", &format!("cmd = {cmd:?}"));
     assert_ne!(replaced, content, "the corpus no longer ships an empty cmd");
     fs::write(&path, replaced).unwrap();
+}
+
+// --- `reconcile --full` (D12) ------------------------------------------------
+//
+// The lock-merge exit, and the one legitimate way to seal a spec tree that
+// exists but was never sealed. It re-proves everything from the files on
+// disk, so it reads no lock, applies no op, and gates on no drift.
+
+/// Runs `telos change reconcile --full --json` and returns the envelope.
+fn reconcile_full(dir: &Path) -> Value {
+    let out = telos(dir, &["change", "reconcile", "--full", "--json"])
+        .output()
+        .unwrap();
+    json_stdout(&out)
+}
+
+fn reconcile_full_ok(dir: &Path) -> Value {
+    let envelope = reconcile_full(dir);
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "expected the full reconcile to succeed, got {envelope}"
+    );
+    envelope["result"].clone()
+}
+
+/// The golden envelope of a full reseal over the corpus, unsealed: no id, no
+/// op, the corpus' one global constraint checked (`git --version`), and no
+/// test run at all since the corpus ships `[test] cmd = ""` (D13).
+#[test]
+fn full_reconcile_seals_an_unsealed_project() {
+    let tmp = unsealed_fixture();
+    assert!(
+        !tmp.path().join(LOCK).exists(),
+        "the fixture starts unsealed"
+    );
+
+    let out = telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?} -- {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        json_stdout(&out),
+        json!({
+            "ok": true,
+            "command": "change",
+            "result": {
+                "id": null,
+                "full": true,
+                "ops_applied": 0,
+                "checks_run": 1,
+                "tests_run": 0
+            },
+            "error": null,
+            "next_actions": ["telos status"]
+        })
+    );
+
+    // D12: a full reseal is nobody's change, so the lock records none.
+    let lock = read(tmp.path(), LOCK);
+    assert!(
+        !lock.contains("sealed_by"),
+        "a full reseal must not claim a change:\n{lock}"
+    );
+    assert!(lock.contains("telos/intents/INT-0042.tel"), "{lock}");
+    assert!(lock.contains("src/billing/invoice.rs"), "{lock}");
+
+    let envelope = json_stdout(&telos(tmp.path(), &["status", "--json"]).output().unwrap());
+    assert_eq!(envelope["result"]["state"], json!("coherent"));
+}
+
+/// The whole point of D12: the existing lock is treated as unreliable and
+/// never read, so the merge conflict a `git merge` left in it is not an
+/// obstacle -- it is the very reason to run this.
+#[test]
+fn full_reconcile_never_reads_the_existing_lock() {
+    let tmp = unsealed_fixture();
+    fs::write(
+        tmp.path().join(LOCK),
+        "<<<<<<< HEAD\nversion = 1\n=======\nnot even toml\n>>>>>>> theirs\n",
+    )
+    .unwrap();
+
+    assert_eq!(reconcile_full_ok(tmp.path())["full"], json!(true));
+
+    let lock = read(tmp.path(), LOCK);
+    assert!(
+        !lock.contains("<<<<<<<"),
+        "the conflicted lock was not replaced:\n{lock}"
+    );
+    let envelope = json_stdout(&telos(tmp.path(), &["status", "--json"]).output().unwrap());
+    assert_eq!(envelope["result"]["state"], json!("coherent"));
+}
+
+/// A full reseal proves the spec the same way a reconcile does: a reference
+/// that resolves to nothing is refused, and nothing is sealed.
+#[test]
+fn full_reconcile_refuses_a_spec_that_does_not_resolve() {
+    let tmp = unsealed_fixture();
+    let path = tmp.path().join("telos/intents/INT-0042.tel");
+    let content = read(tmp.path(), "telos/intents/INT-0042.tel");
+    fs::write(
+        &path,
+        content.replace("requires INT-0017", "requires INT-9999"),
+    )
+    .unwrap();
+
+    let envelope = reconcile_full(tmp.path());
+
+    assert_eq!(envelope["ok"], json!(false), "got {envelope}");
+    assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert!(
+        !tmp.path().join(LOCK).exists(),
+        "a refused full reconcile must seal nothing"
+    );
+}
+
+/// D10's `--full` half: one invocation of `[test] cmd` with `{filter}`
+/// substituted by nothing -- the whole suite, once -- however many scenarios
+/// the spec proves.
+#[test]
+fn full_reconcile_runs_the_whole_suite_once() {
+    let tmp = with_fixture_mut(|root| set_test_cmd_to(root, "git --version"));
+
+    assert_eq!(
+        reconcile_full_ok(tmp.path()),
+        json!({
+            "id": null,
+            "full": true,
+            "ops_applied": 0,
+            "checks_run": 1,
+            "tests_run": 1
+        })
+    );
+}
+
+/// D12: open changes are tolerated rather than reconciled or refused. They
+/// stay open, their files untouched -- a full reseal is about the spec on
+/// disk, not about anybody's staged delta.
+#[test]
+fn full_reconcile_leaves_open_changes_alone() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    let before = read(tmp.path(), CHG_0001);
+
+    assert_eq!(reconcile_full_ok(tmp.path())["ops_applied"], json!(0));
+
+    assert_eq!(read(tmp.path(), CHG_0001), before, "the change file moved");
+    let envelope = json_stdout(&telos(tmp.path(), &["status", "--json"]).output().unwrap());
+    assert_eq!(envelope["result"]["state"], json!("changing"));
+}
+
+/// `--full` reseals *everything*; a change id says «this delta, and only
+/// it». Asking for both is a contradiction clap refuses before any command
+/// runs (exit 2, usage error -- not a domain error in the envelope).
+#[test]
+fn an_id_and_full_together_are_a_usage_error() {
+    let tmp = with_fixture();
+
+    let out = telos(
+        tmp.path(),
+        &["change", "reconcile", "CHG-0001", "--full", "--json"],
+    )
+    .output()
+    .unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "expected clap's usage exit");
 }

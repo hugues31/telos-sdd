@@ -12,10 +12,6 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-use telos_core::git::GitRepo;
-use telos_core::lock::seal;
-use telos_core::workspace::Workspace;
-
 /// A fresh, empty git repository in a throwaway directory, with the `user.*`
 /// config a real checkout would have.
 pub fn repo() -> TempDir {
@@ -30,12 +26,14 @@ pub fn repo() -> TempDir {
 /// starting point for every command that needs an initialized, coherent
 /// project.
 ///
-/// The seal goes through `telos_core` directly (discover, load, `seal`,
-/// write) rather than through a CLI command, because no command can seal an
-/// existing workspace yet -- only `init` seals, and `init` refuses a project
-/// that already has a `telos/telos.toml`. This debt is paid in T11, when
-/// `telos change reconcile --full` can seal a preexisting spec tree from the
-/// command line (D14) and the fixture is built the way a user would build it.
+/// The seal is the real one, produced by running the real binary: `telos
+/// change reconcile --full` is exactly the command a user reaches for to
+/// seal a spec tree that exists but has no lock (D12/D14), so the fixture is
+/// built the way a project actually gets built rather than by calling
+/// `telos_core::lock::seal` behind the CLI's back. The full flow (`init`,
+/// `change open`, `add`, `reconcile`) cannot produce this corpus in M2 --
+/// its bindings need `telos bind`, which is M3 -- and is covered by the e2e
+/// tests that do drive it end to end.
 pub fn with_fixture() -> TempDir {
     with_fixture_mut(|_| {})
 }
@@ -47,20 +45,29 @@ pub fn with_fixture() -> TempDir {
 /// records, so the fixture it hands back is coherent rather than drifted.
 /// That is what lets a test change `telos.toml`'s `[test] cmd` -- the corpus
 /// ships it empty (D13), so a reconcile there runs no test at all -- and
-/// still start from a `coherent` project.
+/// still start from a `coherent` project. Note that the sealing reconcile is
+/// itself subject to whatever `mutate` did: a `[test] cmd` it installs runs
+/// once, with an empty `{filter}`, before this returns.
 pub fn with_fixture_mut(mutate: impl FnOnce(&Path)) -> TempDir {
-    let tmp = repo();
-    copy_dir(&corpus_root(), tmp.path());
+    let tmp = unsealed_fixture();
     mutate(tmp.path());
 
-    let ws = Workspace::discover(tmp.path()).expect("the corpus is an initialized workspace");
-    let model = ws
-        .load_model()
-        .unwrap_or_else(|diags| panic!("expected the corpus to load cleanly, got {diags:?}"));
-    let git = GitRepo::discover(tmp.path()).expect("the fixture is a git repository");
-    let lock = seal(&ws, &model, &git, None).expect("the corpus seals cleanly");
-    lock.write(&ws.lock_path())
-        .expect("failed to write the lock");
+    let out = telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
+        .output()
+        .expect("failed to run `telos change reconcile --full`");
+    // Loudly: a harness that hands back an unsealed fixture would make every
+    // test built on it fail somewhere else, for reasons that look nothing
+    // like «the fixture never got sealed».
+    let ok = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .map(|envelope| envelope["ok"] == serde_json::Value::Bool(true))
+        .unwrap_or(false);
+    assert!(
+        ok,
+        "sealing the fixture with `telos change reconcile --full` failed:\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     tmp
 }

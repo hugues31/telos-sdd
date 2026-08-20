@@ -30,6 +30,12 @@
 //! 8. **Tests** (D10), one run per distinct `proves` target of the impacted
 //!    scenarios.
 //!
+//! [`reconcile_full`] is the same transaction with the delta taken out
+//! (D12): no change, so no drift, status, digest or accept gate, and no ops
+//! to apply -- only the four gates that prove a spec on its own (5, 6, 7, 8)
+//! and the seal they earn. It is the exit from a `telos.lock` merge
+//! conflict, and the way a preexisting spec tree gets its first seal.
+//!
 //! # Atomicity, and what stands in for a rollback (D6)
 //!
 //! Not one byte is written before gate 8 has passed. After that, the write
@@ -113,7 +119,7 @@ pub fn reconcile_change(
     require_no_orphan_code(ws, &model)?;
 
     let impacted = impacted_nodes(ws, &model, &change.ops);
-    let checks_run = run_constraint_checks(ws, &model, &impacted)?;
+    let checks_run = run_constraint_checks(ws, &model, Some(&impacted))?;
     let tests_run = run_tests(ws, &model, &impacted)?;
 
     // --- D6: everything above passed, so and only so, write. ---
@@ -126,6 +132,53 @@ pub fn reconcile_change(
 
     Ok(ReconcileOutcome {
         ops_applied: change.ops.len() as u32,
+        checks_run,
+        tests_run,
+        lock,
+    })
+}
+
+/// Re-proves the whole project from the files on disk and reseals it (D12).
+///
+/// This is the exit from a lock merge conflict, and the one legitimate way
+/// to seal a spec tree that exists but was never sealed -- the two
+/// situations in which the current `telos.lock` is worthless. So it never
+/// reads one: absent, conflicted or corrupt are all the same input here,
+/// and re-proving everything is exactly what makes ignoring it safe.
+///
+/// Three gates of [`reconcile_change`] are structurally absent rather than
+/// skipped. **Drift** (gate 1) cannot apply: drift is a disagreement with a
+/// lock this function does not consult, and re-proving the tree is a
+/// stronger answer than comparing it to a seal nobody trusts. **Status,
+/// digest and accept OIDs** (gates 2-4) are properties of a change, and
+/// there is none: open changes are tolerated and left exactly as they are,
+/// files untouched and still open -- a full reseal is about the spec on
+/// disk, not about anybody's staged delta. **The ops** are likewise absent,
+/// hence `ops_applied: 0` and a `sealed_by: None` seal: no transaction
+/// produced this state, it was simply found.
+///
+/// What remains is what proves a spec on its own: the full model (rules 1,
+/// 3 and 4 of §3.3), rule 5, every constraint that has a `check` (D11 --
+/// scope filters against a delta, and there is no delta), and one run of
+/// `[test] cmd` with an empty `{filter}` (D10 -- the whole suite, once).
+pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome, TelosError> {
+    // [`seal`] checks this too, but only after every check and test has
+    // run: paying for it upfront turns "you invoked this from the wrong
+    // repository" into an immediate answer rather than one that arrives
+    // after a full test suite.
+    git.ensure_matches_workspace_root(&ws.repo_root)?;
+
+    let model = ws.load_model().map_err(diagnostics_to_error)?;
+    require_no_orphan_code(ws, &model)?;
+
+    let checks_run = run_constraint_checks(ws, &model, None)?;
+    let tests_run = run_full_tests(ws)?;
+
+    let lock = seal(ws, &model, git, None)?;
+    lock.write(&ws.lock_path())?;
+
+    Ok(ReconcileOutcome {
+        ops_applied: 0,
         checks_run,
         tests_run,
         lock,
@@ -393,6 +446,11 @@ fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet
 /// Runs the `check` of every global constraint and of every scoped one whose
 /// scope meets an impacted intent, at the repository root.
 ///
+/// `impacted` is `None` for a full reseal, and that is D11's other half:
+/// a `scope` filters constraints against *a delta*, so with no delta to
+/// filter against there is nothing to narrow -- every constraint that has a
+/// `check` runs.
+///
 /// A constraint with no `check` is not a failure and is not counted: the
 /// `rule` is then prose for a human, which this engine has no way to verify.
 /// A command that cannot even be spawned is folded into the same
@@ -401,16 +459,18 @@ fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet
 fn run_constraint_checks(
     ws: &Workspace,
     model: &TelosModel,
-    impacted: &BTreeSet<NodeRef>,
+    impacted: Option<&BTreeSet<NodeRef>>,
 ) -> Result<u32, TelosError> {
-    let intents = impacted_intents(impacted);
+    let intents = impacted.map(impacted_intents);
 
     let mut checks_run = 0;
     for (id, constraint) in &model.constraints {
         let Some(check) = &constraint.check else {
             continue;
         };
-        if !in_scope(constraint, &intents) {
+        if let Some(intents) = &intents
+            && !in_scope(constraint, intents)
+        {
             continue;
         }
 
@@ -495,10 +555,32 @@ fn run_tests(
     Ok(tests_run)
 }
 
-/// Names the `proves` target and the command that ran for it -- the latter
-/// after substitution, so a caller can rerun character-for-character what
-/// this did. The command's output is left out for the same reason as in
-/// [`constraint_failed`]: it is not reproducible, so it cannot be contract.
+/// The `--full` half of D10: one invocation of `[test] cmd`, `{filter}`
+/// substituted with nothing -- the whole suite, once.
+///
+/// A full reseal proves the spec as it stands rather than what a delta
+/// reached, so there is no per-target loop and nothing to deduplicate: the
+/// project's own runner decides what "everything" means. `cmd` empty skips
+/// the gate and reports zero runs, exactly as in the per-change path.
+fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
+    let cmd = &ws.config.test.cmd;
+    if cmd.is_empty() {
+        return Ok(0);
+    }
+
+    let command = substitute_filter(cmd, "");
+    match run_shell(&command, &ws.repo_root) {
+        Ok(result) if result.status == 0 => Ok(1),
+        Ok(_) | Err(_) => Err(test_failed("the whole suite", &command)),
+    }
+}
+
+/// Names what was run and the command that ran for it -- the latter after
+/// substitution, so a caller can rerun character-for-character what this
+/// did. `target` is a `proves` target for a per-change reconcile and «the
+/// whole suite» for a full one. The command's output is left out for the
+/// same reason as in [`constraint_failed`]: it is not reproducible, so it
+/// cannot be contract.
 fn test_failed(target: &str, command: &str) -> TelosError {
     TelosError::new(
         ErrorCode::TelosIntegrityViolation,

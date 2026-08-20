@@ -5,7 +5,7 @@ globs = ["Cargo.toml", "Cargo.lock", "src/**/*.rs"]
 globs = ["tests/**/*.rs"]
 
 [test]
-cmd = ""
+cmd = "cargo test {filter}"
 
 [policy]
 tdd = "strict"

@@ -296,8 +296,9 @@ pub fn reconcile_change(
 /// What remains is what proves a spec on its own: the full model (rules 1,
 /// 3 and 4 of §3.3), rule 5, sealable proof/runner structure, every
 /// constraint that has a `check` (D11 --
-/// scope filters against a delta, and there is no delta), and one run of
-/// `[test] cmd` with an empty `{filter}` (D10 -- the whole suite, once).
+/// scope filters against a delta, and there is no delta), and, when the model
+/// has active obligations, one run of `[test] cmd` with an empty `{filter}`
+/// (D10 -- the whole suite, once).
 pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome, TelosError> {
     // [`seal`] checks this too, but only after every check and test has
     // run: paying for it upfront turns "you invoked this from the wrong
@@ -311,7 +312,15 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
     require_sealable_structure(ws, &model)?;
 
     let checks_run = run_constraint_checks(ws, &model, None)?;
-    let tests_run = run_full_tests(ws)?;
+    let tests_run = if model
+        .intents
+        .values()
+        .any(|intent| intent.status == IntentStatus::Active)
+    {
+        run_full_tests(ws)?
+    } else {
+        0
+    };
 
     let lock = seal(ws, &model, git, None)?;
     lock.write(&ws.lock_path())?;
@@ -1054,10 +1063,12 @@ fn run_tests(
 /// The `--full` half of D10: one invocation of `[test] cmd`, `{filter}`
 /// substituted with nothing -- the whole suite, once.
 ///
-/// A full reseal proves the spec as it stands rather than what a delta
-/// reached, so there is no per-target loop and nothing to deduplicate: the
-/// project's own runner decides what "everything" means. `cmd` empty skips
-/// the gate and reports zero runs, exactly as in the per-change path.
+/// A full reseal with active obligations proves the spec as it stands rather
+/// than what a delta reached, so there is no per-target loop and nothing to
+/// deduplicate: the project's own runner decides what "everything" means.
+/// The caller skips this function entirely for a draft-only model. `cmd`
+/// empty skips the gate and reports zero runs, exactly as in the per-change
+/// path.
 fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
     let cmd = &ws.config.test.cmd;
     if cmd.trim().is_empty() {

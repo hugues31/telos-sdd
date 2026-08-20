@@ -5,17 +5,21 @@ This directory is intentionally a spec-only Telos project. It ships no
 artifact, or hidden solution. Both intents start as `draft`, and the initial
 architecture constraint is declarative. Telos supplies the ordered bounded
 plan and verifies the result; an external `telos-implementer` writes the
-application without ever writing below `telos/`.
+application without ever writing below `telos/`. The deterministic `telos`
+CLI itself makes no LLM call and does not generate application code.
 
-Inspect the prerequisite-first plan:
+Inspect the prerequisite-first plan and the untouched demo's initial `0/2`
+progress:
 
 ```console
 telos rebuild plan --json
+telos rebuild status --json
 ```
 
 Bootstrap the untouched Telos-only tree. With no active behavioral obligation
-and no machine constraint yet, this honest first seal runs zero tests and zero
-checks and leaves progress at `0/2`:
+and no machine constraint yet, this honest first seal does not invoke the
+configured runner: it runs zero tests and zero checks and leaves progress at
+`0/2`:
 
 ```console
 telos change reconcile --full --json
@@ -40,29 +44,14 @@ The same batch makes the declarative architecture constraint executable:
 ```
 <!-- constraint-check-patch:end -->
 
-The initial runner is empty so bootstrap cannot launch a process. Stage its
-complete public configuration in this first batch; this post-state becomes the
-effective runner for the red/green work and is sealed by reconcile:
-
-<!-- runner-config:start -->
-```json
-{"code":{"globs":["Cargo.toml","Cargo.lock","src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"strict"},"agents":{"hosts":[]}}
-```
-<!-- runner-config:end -->
-
 ```console
 telos change open "rebuild INT-0017" --json
 printf '%s\n' '{"status":"active"}' | telos edit intent INT-0017 --change CHG-0001 --json
 printf '%s\n' '{"check":"cargo test --test invoice_issued domain_does_not_import_adapter_modules -- --exact"}' | telos edit constraint CON-0003 --change CHG-0001 --json
-printf '%s\n' '{"code":{"globs":["Cargo.toml","Cargo.lock","src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"strict"},"agents":{"hosts":[]}}' | telos config --change CHG-0001 --json
 telos change diff CHG-0001 --json
 telos change approve CHG-0001 --json
-telos rebuild status --json
 mkdir -p src tests
 ```
-
-The staged runner makes progress measurable without a proof target or process
-invocation yet, so this first status is `0/2`.
 
 The external implementer creates every runner input only after approval. Cargo
 and source inputs are in `[code].globs`; the first batch binds and seals all

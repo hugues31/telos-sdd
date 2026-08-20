@@ -224,14 +224,6 @@ fn implement_batch(
                 format!("telos/intents/{}.tel", batch.intent)
             ])
         );
-        let staged_config = result_stdin(
-            root,
-            target_dir,
-            &["config", "--change", &change, "--json"],
-            &documented_json(root, "runner-config"),
-        );
-        assert_eq!(staged_config["change"], json!(change));
-        assert_eq!(staged_config["path"], json!("telos/telos.toml"));
     }
 
     let diff = result(root, target_dir, &["change", "diff", &change, "--json"]);
@@ -240,7 +232,7 @@ fn implement_batch(
         "non-empty operation digest: {diff:#}"
     );
     let ops = diff["ops"].as_array().expect("diff ops");
-    assert_eq!(ops.len(), if batch.intent == INT_0017 { 3 } else { 1 });
+    assert_eq!(ops.len(), if batch.intent == INT_0017 { 2 } else { 1 });
     let intent_op = ops
         .iter()
         .find(|op| op["entity"] == "intent" && op["key"] == batch.intent)
@@ -271,16 +263,6 @@ fn implement_batch(
             "{after}"
         );
         assert_ne!(before, after, "the machine check must be staged");
-
-        let config_op = ops
-            .iter()
-            .find(|op| op["entity"] == "config")
-            .expect("test runner config op");
-        assert_eq!(config_op["op"], json!("edit"));
-        let before = config_op["before"].as_str().expect("config before");
-        let after = config_op["after"].as_str().expect("config after");
-        assert!(before.contains("cmd = \"\"\n"), "{before}");
-        assert!(after.contains("cmd = \"cargo test {filter}\"\n"), "{after}");
     }
 
     let approved = result(root, target_dir, &["change", "approve", &change, "--json"]);
@@ -380,7 +362,7 @@ fn implement_batch(
     assert_eq!(reconciled["id"], json!(change));
     assert_eq!(
         reconciled["ops_applied"],
-        json!(if batch.intent == INT_0017 { 3 } else { 1 })
+        json!(if batch.intent == INT_0017 { 2 } else { 1 })
     );
     assert_eq!(reconciled["tests_run"], json!(1));
     assert_eq!(reconciled["checks_run"], json!(1));
@@ -575,6 +557,11 @@ fn reconstruct(target_dir: &Path) -> Observations {
 
     let plan = result(root, target_dir, &["rebuild", "plan", "--json"]);
     assert_initial_plan(&plan);
+    let initial_status = result(root, target_dir, &["rebuild", "status", "--json"]);
+    assert_eq!(initial_status["scenarios_green"], json!(0));
+    assert_eq!(initial_status["scenarios_total"], json!(2));
+    assert_eq!(initial_status["scenarios"][0]["tests"], json!([]));
+    assert_eq!(initial_status["scenarios"][1]["tests"], json!([]));
     let bootstrapped = result(
         root,
         target_dir,
@@ -606,11 +593,7 @@ fn reconstruct(target_dir: &Path) -> Observations {
             expected_green: 1,
         },
     );
-    let initial_status = first.0.clone();
-    assert_eq!(initial_status["scenarios_green"], json!(0));
-    assert_eq!(initial_status["scenarios_total"], json!(2));
-    assert_eq!(initial_status["scenarios"][0]["tests"], json!([]));
-    assert_eq!(initial_status["scenarios"][1]["tests"], json!([]));
+    assert_eq!(first.0, initial_status);
     assert_eq!(first.3["scenarios"][0]["green"], json!(true));
     assert_eq!(first.3["scenarios"][1]["green"], json!(false));
 

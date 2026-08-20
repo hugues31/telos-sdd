@@ -1064,6 +1064,30 @@ fn full_reconcile_treats_a_whitespace_runner_as_absent_for_draft_only_intents() 
     assert_eq!(result["tests_run"], json!(0));
 }
 
+#[test]
+fn full_reconcile_does_not_invoke_a_configured_runner_for_draft_only_intents() {
+    const RUN_LOG: &str = ".draft-only-full-runs";
+
+    let tmp = unsealed_fixture();
+    for intent in ["INT-0017", "INT-0042"] {
+        let path = tmp.path().join(format!("telos/intents/{intent}.tel"));
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(path, source.replace("status active", "status draft")).unwrap();
+    }
+    set_test_cmd_to(
+        tmp.path(),
+        "git config --file .draft-only-full-runs --add runs.full invoked",
+    );
+
+    let result = reconcile_full_ok(tmp.path());
+
+    assert!(
+        !tmp.path().join(RUN_LOG).exists(),
+        "a draft-only full reconcile must not invoke the configured runner"
+    );
+    assert_eq!(result["tests_run"], json!(0));
+}
+
 /// D10's `--full` half: one invocation of `[test] cmd` with `{filter}`
 /// substituted by nothing -- the whole suite, once -- however many scenarios
 /// the spec proves.

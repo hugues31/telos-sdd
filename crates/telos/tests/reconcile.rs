@@ -216,7 +216,8 @@ fn reconcile_json_matches_the_golden_envelope() {
                 "full": false,
                 "ops_applied": 3,
                 "checks_run": 0,
-                "tests_run": 0
+                "tests_run": 0,
+                "witness_warnings": []
             },
             "error": null,
             "next_actions": ["telos status"]
@@ -495,7 +496,8 @@ fn a_failing_constraint_check_refuses_the_reconcile_until_it_passes() {
             "full": false,
             "ops_applied": 1,
             "checks_run": 1,
-            "tests_run": 0
+            "tests_run": 0,
+            "witness_warnings": []
         })
     );
 }
@@ -525,7 +527,8 @@ fn reconcile_runs_one_test_per_impacted_scenario() {
             "full": false,
             "ops_applied": 1,
             "checks_run": 1,
-            "tests_run": 1
+            "tests_run": 1,
+            "witness_warnings": []
         })
     );
 }
@@ -628,7 +631,8 @@ fn full_reconcile_seals_an_unsealed_project() {
                 "full": true,
                 "ops_applied": 0,
                 "checks_run": 1,
-                "tests_run": 0
+                "tests_run": 0,
+                "witness_warnings": []
             },
             "error": null,
             "next_actions": ["telos status"]
@@ -708,7 +712,8 @@ fn full_reconcile_runs_the_whole_suite_once() {
             "full": true,
             "ops_applied": 0,
             "checks_run": 1,
-            "tests_run": 1
+            "tests_run": 1,
+            "witness_warnings": []
         })
     );
 }
@@ -744,4 +749,576 @@ fn an_id_and_full_together_are_a_usage_error() {
     .unwrap();
 
     assert_eq!(out.status.code(), Some(2), "expected clap's usage exit");
+}
+
+// =============================================================================
+// M3: the folded journal (D2), the sealed-witness gate (D7), and the advisory
+// warnings.
+//
+// These drive the real feature loop end to end -- `open`, `add`, `approve`,
+// `test` red, `test` green, `bind`, `reconcile` -- on a project that starts
+// as a bare `telos init`. What they assert about reconcile is the M3 half of
+// it: `telos/bindings.tel` is *derived* from the journal at reconcile and
+// never written before it (D2), the witness discipline is a static gate over
+// that journal (D7), and under `tdd = "advisory"` the same verdicts come back
+// as warnings instead of refusals.
+// =============================================================================
+
+/// The runner every fixture below wires up: `git hash-object .fake-green`
+/// exits 0 while [`MARKER`] exists and non-zero once it is deleted, which is
+/// a deterministic, cross-OS red/green switch that needs no test framework of
+/// its own (the same one `test_bind.rs` runs on).
+const RUNNER: &str = "git hash-object .fake-green";
+
+/// The file [`RUNNER`] hashes -- its absence is what makes a run red.
+const MARKER: &str = ".fake-green";
+
+/// The test file the witness protocol discovers by convention (D4), and the
+/// code file the implementation is bound through.
+const TEST_FILE: &str = "tests/billing.rs";
+const CODE_FILE: &str = "src/billing.rs";
+
+/// The derived bindings table (D2): written by reconcile, claimed by nobody.
+const BINDINGS: &str = "telos/bindings.tel";
+
+/// The ids the allocator mints for the delta [`approved_feature`] stages.
+/// Captured from the command results rather than hardcoded -- the loop must
+/// never make a caller know them in advance -- and carried here so the
+/// assertions can name them.
+struct Feature {
+    change: String,
+    intent: String,
+    scenario: String,
+}
+
+/// Runs `telos <args>` and returns the parsed envelope, whatever its verdict.
+fn run_json(dir: &Path, args: &[&str]) -> Value {
+    json_stdout(&telos(dir, args).output().unwrap())
+}
+
+/// Runs a command that must succeed and returns its `result`.
+fn ok_result(dir: &Path, args: &[&str]) -> Value {
+    let envelope = run_json(dir, args);
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "expected `telos {}` to succeed, got {envelope}",
+        args.join(" ")
+    );
+    envelope["result"].clone()
+}
+
+fn approve_id(dir: &Path, id: &str) {
+    ok_result(dir, &["change", "approve", id, "--json"]);
+}
+
+fn reconcile_id(dir: &Path, id: &str) -> Value {
+    run_json(dir, &["change", "reconcile", id, "--json"])
+}
+
+fn reconcile_id_ok(dir: &Path, id: &str) -> Value {
+    let envelope = reconcile_id(dir, id);
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "expected the reconcile to succeed, got {envelope}"
+    );
+    envelope["result"].clone()
+}
+
+fn reconcile_id_err(dir: &Path, id: &str) -> Value {
+    let envelope = reconcile_id(dir, id);
+    assert_eq!(
+        envelope["ok"],
+        json!(false),
+        "expected the reconcile to fail, got {envelope}"
+    );
+    envelope["error"].clone()
+}
+
+/// A freshly `init`ed project reconfigured **through the protocol**: globs
+/// over `src/` and `tests/`, the [`RUNNER`], and `policy.tdd = tdd`.
+///
+/// `telos/telos.toml` is itself a sealed spec file, so writing it directly is
+/// drift -- and `adopt` is the only way to stage a file telos models no
+/// entity for (an `accept` op, gate 4's own subject). Going through it here
+/// rather than seeding the config before the first seal is what makes this a
+/// project a user could actually have produced, and it costs one change:
+/// `CHG-0001` is the config change, so every helper below takes the change id
+/// it works on rather than assuming one.
+fn configured(tdd: &str) -> tempfile::TempDir {
+    let tmp = fresh();
+    fs::write(
+        tmp.path().join("telos/telos.toml"),
+        format!(
+            "[code]\nglobs = [\"src/**/*.rs\"]\n\n\
+             [tests]\nglobs = [\"tests/**/*.rs\"]\n\n\
+             [test]\ncmd = \"{RUNNER}\"\n\n\
+             [policy]\ntdd = \"{tdd}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let adopted = ok_result(tmp.path(), &["adopt", "--json"]);
+    let id = adopted["change"]
+        .as_str()
+        .expect("`adopt` answers with the change that captured the drift")
+        .to_string();
+    approve_id(tmp.path(), &id);
+    assert_eq!(
+        reconcile_id_ok(tmp.path(), &id)["ops_applied"],
+        json!(1),
+        "the config change is one `accept` op"
+    );
+    tmp
+}
+
+/// The scenario payload the intent below carries, `title` apart.
+fn scenario_payload(title: &str) -> Value {
+    json!({
+        "title": title,
+        "given": [ {"notion": "Invoice", "fields": {"state": "open"}} ],
+        "when":  {"notion": "PaymentReceived", "fields": {"amount": "120.00 EUR"}},
+        "then":  ["Invoice.state == settled"]
+    })
+}
+
+/// Stages the delta every M3 test works from -- the two notions and the
+/// intent carrying `scenarios` -- into a fresh change, and approves it.
+///
+/// `Feature.scenario` is the *first* scenario's id; a caller that stages two
+/// derives the second from the same result. No id is hardcoded anywhere: the
+/// allocator's answers are read back out of the envelopes (§14's anti-goal).
+fn approved_feature(dir: &Path, scenarios: Vec<Value>) -> Feature {
+    let change = ok_result(dir, &["change", "open", MOTIVATION, "--json"])["id"]
+        .as_str()
+        .expect("`change open` answers with the allocated id")
+        .to_string();
+
+    stage(
+        dir,
+        &["add", "notion", "--change", &change, "--json"],
+        &invoice_payload(),
+    );
+    stage(
+        dir,
+        &["add", "notion", "--change", &change, "--json"],
+        &payment_received_payload(),
+    );
+
+    let payload = json!({
+        "title": "Invoices can be settled", "status": "active",
+        "telos": "Customers must see immediately that their debt is cleared.",
+        "statement": { "template": "event-driven", "when": "PaymentReceived",
+                       "on": "Invoice", "action": "set Invoice.state = settled" },
+        "refines": [], "requires": [], "excludes": [],
+        "scenarios": scenarios
+    })
+    .to_string();
+    let mut cmd = telos(dir, &["add", "intent", "--change", &change, "--json"]);
+    let added = json_stdout(&cmd.write_stdin(payload).output().unwrap());
+    assert_eq!(
+        added["ok"],
+        json!(true),
+        "expected the intent to stage: {added}"
+    );
+
+    let feature = Feature {
+        intent: added["result"]["id"].as_str().unwrap().to_string(),
+        scenario: added["result"]["scenario_ids"][0]
+            .as_str()
+            .expect("`add intent` reports the scenario ids it allocated")
+            .to_string(),
+        change,
+    };
+    approve_id(dir, &feature.change);
+    feature
+}
+
+/// The test function one scenario's witness is discovered through (D4).
+fn test_fn(scenario: &str) -> String {
+    format!(
+        "scn_{}_a_full_payment_settles_the_invoice",
+        scenario.trim_start_matches("SCN-")
+    )
+}
+
+/// Writes `tests/billing.rs` holding one function per scenario, plus
+/// `trailer` -- which is how a test moves the file's bytes between two runs
+/// without changing what the runner does.
+fn write_test_file(dir: &Path, scenarios: &[&str], trailer: &str) {
+    fs::create_dir_all(dir.join("tests")).unwrap();
+    let mut src = String::new();
+    for scenario in scenarios {
+        src.push_str(&format!("fn {}() {{}}\n", test_fn(scenario)));
+    }
+    src.push_str(trailer);
+    fs::write(dir.join(TEST_FILE), src).unwrap();
+}
+
+/// `telos test <scenario>`, asserting the witness it sealed.
+fn witness(dir: &Path, scenario: &str, expected: &str) {
+    let result = ok_result(dir, &["test", scenario, "--json"]);
+    assert_eq!(
+        result["witness"],
+        json!(expected),
+        "expected a {expected} witness for {scenario}, got {result}"
+    );
+}
+
+fn set_marker(dir: &Path) {
+    fs::write(dir.join(MARKER), "").unwrap();
+}
+
+/// Writes the minimal domain file and binds it to `intent`.
+fn write_and_bind_code(dir: &Path, intent: &str) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join(CODE_FILE),
+        "// Minimal domain code, named after the notions it implements.\n",
+    )
+    .unwrap();
+    ok_result(dir, &["bind", CODE_FILE, intent, "--json"]);
+}
+
+/// A project one reconcile away from its first proved scenario: the delta
+/// approved, the test written and witnessed red *then* green on the very same
+/// bytes, the code written and bound.
+fn implemented() -> (tempfile::TempDir, Feature) {
+    let tmp = configured("strict");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+
+    write_test_file(tmp.path(), &[&feature.scenario], "");
+    witness(tmp.path(), &feature.scenario, "red");
+    set_marker(tmp.path());
+    witness(tmp.path(), &feature.scenario, "green");
+    write_and_bind_code(tmp.path(), &feature.intent);
+
+    (tmp, feature)
+}
+
+// --- the happy path: the journal becomes the spec ---------------------------
+
+/// The golden envelope of the whole feature loop: three ops applied, and the
+/// one test the *folded* journal made visible actually run (D8's gate 10 over
+/// the folded model -- without the fold there would be no `proves` binding,
+/// hence no target, hence a dishonest `tests_run: 0`).
+#[test]
+fn reconciling_an_implemented_change_folds_its_journal_and_runs_its_test() {
+    let (tmp, feature) = implemented();
+
+    assert_eq!(
+        reconcile_id_ok(tmp.path(), &feature.change),
+        json!({
+            "id": feature.change,
+            "full": false,
+            "ops_applied": 3,
+            "checks_run": 0,
+            "tests_run": 1,
+            "witness_warnings": []
+        })
+    );
+}
+
+/// D2, byte for byte: `bindings.tel` is written by the reconcile, from the
+/// journal, in the emitter's canonical order (`implements` first, then
+/// `proves`) -- and it did not exist in that state one command earlier.
+#[test]
+fn reconcile_derives_the_bindings_file_from_the_journal() {
+    let (tmp, feature) = implemented();
+    assert_eq!(
+        read(tmp.path(), BINDINGS),
+        "",
+        "`bindings.tel` stays empty for the whole life of the change (D2)"
+    );
+
+    reconcile_id_ok(tmp.path(), &feature.change);
+
+    assert_eq!(
+        read(tmp.path(), BINDINGS),
+        format!(
+            "implements \"{CODE_FILE}\" -> {}\nproves     \"{TEST_FILE}::{}\" -> {}\n",
+            feature.intent,
+            test_fn(&feature.scenario),
+            feature.scenario
+        )
+    );
+}
+
+/// The seal that follows: both files the folded bindings reach are in
+/// `[code]`, the project is coherent again, and the scenario counts as
+/// proved.
+#[test]
+fn reconcile_seals_the_bound_code_and_test_files_and_leaves_it_coherent() {
+    let (tmp, feature) = implemented();
+
+    reconcile_id_ok(tmp.path(), &feature.change);
+
+    let lock = read(tmp.path(), LOCK);
+    for path in [CODE_FILE, TEST_FILE, BINDINGS] {
+        assert!(lock.contains(path), "`{path}` is not sealed:\n{lock}");
+    }
+
+    let status = run_json(tmp.path(), &["status", "--json"]);
+    assert_eq!(status["result"]["state"], json!("coherent"));
+    assert_eq!(status["result"]["changes"], json!([]));
+    assert_eq!(status["result"]["coverage"]["scenarios_proved"], json!(1));
+}
+
+/// The other half of "reconcile derives the bindings table": a change with
+/// no journal at all derives exactly what was already there.
+///
+/// Every reconcile now re-emits `bindings.tel` from the folded model, so
+/// this is what keeps that from being a change of behaviour for the M1/M2
+/// projects that have no journal: the model holds what the sealed file said,
+/// the emitter is what wrote that file in the first place, and the bytes come
+/// back identical -- the lock included.
+#[test]
+fn a_reconcile_with_no_journal_leaves_the_bindings_file_byte_identical() {
+    let tmp = approved_int_0042_edit(with_fixture());
+    let before = read(tmp.path(), BINDINGS);
+
+    reconcile_ok(tmp.path());
+
+    assert_eq!(read(tmp.path(), BINDINGS), before);
+}
+
+// --- gate 7: the sealed red witness (D7), strict ----------------------------
+
+/// The scenario is brand new and nothing was ever run for it: the frozen
+/// `TELOS_SCENARIO_RED_EXPECTED` of Annex F, and not one byte written.
+#[test]
+fn a_scenario_with_no_run_at_all_is_refused_and_nothing_is_written() {
+    let tmp = configured("strict");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+
+    let error = reconcile_id_err(tmp.path(), &feature.change);
+
+    assert_eq!(
+        error,
+        json!({
+            "code": "TELOS_SCENARIO_RED_EXPECTED",
+            "message": format!("scenario {} has no sealed red witness", feature.scenario),
+            "hint": format!(
+                "run `telos test {}` to record a red witness before implementing",
+                feature.scenario
+            ),
+        })
+    );
+    assert!(
+        !tmp.path()
+            .join(format!("telos/intents/{}.tel", feature.intent))
+            .exists(),
+        "a refused reconcile must write nothing"
+    );
+    assert_eq!(read(tmp.path(), BINDINGS), "", "and derive nothing");
+}
+
+/// A red witness with no green on the same bytes: the implementation has not
+/// happened yet, so the reconcile refuses -- naming the *first* scenario that
+/// owes one, in id order, which is what makes a fixing agent converge.
+///
+/// Two scenarios, deliberately: the second is the one that owes a green,
+/// while the first is fully witnessed and, through its `proves`, is what
+/// keeps rule 5 (gate 6) from firing on `tests/billing.rs` before this gate
+/// is reached at all.
+#[test]
+fn a_red_witness_with_no_green_on_the_same_bytes_is_refused() {
+    let tmp = configured("strict");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![
+            scenario_payload("a full payment settles the invoice"),
+            scenario_payload("a partial payment leaves the invoice open"),
+        ],
+    );
+    let second = format!(
+        "SCN-{:04}",
+        feature
+            .scenario
+            .trim_start_matches("SCN-")
+            .parse::<u32>()
+            .unwrap()
+            + 1
+    );
+    write_test_file(tmp.path(), &[&feature.scenario, &second], "");
+    witness(tmp.path(), &feature.scenario, "red");
+    witness(tmp.path(), &second, "red");
+    set_marker(tmp.path());
+    witness(tmp.path(), &feature.scenario, "green");
+
+    let error = reconcile_id_err(tmp.path(), &feature.change);
+
+    assert_eq!(
+        error,
+        json!({
+            "code": "TELOS_SCENARIO_RED_EXPECTED",
+            "message": format!(
+                "scenario {second} has a red witness but no green run on the same bytes"
+            ),
+            "hint": format!(
+                "run `telos test {second}` again once the implementation is in place"
+            ),
+        })
+    );
+}
+
+/// The witness is sealed to the bytes it was taken on: editing the test
+/// between the red and the green invalidates the pair, whatever the green
+/// says.
+#[test]
+fn a_test_edited_between_its_red_and_its_green_is_refused_as_sealed() {
+    let tmp = configured("strict");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+    write_test_file(tmp.path(), &[&feature.scenario], "");
+    witness(tmp.path(), &feature.scenario, "red");
+    write_test_file(tmp.path(), &[&feature.scenario], "// second thoughts\n");
+    set_marker(tmp.path());
+    witness(tmp.path(), &feature.scenario, "green");
+
+    let error = reconcile_id_err(tmp.path(), &feature.change);
+
+    assert_eq!(
+        error,
+        json!({
+            "code": "TELOS_TEST_SEALED",
+            "message": format!(
+                "the test file `{TEST_FILE}` changed after the red witness for {} was sealed",
+                feature.scenario
+            ),
+            "hint": format!(
+                "the red witness is invalid; run `telos test {}` again on the current \
+                 bytes before reconciling",
+                feature.scenario
+            ),
+        })
+    );
+}
+
+/// And the same the other way round: a red/green pair taken on one set of
+/// bytes says nothing about the bytes on disk at reconcile time.
+#[test]
+fn a_test_edited_after_its_green_is_refused_as_sealed() {
+    let (tmp, feature) = implemented();
+    write_test_file(tmp.path(), &[&feature.scenario], "// touched afterwards\n");
+
+    let error = reconcile_id_err(tmp.path(), &feature.change);
+
+    assert_eq!(error["code"], json!("TELOS_TEST_SEALED"));
+    assert_eq!(
+        error["message"],
+        json!(format!(
+            "the test file `{TEST_FILE}` changed after the red witness for {} was sealed",
+            feature.scenario
+        ))
+    );
+}
+
+// --- advisory (D7): the same verdicts, as warnings ---------------------------
+
+/// `policy.tdd = "advisory"`: the reconcile goes through, and the verdict it
+/// would have refused on comes back in `witness_warnings` -- the frozen
+/// message, hint apart (a warning has nothing to remedy for the caller).
+#[test]
+fn advisory_reports_the_missing_witness_instead_of_refusing() {
+    let tmp = configured("advisory");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+
+    assert_eq!(
+        reconcile_id_ok(tmp.path(), &feature.change),
+        json!({
+            "id": feature.change,
+            "full": false,
+            "ops_applied": 3,
+            "checks_run": 0,
+            "tests_run": 0,
+            "witness_warnings": [
+                format!("scenario {} has no sealed red witness", feature.scenario)
+            ]
+        })
+    );
+    // It really reconciled: the delta is on disk and the project is sealed.
+    assert!(
+        tmp.path()
+            .join(format!("telos/intents/{}.tel", feature.intent))
+            .exists()
+    );
+    let status = run_json(tmp.path(), &["status", "--json"]);
+    assert_eq!(status["result"]["state"], json!("coherent"));
+}
+
+/// The same warning in human mode, where an advisory project's TDD debt has
+/// to be visible at all.
+#[test]
+fn advisory_prints_the_warning_in_human_mode() {
+    let tmp = configured("advisory");
+    let feature = approved_feature(
+        tmp.path(),
+        vec![scenario_payload("a full payment settles the invoice")],
+    );
+
+    let out = telos(tmp.path(), &["change", "reconcile", &feature.change])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "warning: scenario {} has no sealed red witness",
+            feature.scenario
+        )),
+        "the advisory warning is not in the human output:\n{stdout}"
+    );
+}
+
+// --- the fold is idempotent across reconciles -------------------------------
+
+/// D2's deduplication, end to end: re-binding a pair the sealed
+/// `bindings.tel` already holds folds to the same one line, so the derived
+/// file comes back byte-identical -- and the scenario, re-staged unchanged,
+/// owes no second witness (the fragment exemption `loop_merge` rests on).
+#[test]
+fn rebinding_a_pair_the_sealed_file_already_holds_leaves_it_unchanged() {
+    let (tmp, feature) = implemented();
+    reconcile_id_ok(tmp.path(), &feature.change);
+    let sealed = read(tmp.path(), BINDINGS);
+
+    let second = ok_result(tmp.path(), &["change", "open", "bind it again", "--json"])["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut cmd = telos(
+        tmp.path(),
+        &[
+            "edit",
+            "intent",
+            &feature.intent,
+            "--change",
+            &second,
+            "--json",
+        ],
+    );
+    let edited = json_stdout(&cmd.write_stdin("{}").output().unwrap());
+    assert_eq!(edited["ok"], json!(true), "{edited}");
+    approve_id(tmp.path(), &second);
+    ok_result(tmp.path(), &["bind", CODE_FILE, &feature.intent, "--json"]);
+
+    assert_eq!(
+        reconcile_id_ok(tmp.path(), &second)["witness_warnings"],
+        json!([])
+    );
+    assert_eq!(read(tmp.path(), BINDINGS), sealed);
 }

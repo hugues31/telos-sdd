@@ -26,7 +26,8 @@ use crate::model::{
 use crate::workspace::Workspace;
 
 /// Whether one scenario's witness is still trustworthy at reconcile time
-/// (D7). Read by T5's gate 8; the message [`WitnessVerdict::Sealed`] carries
+/// (D7). Read by reconcile's witness gate; the message
+/// [`WitnessVerdict::Sealed`] carries
 /// is the frozen wording of Annex F, minus the hint (which is fixed and
 /// belongs to the caller that turns this into a [`TelosError`]).
 #[derive(Debug, Clone, PartialEq, Eq)]

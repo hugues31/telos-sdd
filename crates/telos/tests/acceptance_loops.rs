@@ -570,6 +570,22 @@ fn loop_drift() {
 ///    is not a merge resolved. `git commit` after `--full` is the last step
 ///    of §7.4's story, and it is what proves the re-derived lock is a real
 ///    resolution and not just a file on disk.
+///
+/// # The one M3 amendment (T5), and why it weakens nothing
+///
+/// The pinned `--full` result gained a `"witness_warnings": []` line, and
+/// nothing else in this loop moved. The field is M3's, additive, and always
+/// present (D7): a `--full` reseal belongs to no change, hence to no
+/// journal, hence to no witness verdict -- `[]` is the only value it can
+/// take here, and pinning it is one more thing asserted rather than one
+/// fewer.
+///
+/// What matters is what did **not** have to change: both branches edit an
+/// intent's `telos` without touching its scenarios, so the emitted scenario
+/// fragments are identical and D7's witness gate exempts them. That
+/// exemption is load-bearing for this loop -- were it wrong, both branch
+/// reconciles would refuse with `TELOS_SCENARIO_RED_EXPECTED`, and the fix
+/// would be in the exemption, never here.
 #[test]
 fn loop_merge() {
     let tmp = with_fixture();
@@ -708,6 +724,7 @@ fn loop_merge() {
             "id": null,
             "ops_applied": 0,
             "tests_run": 0,
+            "witness_warnings": [],
         }),
         "--full applies no ops, belongs to no change, and re-checks every \
          constraint (the corpus has one, and ships no test runner -- D13)"

@@ -36,6 +36,11 @@ const SPEC_SUBDIRS: [(&str, &str); 3] = [
     ("constraints", "telos/constraints"),
 ];
 
+/// The one spec file no entity owns: the bindings table, sealed with the
+/// rest of the tree and *derived* at reconcile from the folded journal (D2),
+/// never claimed by a change.
+pub const BINDINGS_PATH: &str = "telos/bindings.tel";
+
 impl Workspace {
     /// Walks up from `cwd` toward the filesystem root looking for
     /// `telos/telos.toml`. The directory that contains `telos/` becomes
@@ -86,7 +91,7 @@ impl Workspace {
 
         let bindings_path = self.telos_dir.join("bindings.tel");
         if bindings_path.is_file() {
-            files.push(RepoPath::new("telos/bindings.tel"));
+            files.push(RepoPath::new(BINDINGS_PATH));
         }
 
         files.sort_by(|a, b| a.as_str().cmp(b.as_str()));

@@ -46,20 +46,33 @@
 //!   binding's `implements`/`proves` -- is a reference the semantic pass
 //!   resolves too, and `crates/telos-core/tests/overlay.rs` pins that.
 //!
+//! # The third layer: the journal (M3)
+//!
+//! From M3 a change carries a *journal* as well as ops -- the runs `telos
+//! test` sealed and the binds `telos bind` recorded -- and those lines are
+//! bindings the change asserts just as surely as its ops are entities it
+//! asserts. [`fold_journal_bindings`] puts them on top of the applied ops,
+//! into `telos/bindings.tel`, and it is deliberately a separate step: ops
+//! are replayed in order against one another, while the journal is folded
+//! once, at the end, into the one file no entity owns. Every caller that
+//! needs the spec a change describes runs both, in that order, before
+//! [`build_model`] -- which is what makes a journal's `implements`/`proves`
+//! resolve, and be checked, exactly like a binding a human wrote (D2).
+//!
 //! The rules this module does *not* enforce are the ones that need more than
 //! the spec tree: no-code-without-telos (rule 5) needs `telos.toml`'s globs
-//! and the working tree, and the red-witness discipline needs test runs.
-//! Both belong to reconcile.
+//! and the working tree, and the red-witness discipline needs test runs and
+//! the current blob oids to judge them against. Both belong to reconcile.
 
 use std::collections::BTreeMap;
 
 use crate::emit::{emit_constraint, emit_intent, emit_notion};
 use crate::error::{Diagnostic, ErrorCode, TelosError};
 use crate::ids::{NotionName, RepoPath};
-use crate::model::{Binding, Notion, Rule, Scope, StagedOp, TelFile, TelosModel};
+use crate::model::{Binding, Change, Notion, Rule, Scope, StagedOp, TelFile, TelosModel};
 use crate::semantic::{build_model, expr_notions, scenario_notions, statement_notions};
 use crate::suggest::closest;
-use crate::workspace::Workspace;
+use crate::workspace::{BINDINGS_PATH, Workspace};
 
 /// Reads and parses the sealed spec tree, without building a model from it.
 ///
@@ -445,6 +458,85 @@ pub fn validate_ops_idempotent(
     build_model(apply_ops_idempotent(base, ops))
 }
 
+/// Folds a change's journal into the spec state as bindings (D2), extending
+/// -- or creating -- the `telos/bindings.tel` entry of `files`.
+///
+/// This is what makes `bindings.tel` a *derived* file: `telos bind` and the
+/// first green run of `telos test` write journal lines, never bindings, and
+/// the sealed `bindings.tel` on disk stays untouched until a reconcile folds
+/// the journal into it. Every caller that must see the spec a change
+/// describes -- reconcile's gates, `telos context`'s pack -- folds before
+/// building a model, so a journal's `implements`/`proves` resolve, and are
+/// resolved, exactly like a binding a human wrote.
+///
+/// Deduplication is against what the base already holds and is deliberately
+/// **span-insensitive**: a binding parsed from `bindings.tel` carries the
+/// span it was read at, one folded from a journal line carries the zero span
+/// ([`Change::journal_bindings`]), so structural equality would keep both and
+/// the emitter would write the line twice. Two bindings are the same line
+/// here when they are the same kind, over the same path (or the same test
+/// locator, `name` included) and the same id -- which is exactly what
+/// [`crate::emit::emit_bindings`] would render identically.
+///
+/// Order follows the file: what the base held stays first, in its own order,
+/// and the journal's additions are appended in journal order. Nothing is
+/// sorted, because sorting bindings is the emitter's job and its alone.
+pub fn fold_journal_bindings(
+    mut files: Vec<(RepoPath, TelFile)>,
+    change: &Change,
+) -> Vec<(RepoPath, TelFile)> {
+    let folded = change.journal_bindings();
+    if folded.is_empty() {
+        return files;
+    }
+
+    let path = RepoPath::new(BINDINGS_PATH);
+    let slot = files.iter().position(|(p, file)| {
+        // A `bindings.tel` the parser produced is always `TelFile::Bindings`;
+        // the pattern is what keeps this total rather than an `expect`.
+        *p == path && matches!(file, TelFile::Bindings(_))
+    });
+    let mut bindings = match slot {
+        Some(slot) => match files.remove(slot).1 {
+            TelFile::Bindings(existing) => existing,
+            other => unreachable!("the slot was matched as Bindings, got {other:?}"),
+        },
+        None => Vec::new(),
+    };
+
+    for binding in folded {
+        if !bindings.iter().any(|held| same_binding(held, &binding)) {
+            bindings.push(binding);
+        }
+    }
+
+    files.push((path, TelFile::Bindings(bindings)));
+    files.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+    files
+}
+
+/// Whether two bindings are the same line, ignoring the spans they were
+/// built with -- see [`fold_journal_bindings`].
+fn same_binding(a: &Binding, b: &Binding) -> bool {
+    match (a, b) {
+        (
+            Binding::Implements { path, intent },
+            Binding::Implements {
+                path: other_path,
+                intent: other_intent,
+            },
+        ) => path == other_path && intent.node == other_intent.node,
+        (
+            Binding::Proves { test, scenario },
+            Binding::Proves {
+                test: other_test,
+                scenario: other_scenario,
+            },
+        ) => test == other_test && scenario.node == other_scenario.node,
+        _ => false,
+    }
+}
+
 /// The canonical text of op `idx`'s target, before and after that op --
 /// `None` on the side where the entity does not exist.
 ///
@@ -484,4 +576,134 @@ pub fn op_before_after(
 
 fn emit(file: &TelFile) -> String {
     crate::emit::emit_file(file)
+}
+
+#[cfg(test)]
+mod tests {
+    //! [`fold_journal_bindings`] only -- everything else in this module is
+    //! covered against a real spec tree in `crates/telos-core/tests/
+    //! overlay.rs`, while the fold is a pure function of a base and a
+    //! change, and its interesting cases are all about what the base
+    //! already holds.
+
+    use super::*;
+    use crate::ids::{IntentId, ScenarioId};
+    use crate::model::change::fixtures::{implementing_change, invoice};
+    use crate::model::{Binding, TestRef};
+    use crate::span::{Sp, Span};
+
+    fn bindings_of(files: &[(RepoPath, TelFile)]) -> Vec<Binding> {
+        files
+            .iter()
+            .find(|(path, _)| path.as_str() == BINDINGS_PATH)
+            .map(|(_, file)| match file {
+                TelFile::Bindings(bindings) => bindings.clone(),
+                other => panic!("`{BINDINGS_PATH}` holds {other:?}"),
+            })
+            .unwrap_or_else(|| panic!("no `{BINDINGS_PATH}` entry in {files:?}"))
+    }
+
+    /// `implements "src/billing.rs" -> INT-0001`, at whatever span -- the
+    /// span is what the deduplication must *not* look at.
+    fn implements(span: Span) -> Binding {
+        Binding::Implements {
+            path: RepoPath::new("src/billing.rs"),
+            intent: Sp {
+                node: IntentId(1),
+                span,
+            },
+        }
+    }
+
+    /// The `proves` the example's green run folds to.
+    fn proves() -> Binding {
+        Binding::Proves {
+            test: TestRef {
+                path: RepoPath::new("tests/billing.rs"),
+                name: Some("scn_0001_a_full_payment_settles_the_invoice".to_string()),
+            },
+            scenario: Sp {
+                node: ScenarioId(1),
+                span: Span::default(),
+            },
+        }
+    }
+
+    fn notion_entry() -> (RepoPath, TelFile) {
+        (
+            RepoPath::new("telos/notions/Invoice.tel"),
+            TelFile::Notion(invoice()),
+        )
+    }
+
+    #[test]
+    fn a_base_with_no_bindings_file_gains_one() {
+        let files = fold_journal_bindings(vec![notion_entry()], &implementing_change());
+
+        assert_eq!(
+            bindings_of(&files),
+            vec![proves(), implements(Span::default())]
+        );
+        // And the entry lands in path order, like every other base entry.
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, vec![BINDINGS_PATH, "telos/notions/Invoice.tel"]);
+    }
+
+    #[test]
+    fn an_existing_bindings_file_is_extended_not_replaced() {
+        let held = Binding::Proves {
+            test: TestRef {
+                path: RepoPath::new("tests/other.rs"),
+                name: None,
+            },
+            scenario: Sp {
+                node: ScenarioId(107),
+                span: Span { start: 12, end: 20 },
+            },
+        };
+        let base = vec![(
+            RepoPath::new(BINDINGS_PATH),
+            TelFile::Bindings(vec![held.clone()]),
+        )];
+
+        let files = fold_journal_bindings(base, &implementing_change());
+
+        assert_eq!(
+            bindings_of(&files),
+            vec![held, proves(), implements(Span::default())],
+            "what the file held stays, first, and the journal's lines follow"
+        );
+        assert_eq!(files.len(), 1, "one bindings entry, not two");
+    }
+
+    #[test]
+    fn a_binding_the_file_already_holds_is_not_folded_twice_whatever_its_span() {
+        // The case D2 turns on: `telos bind` journals a line for a pair
+        // `bindings.tel` already carries (a re-bind, or a second change
+        // touching the same file). The parsed binding carries the span it
+        // was read at, the folded one carries the zero span -- structural
+        // equality would keep both and the emitter would write the line
+        // twice.
+        let sealed = implements(Span { start: 40, end: 48 });
+        let base = vec![(
+            RepoPath::new(BINDINGS_PATH),
+            TelFile::Bindings(vec![sealed.clone()]),
+        )];
+
+        let files = fold_journal_bindings(base, &implementing_change());
+
+        assert_eq!(bindings_of(&files), vec![sealed, proves()]);
+    }
+
+    #[test]
+    fn a_change_with_no_journal_leaves_the_base_exactly_as_it_was() {
+        // Including the case that matters most: a project with no
+        // `bindings.tel` at all must not grow one because a change with an
+        // empty journal reconciled.
+        let mut change = implementing_change();
+        change.journal = Vec::new();
+        let base = vec![notion_entry()];
+
+        assert_eq!(fold_journal_bindings(base.clone(), &change), base);
+    }
 }

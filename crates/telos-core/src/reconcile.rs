@@ -8,7 +8,7 @@
 //!
 //! # The gate order is frozen
 //!
-//! [`reconcile_change`] runs eight gates, in this order, and the order is
+//! [`reconcile_change`] runs nine gates, in this order, and the order is
 //! contract rather than implementation detail -- an agent that fixes what a
 //! reconcile complains about must converge, and it only converges if the
 //! complaint it gets is the *first* thing wrong rather than an arbitrary one:
@@ -23,26 +23,38 @@
 //! 3. **Digest** (D3). The delta must still be the one that was approved.
 //! 4. **Accept OIDs** (D7). Each `accept` op sealed a specific blob; the
 //!    file must still hash to it.
-//! 5. **The overlay** ([`validate_ops_idempotent`]). The spec the delta
-//!    describes must parse and resolve -- rules 1, 3 and 4 of §3.3, and rule
-//!    2 with it, since an entity removed while something still points at it
-//!    leaves an unresolvable reference. The *idempotent* application is what
-//!    a whole change needs rather than the staging one: a delta `adopt`
-//!    produced describes a working tree that already shows it (D7), so the
-//!    staging preconditions -- add-what-exists, remove-what-does-not -- would
-//!    refuse the very state they are meant to protect. See
-//!    [`crate::overlay::apply_ops_idempotent`].
-//! 6. **Rule 5** (D8). No code without telos, over the *post* model.
-//! 7. **Constraint checks** (D11), for the constraints this delta puts in
+//! 5. **The overlay** ([`crate::overlay::apply_ops_idempotent`], plus the
+//!    journal folded on top). The spec the delta describes must parse and
+//!    resolve -- rules 1, 3 and 4 of §3.3, and rule 2 with it, since an
+//!    entity removed while something still points at it leaves an
+//!    unresolvable reference. The *idempotent* application is what a whole
+//!    change needs rather than the staging one: a delta `adopt` produced
+//!    describes a working tree that already shows it (D7), so the staging
+//!    preconditions -- add-what-exists, remove-what-does-not -- would refuse
+//!    the very state they are meant to protect. The journal is folded in
+//!    ([`crate::overlay::fold_journal_bindings`]) *before* the model is
+//!    built, so the `implements` a `bind` line asserts and the `proves` a
+//!    green run asserts are resolved here like any other binding -- and
+//!    every gate below judges the model they are part of (D2).
+//! 6. **Rule 5** (D8). No code without telos, over the *post* model --
+//!    the folded one, so a file bound by a journal line is covered.
+//! 7. **The sealed red witness** (D7), under `policy.tdd = "strict"`: every
+//!    scenario this delta makes new or different owes an intact red/green
+//!    pair on the bytes its test file has right now. Under `advisory` the
+//!    same verdicts come back as [`ReconcileOutcome::witness_warnings`]
+//!    instead of refusing. See [`check_witnesses`].
+//! 8. **Constraint checks** (D11), for the constraints this delta puts in
 //!    scope.
-//! 8. **Tests** (D10), one run per distinct `proves` target of the impacted
-//!    scenarios.
+//! 9. **Tests** (D10), one run per distinct `proves` target of the impacted
+//!    scenarios -- the folded model's, so a scenario the journal just proved
+//!    is actually run and `tests_run` is honest.
 //!
 //! [`reconcile_full`] is the same transaction with the delta taken out
-//! (D12): no change, so no drift, status, digest or accept gate, and no ops
-//! to apply -- only the four gates that prove a spec on its own (5, 6, 7, 8)
-//! and the seal they earn. It is the exit from a `telos.lock` merge
-//! conflict, and the way a preexisting spec tree gets its first seal.
+//! (D12): no change, so no drift, status, digest or accept gate, no journal
+//! to fold and therefore no witness gate, and no ops to apply -- only the
+//! four gates that prove a spec on its own (5, 6, 8, 9) and the seal they
+//! earn. It is the exit from a `telos.lock` merge conflict, and the way a
+//! preexisting spec tree gets its first seal.
 //!
 //! # The carry-over: what the seal must not launder
 //!
@@ -83,9 +95,13 @@
 //!
 //! # Atomicity, and what stands in for a rollback (D6)
 //!
-//! Not one byte is written before gate 8 has passed. After that, the write
-//! order is fixed: the spec `.tel` files (through the emitter -- reconcile
+//! Not one byte is written before gate 9 has passed. After that, the write
+//! order is fixed: the ops' spec `.tel` files, then `telos/bindings.tel`
+//! re-emitted from the folded model (both through the emitter -- reconcile
 //! never edits text), then `telos.lock`, then the change file's deletion.
+//! `bindings.tel` before the lock, and only there, is D2: nothing writes the
+//! bindings table while a change is open, so it never references code or an
+//! intent that the spec tree does not yet hold.
 //! Sealing *after* writing is deliberate: [`seal`] re-hashes the spec tree
 //! from disk, so the lock records the bytes that are really there rather
 //! than the bytes we believed we wrote -- everywhere except the carried-over
@@ -107,6 +123,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
+use crate::config::TddPolicy;
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
 use crate::exec::{run_shell, substitute_filter};
@@ -116,12 +133,14 @@ use crate::graph::NodeRef;
 use crate::ids::{ConstraintId, IntentId, RepoPath, ScenarioId};
 use crate::lock::{Lock, seal};
 use crate::model::{
-    Binding, Change, ChangeStatus, Constraint, Scope, StagedOp, TelFile, TelosModel, TestRef,
+    Binding, Change, ChangeStatus, Constraint, JournalEntry, Scope, StagedOp, TelFile, TelosModel,
+    TestRef,
 };
-use crate::overlay::{parse_base, validate_ops_idempotent};
+use crate::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
 use crate::semantic::build_model;
 use crate::state::{DRIFT_HINT, compute_state};
-use crate::workspace::Workspace;
+use crate::witness::{WitnessVerdict, required_witnesses, witness_verdict};
+use crate::workspace::{BINDINGS_PATH, Workspace};
 
 /// What one reconcile did.
 #[derive(Debug)]
@@ -134,11 +153,20 @@ pub struct ReconcileOutcome {
     /// `[test] cmd` invocations run (D10). Zero when no runner is
     /// configured, which is not an error in M2.
     pub tests_run: u32,
+    /// The witness verdicts that would have refused this reconcile under
+    /// `policy.tdd = "strict"`, as the frozen wordings of Annex F (D7).
+    ///
+    /// Always empty except on an `advisory` project that owes a witness it
+    /// does not have: under `strict` the first such verdict is an error
+    /// rather than a warning, so a successful strict reconcile has nothing
+    /// to report, and a `--full` reseal belongs to no change and therefore
+    /// to no journal.
+    pub witness_warnings: Vec<String>,
     /// The seal this reconcile wrote.
     pub lock: Lock,
 }
 
-/// Applies one approved change: the eight gates of the module docs, then the
+/// Applies one approved change: the nine gates of the module docs, then the
 /// writes of D6.
 ///
 /// `others` is what the change store currently reports open. It is only read
@@ -168,8 +196,12 @@ pub fn reconcile_change(
     require_fresh_approval(change)?;
     require_accepted_bytes(git, change)?;
 
-    let model = validate_ops_idempotent(ws, &change.ops).map_err(diagnostics_to_error)?;
+    let base = parse_base(ws).map_err(diagnostics_to_error)?;
+    let folded = fold_journal_bindings(apply_ops_idempotent(base.clone(), &change.ops), change);
+    let model = build_model(folded).map_err(diagnostics_to_error)?;
     require_no_orphan_code(ws, &model)?;
+
+    let witness_warnings = check_witnesses(ws, git, &base, &model, change)?;
 
     let impacted = impacted_nodes(ws, &model, &change.ops);
     let checks_run = run_constraint_checks(ws, &model, Some(&impacted))?;
@@ -179,6 +211,7 @@ pub fn reconcile_change(
     for op in &change.ops {
         apply_op(ws, op)?;
     }
+    write_bindings(ws, &model)?;
     let mut fresh = seal(ws, &model, git, Some(change.id))?;
     carry_over(&mut fresh, lock, &carried);
     fresh.write(&ws.lock_path())?;
@@ -188,6 +221,7 @@ pub fn reconcile_change(
         ops_applied: change.ops.len() as u32,
         checks_run,
         tests_run,
+        witness_warnings,
         lock: fresh,
     })
 }
@@ -200,16 +234,20 @@ pub fn reconcile_change(
 /// reads one: absent, conflicted or corrupt are all the same input here,
 /// and re-proving everything is exactly what makes ignoring it safe.
 ///
-/// Three gates of [`reconcile_change`] are structurally absent rather than
+/// Four gates of [`reconcile_change`] are structurally absent rather than
 /// skipped. **Drift** (gate 1) cannot apply: drift is a disagreement with a
 /// lock this function does not consult, and re-proving the tree is a
 /// stronger answer than comparing it to a seal nobody trusts. **Status,
 /// digest and accept OIDs** (gates 2-4) are properties of a change, and
 /// there is none: open changes are tolerated and left exactly as they are,
 /// files untouched and still open -- a full reseal is about the spec on
-/// disk, not about anybody's staged delta. **The ops** are likewise absent,
+/// disk, not about anybody's staged delta. **The witness** (gate 7) is a
+/// property of a change's *journal*, so it goes the same way, and
+/// `witness_warnings` comes back empty. **The ops** are likewise absent,
 /// hence `ops_applied: 0` and a `sealed_by: None` seal: no transaction
-/// produced this state, it was simply found.
+/// produced this state, it was simply found -- and with no ops there is no
+/// journal to fold either, so `bindings.tel` is read as it stands rather
+/// than rewritten.
 ///
 /// What remains is what proves a spec on its own: the full model (rules 1,
 /// 3 and 4 of §3.3), rule 5, every constraint that has a `check` (D11 --
@@ -235,6 +273,10 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
         ops_applied: 0,
         checks_run,
         tests_run,
+        // No change, so no journal, so nothing to say about witnesses: the
+        // field is present and empty rather than absent, because the shape
+        // of a reconcile result is one shape (Annex C).
+        witness_warnings: Vec::new(),
         lock,
     })
 }
@@ -460,6 +502,112 @@ fn require_no_orphan_code(ws: &Workspace, model: &TelosModel) -> Result<(), Telo
     ))
 }
 
+// --- gate 7: the sealed red witness (D7) -------------------------------------
+
+/// The witness discipline, as a static gate over the journal (D7): every
+/// scenario this delta makes new or different owes an intact red/green pair
+/// on the bytes its test file has *right now*.
+///
+/// [`required_witnesses`] answers who owes one -- the scenarios of the
+/// `add`/`edit intent` ops whose post-status is `active` and whose emitted
+/// fragment is not already in the base, which is what exempts an intent
+/// edited without touching its scenarios. [`witness_verdict`] answers
+/// whether the journal pays it, against the current blob oids of the test
+/// files the journal itself names: a path no run mentions cannot carry a
+/// witness, and a path that vanished is absent from the map, which is
+/// exactly how the verdict tells "changed" from "gone".
+///
+/// Under `strict` the **first** failing scenario aborts, in
+/// [`required_witnesses`]' sorted order. That is the convergence property
+/// the whole gate order exists for: a caller fixes one named thing, re-runs,
+/// and gets the next one -- rather than a list it has to re-derive after
+/// every step. Under `advisory` every verdict is collected instead and the
+/// reconcile proceeds: the messages are the same frozen wordings, carried
+/// out as [`ReconcileOutcome::witness_warnings`].
+///
+/// # A project with no runner owes no witness
+///
+/// An empty `[test] cmd` skips this gate outright, exactly as it skips gate
+/// 9 ([`run_tests`], D10's «no runner configured is a project that has not
+/// wired one up yet, not a broken transaction»). Here the argument is
+/// stronger than a convention: a witness can only be produced by `telos
+/// test`, which *refuses* without a runner (`TELOS_TEST_NOT_FOUND`, «no
+/// `[test] cmd` is configured»). Enforcing the witness there would leave a
+/// refusal whose hint -- «run `telos test SCN-…`» -- names a command that
+/// cannot succeed, which is precisely the non-convergence the frozen gate
+/// order exists to prevent; and it would refuse the first change of every
+/// freshly `init`ed project, since `init` ships `tdd = "strict"` with an
+/// empty `cmd`.
+///
+/// This opens no door that D10 has not already opened: emptying `[test] cmd`
+/// is an edit to `telos/telos.toml`, a *sealed* spec file, so it is drift
+/// until some change adopts it and a human approves it -- and it already
+/// disables the test gate wholesale. A project that wants the witness
+/// discipline enforced configures a runner, which is the same act as wanting
+/// its tests run at all.
+fn check_witnesses(
+    ws: &Workspace,
+    git: &GitRepo,
+    base: &[(RepoPath, TelFile)],
+    model: &TelosModel,
+    change: &Change,
+) -> Result<Vec<String>, TelosError> {
+    if ws.config.test.cmd.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let required = required_witnesses(base, model, &change.ops);
+    if required.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let test_paths: Vec<RepoPath> = change
+        .journal
+        .iter()
+        .filter_map(|entry| match entry {
+            JournalEntry::Run(run) => Some(run.test.path.clone()),
+            JournalEntry::Bind { .. } => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let current = git.blob_oids(&test_paths)?;
+
+    let mut warnings = Vec::new();
+    for scenario in required {
+        let (code, message, hint) = match witness_verdict(&change.journal, scenario, &current) {
+            WitnessVerdict::Intact => continue,
+            WitnessVerdict::MissingRed => (
+                ErrorCode::TelosScenarioRedExpected,
+                format!("scenario {scenario} has no sealed red witness"),
+                format!("run `telos test {scenario}` to record a red witness before implementing"),
+            ),
+            WitnessVerdict::MissingGreen => (
+                ErrorCode::TelosScenarioRedExpected,
+                format!("scenario {scenario} has a red witness but no green run on the same bytes"),
+                format!("run `telos test {scenario}` again once the implementation is in place"),
+            ),
+            // The message is the verdict's own -- it names the test file and
+            // distinguishes "changed" from "no longer exists" (Annex F), and
+            // only `witness_verdict` knows which red it judged.
+            WitnessVerdict::Sealed(message) => (
+                ErrorCode::TelosTestSealed,
+                message,
+                format!(
+                    "the red witness is invalid; run `telos test {scenario}` again on the \
+                     current bytes before reconciling"
+                ),
+            ),
+        };
+
+        if ws.config.policy.tdd == TddPolicy::Strict {
+            return Err(TelosError::new(code, message).hint(hint));
+        }
+        warnings.push(message);
+    }
+    Ok(warnings)
+}
+
 // --- what this delta impacts (D10/D11) --------------------------------------
 
 /// The graph nodes a delta touches, plus everything that depends on them.
@@ -559,7 +707,7 @@ fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet
     scenarios
 }
 
-// --- gate 7: constraint checks (D11) ----------------------------------------
+// --- gate 8: constraint checks (D11) ----------------------------------------
 
 /// Runs the `check` of every global constraint and of every scoped one whose
 /// scope meets an impacted intent, at the repository root.
@@ -623,7 +771,7 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
     .hint("Run the constraint's `check` command directly to see its output.")
 }
 
-// --- gate 8: tests (D10) -----------------------------------------------------
+// --- gate 9: tests (D10) -----------------------------------------------------
 
 /// Runs `[test] cmd` once per distinct `proves` target of the impacted
 /// scenarios, `{filter}` substituted with the target's test name (or, when
@@ -743,6 +891,35 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
         fs::create_dir_all(parent).map_err(|e| io_error("create", &op.target_path(), e))?;
     }
     fs::write(&path, content).map_err(|e| io_error("write", &op.target_path(), e))
+}
+
+/// Writes `telos/bindings.tel` from the folded model (D2), through the
+/// emitter like every other spec file this transaction writes.
+///
+/// The whole table is re-emitted rather than appended to: `model.bindings`
+/// already holds what the sealed file said *plus* what the journal folded in
+/// ([`fold_journal_bindings`]), and [`crate::emit::emit_bindings`] is the one
+/// place that decides the file's order. So a reconcile that folds nothing
+/// rewrites the file byte-identically, which is why this is unconditional
+/// rather than guarded on "did the journal add anything".
+///
+/// The one case that is guarded: a model with no binding at all, in a
+/// project that has no `bindings.tel` on disk either. Writing an empty file
+/// there would add a spec file -- and a lock entry -- that nothing asked
+/// for. (`telos init` creates the file empty, so this only ever spares a
+/// tree that was assembled by hand.)
+fn write_bindings(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
+    let path = RepoPath::new(BINDINGS_PATH);
+    let abs = ws.abs_path(&path);
+    if model.bindings.is_empty() && !abs.is_file() {
+        return Ok(());
+    }
+
+    let content = emit_file(&TelFile::Bindings(model.bindings.clone()));
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).map_err(|e| io_error("create", &path, e))?;
+    }
+    fs::write(&abs, content).map_err(|e| io_error("write", &path, e))
 }
 
 fn io_error(verb: &str, path: &RepoPath, e: std::io::Error) -> TelosError {

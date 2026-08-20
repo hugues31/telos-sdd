@@ -374,6 +374,10 @@ fn reconcile(ctx: &Ctx, id: &str) -> CmdResult {
         &project.changes,
     )?;
 
+    let human = format!(
+        "reconciled {id}: {} op(s) applied, {} check(s), {} test(s)",
+        outcome.ops_applied, outcome.checks_run, outcome.tests_run
+    );
     Ok(Outcome {
         result: json!({
             "id": id,
@@ -381,13 +385,27 @@ fn reconcile(ctx: &Ctx, id: &str) -> CmdResult {
             "ops_applied": outcome.ops_applied,
             "checks_run": outcome.checks_run,
             "tests_run": outcome.tests_run,
+            "witness_warnings": outcome.witness_warnings,
         }),
-        human: format!(
-            "reconciled {id}: {} op(s) applied, {} check(s), {} test(s)",
-            outcome.ops_applied, outcome.checks_run, outcome.tests_run
-        ),
+        human: with_warnings(human, &outcome.witness_warnings),
         next_actions: vec!["telos status".to_string()],
     })
+}
+
+/// Appends one `warning: …` line per advisory witness verdict to a
+/// reconcile's human output (D7).
+///
+/// Human mode is where an `advisory` project's TDD debt has to be visible at
+/// all: `witness_warnings` carries it in `--json`, and a reconcile that
+/// printed only its counters would let the same debt accumulate silently
+/// run after run. Empty in every other case, which is the ordinary one, and
+/// then the line is exactly what M2 printed.
+fn with_warnings(mut human: String, warnings: &[String]) -> String {
+    for warning in warnings {
+        human.push_str("\nwarning: ");
+        human.push_str(warning);
+    }
+    human
 }
 
 /// `telos change reconcile --full`: re-prove the whole project and reseal
@@ -417,6 +435,10 @@ fn reconcile_full_project(ctx: &Ctx) -> CmdResult {
             "ops_applied": outcome.ops_applied,
             "checks_run": outcome.checks_run,
             "tests_run": outcome.tests_run,
+            // Always `[]` here: a full reseal belongs to no change, so there
+            // is no journal to judge (D7). Present anyway -- one command,
+            // one result shape.
+            "witness_warnings": outcome.witness_warnings,
         }),
         human: format!(
             "resealed the project: {} check(s), {} test(s)",

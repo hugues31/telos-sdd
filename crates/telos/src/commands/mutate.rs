@@ -142,7 +142,8 @@ pub fn edit(ctx: &Ctx, kind: EntityKind, key: &str, change: &str, payload: &str)
 ///
 /// Whether the target exists, and whether anything still references it
 /// (rule 2 of §3.3), are both the overlay's answers -- staged here, decided
-/// in [`validate_ops`].
+/// by [`apply_ops`] in [`Staging::finish`], which is where the removal meets
+/// the spec it would leave behind.
 pub fn remove(ctx: &Ctx, kind: EntityKind, key: &str, change: &str) -> CmdResult {
     let staging = Staging::begin(ctx, change)?;
 

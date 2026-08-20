@@ -36,6 +36,10 @@ use common::{telos, with_fixture};
 // --- the corpus paths these tests drift ------------------------------------
 
 const INVOICE: &str = "telos/notions/Invoice.tel";
+/// Named by `Invoice`'s `rel issued-to` and by INT-0017's scenario: the
+/// corpus' most-referenced notion, hence the one whose deletion the post-
+/// state model must refuse.
+const CUSTOMER: &str = "telos/notions/Customer.tel";
 const CON_0003: &str = "telos/constraints/CON-0003.tel";
 const ROGUE: &str = "telos/notions/Rogue.tel";
 const CONFIG: &str = "telos/telos.toml";
@@ -405,18 +409,90 @@ fn adopting_the_deletion_of_a_bound_code_file_is_refused() {
 
     let error = run_err(dir, &["adopt", "--json"], "TELOS_INTEGRITY_VIOLATION");
 
-    let message = error["message"].as_str().unwrap();
-    assert!(
-        message.contains(CODE),
-        "the refusal must name the path: {message}"
-    );
-    assert!(
-        error["hint"].as_str().unwrap().contains("telos revert"),
-        "the hint must point at the command that handles it: {error}"
+    assert_eq!(
+        error,
+        json!({
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": "cannot adopt: bound file `src/billing/invoice.rs` was deleted",
+            "hint": "restore it with `telos revert`, or remove its binding"
+        })
     );
     assert!(
         !dir.join("telos/changes/CHG-0001.tel").exists(),
         "a refused adopt must write nothing"
+    );
+}
+
+/// A `.tel` file whose declared entity belongs at another path. Adopting it
+/// would stage an op claiming `Other.tel` and leave `Rogue.tel` drifted --
+/// an `adopt` that reports success on a project it did not capture.
+#[test]
+fn adopting_a_file_that_declares_another_entity_is_refused() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+
+    write(
+        dir,
+        ROGUE,
+        &ROGUE_TEL.replace("notion Rogue", "notion Other"),
+    );
+
+    let error = run_err(dir, &["adopt", "--json"], "TELOS_INTEGRITY_VIOLATION");
+
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains(ROGUE) && message.contains("telos/notions/Other.tel"),
+        "the refusal must name both the file and where its entity belongs: {message}"
+    );
+    assert!(
+        !dir.join("telos/changes/CHG-0001.tel").exists(),
+        "a refused adopt must write nothing"
+    );
+}
+
+/// The safety net under the idempotent overlay (D7), end to end: `adopt`
+/// plans a `remove` for any deleted entity file without complaint, so what
+/// stops a deletion the rest of the spec still depends on is the *post-state
+/// model* -- and it does, on both routes into the command.
+///
+/// The `--into` half matters on its own: it allocates no id, so it never
+/// loads a model before the validation does, which makes
+/// `validate_ops_idempotent` provably the thing that refuses.
+#[test]
+fn adopting_a_delta_the_post_state_model_refuses_writes_nothing() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+
+    // Opened while the project is still coherent, and left empty.
+    run_ok(dir, &["change", "open", "unrelated work", "--json"]);
+
+    delete(dir, CUSTOMER);
+    assert_eq!(state(dir)["state"], json!("drifted"));
+
+    // (a) Into an existing change: the validation is the only model load.
+    let error = run_err(
+        dir,
+        &["adopt", "--into", "CHG-0001", "--json"],
+        "TELOS_REFERENCE_UNKNOWN",
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown notion `Customer`"),
+        "the refusal must name the reference that no longer resolves: {error}"
+    );
+    assert_eq!(
+        diff_ops(dir, "CHG-0001"),
+        Vec::<Value>::new(),
+        "a refused adopt must leave the target change untouched"
+    );
+
+    // (b) Into a new change: same verdict, and no change file to show for it.
+    run_err(dir, &["adopt", "--json"], "TELOS_REFERENCE_UNKNOWN");
+    assert!(
+        !dir.join("telos/changes/CHG-0002.tel").exists(),
+        "a refused adopt must not leave a change behind"
     );
 }
 

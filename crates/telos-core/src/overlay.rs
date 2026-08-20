@@ -4,10 +4,25 @@
 //! A change never writes a `.tel` file while it is open -- it writes *ops*.
 //! So the only way to answer "would this delta leave the spec coherent?" is
 //! to build the spec the delta describes and check that one, which is what
-//! this module is: [`parse_base`] reads the sealed tree, [`apply_ops`]
-//! replays a change's ops over it, and [`validate_ops`] runs the whole
-//! semantic pass ([`build_model`]) on the result. Nothing here touches the
-//! filesystem beyond that one read, and nothing here ever writes.
+//! this module is: [`parse_base`] reads the tree, one of the two `apply`
+//! functions below replays a change's ops over it, and [`build_model`] runs
+//! the semantic pass on the result. Nothing here touches the filesystem
+//! beyond that one read, and nothing here ever writes.
+//!
+//! # Two ways to apply the same ops, and who uses which
+//!
+//! | | base is | refuses | callers |
+//! |---|---|---|---|
+//! | [`apply_ops`] | the tree as the sealed spec | an op that contradicts it | `telos add\|edit\|remove`, on the **one op being staged now** |
+//! | [`apply_ops_idempotent`] (+ [`validate_ops_idempotent`]) | a tree that may already show part of the delta | nothing | `adopt` and `reconcile`, on a **whole change** |
+//!
+//! The split is D7's doing. `adopt` turns drift into ops describing a tree
+//! that already shows them -- `add` of a file that is already there, `remove`
+//! of one that is already gone -- so the staging preconditions would refuse
+//! the very state they exist to protect. [`apply_ops_idempotent`]'s own doc
+//! carries the full argument; the short version is that those refusals are
+//! about *the op*, and only the caller staging it is in a position to act on
+//! them.
 //!
 //! Three properties are load-bearing:
 //!
@@ -15,32 +30,26 @@
 //!   another's output, so `add X` then `remove X` is a different transaction
 //!   from `remove X` then `add X`, and rule 2 below is judged at the point
 //!   in the sequence where the removal happens. What order does *not* change
-//!   is the verdict of the semantic pass: [`validate_ops`] builds one model,
-//!   from the state the last op leaves behind.
+//!   is the verdict of the semantic pass: [`build_model`] runs once, on the
+//!   state the last op leaves behind.
 //! - **A path is an identity** ([`StagedOp::target_path`]). The base is
 //!   keyed by repo-relative path, and an entity's path is a function of its
 //!   kind and its id, so two ops on one entity always meet on one slot.
-//! - **Rule 2 of §3.3 lives here** ([`apply_ops`]): removing an entity that
-//!   something still references is refused, naming the referrer. It is
-//!   checked against the state *after* the removal, so a change that drops
-//!   the referrer first and the referred-to entity second is allowed --
-//!   again, order is data.
+//! - **Rule 2 of §3.3 is enforced twice, differently.** [`apply_ops`] refuses
+//!   a removal *naming the referrer* (`cannot remove intent INT-0017:
+//!   INT-0042 requires it`) -- the good message, produced where the mistake
+//!   was just made. [`apply_ops_idempotent`] cannot check it (the referrer
+//!   may itself be part of the drift), so on that path the same violation
+//!   surfaces from [`build_model`] as an unresolvable reference. Nothing
+//!   escapes: every referrer `first_referrer` scans -- a notion's `rel`, an
+//!   intent's `refines`/`requires`/`excludes`, a constraint's `scope`, a
+//!   binding's `implements`/`proves` -- is a reference the semantic pass
+//!   resolves too, and `crates/telos-core/tests/overlay.rs` pins that.
 //!
 //! The rules this module does *not* enforce are the ones that need more than
 //! the spec tree: no-code-without-telos (rule 5) needs `telos.toml`'s globs
 //! and the working tree, and the red-witness discipline needs test runs.
 //! Both belong to reconcile.
-//!
-//! # Two ways to apply the same ops
-//!
-//! [`apply_ops`] is the *staging* one: it reads the base as the sealed tree
-//! and refuses an op that contradicts it. [`apply_ops_idempotent`] is the
-//! *whole-change* one: it puts each op's post-state at its target path and
-//! refuses nothing, because the base it runs against may already show part
-//! of the delta -- which is exactly what `adopt` produces (D7). Its doc
-//! comment carries the full argument; the short version is that the three
-//! refusals are about the op, and only the staging caller is in a position
-//! to act on them.
 
 use std::collections::BTreeMap;
 
@@ -50,7 +59,7 @@ use crate::ids::{NotionName, RepoPath};
 use crate::model::{Binding, Notion, Rule, Scope, StagedOp, TelFile, TelosModel};
 use crate::semantic::{build_model, expr_notions, scenario_notions, statement_notions};
 use crate::suggest::closest;
-use crate::workspace::{Workspace, telos_error_as_diagnostic};
+use crate::workspace::Workspace;
 
 /// Reads and parses the sealed spec tree, without building a model from it.
 ///
@@ -58,7 +67,9 @@ use crate::workspace::{Workspace, telos_error_as_diagnostic};
 /// that does not resolve on its own, but the whole job of a change is to
 /// carry the spec from one coherent state to another, and the ops are what
 /// close the gap. So the base is only required to *parse*; whether it holds
-/// together is decided once the ops are on top of it ([`validate_ops`]).
+/// together is decided once the ops are on top of it -- by [`build_model`],
+/// through [`validate_ops_idempotent`] or through the staging caller's own
+/// pass.
 pub fn parse_base(ws: &Workspace) -> Result<Vec<(RepoPath, TelFile)>, Vec<Diagnostic>> {
     ws.parse_spec_files()
 }
@@ -108,7 +119,12 @@ pub fn unknown_entity(base: &[(RepoPath, TelFile)], entity: &str, key: &str) -> 
 }
 
 /// Replays `ops` over `base`, in staged order, and hands back the spec they
-/// describe.
+/// describe -- reading `base` as the spec those ops were written against.
+///
+/// This is the **staging** application: `telos add|edit|remove` runs it on
+/// the single op it is about to stage, over the overlay the change already
+/// describes. For a whole change, whose base may already show part of the
+/// delta, see [`apply_ops_idempotent`].
 ///
 /// The three refusals, each with its own dedicated message:
 ///
@@ -126,11 +142,11 @@ pub fn unknown_entity(base: &[(RepoPath, TelFile)], entity: &str, key: &str) -> 
 ///
 /// Everything else the spec must satisfy -- that references resolve, that an
 /// active intent has a scenario, that literals match their attribute types
-/// -- is [`build_model`]'s, and runs in [`validate_ops`] once the whole
-/// overlay exists. Splitting it that way is deliberate: the three rules
-/// above are about the *op* (it contradicts what the base holds), and their
-/// messages name the op's own target, while a semantic diagnostic is about
-/// the *spec* and names a file.
+/// -- is [`build_model`]'s, and every caller runs it on the overlay this
+/// returns. Splitting it that way is deliberate: the three rules above are
+/// about the *op* (it contradicts what the base holds), and their messages
+/// name the op's own target, while a semantic diagnostic is about the *spec*
+/// and names a file.
 pub fn apply_ops(
     mut base: Vec<(RepoPath, TelFile)>,
     ops: &[StagedOp],
@@ -339,18 +355,6 @@ fn first_intent_referrer(
     None
 }
 
-/// The full check a staged delta must pass: the base parses, the ops apply,
-/// and the spec they describe builds cleanly.
-///
-/// This is the gate `telos add|edit|remove` runs *before* touching the
-/// change file, which is what makes a refused mutation leave the change
-/// byte-for-byte as it was.
-pub fn validate_ops(ws: &Workspace, ops: &[StagedOp]) -> Result<TelosModel, Vec<Diagnostic>> {
-    let base = parse_base(ws)?;
-    let overlay = apply_ops(base, ops).map_err(|e| vec![telos_error_as_diagnostic(e)])?;
-    build_model(overlay)
-}
-
 /// [`apply_ops`] with the staging preconditions dropped: each op simply puts
 /// its post-state at its target path, and is therefore a no-op against a
 /// base that already shows it.
@@ -383,7 +387,10 @@ pub fn validate_ops(ws: &Workspace, ops: &[StagedOp]) -> Result<TelosModel, Vec<
 /// something still points at it fails as an unresolvable reference instead
 /// of as a named referrer. Only the message differs, and the good message is
 /// kept where it does the most good: at staging time, where the mistake was
-/// just made.
+/// just made. That claim is not left to inspection: `overlay.rs`'s
+/// integration tests pin it for a removal [`first_referrer`] would have
+/// caught, and `adopt_revert.rs` pins it end to end for a drift that deletes
+/// a referenced notion.
 pub fn apply_ops_idempotent(
     mut base: Vec<(RepoPath, TelFile)>,
     ops: &[StagedOp],
@@ -420,14 +427,16 @@ pub fn apply_ops_idempotent(
     base
 }
 
-/// [`validate_ops`] over [`apply_ops_idempotent`]: the spec a delta
-/// describes must build, whether or not the working tree already shows part
-/// of that delta.
+/// The full check a *whole change* must pass: the tree parses,
+/// [`apply_ops_idempotent`] puts the delta's post-state on top, and
+/// [`build_model`] proves the spec that describes -- whether or not the
+/// working tree already shows part of that delta.
 ///
-/// This is what `adopt` validates a plan with and what `reconcile` runs as
-/// its fifth gate -- the two places that judge a *complete* change rather
-/// than one op being staged now. See [`apply_ops_idempotent`] for why the
-/// preconditions cannot apply there.
+/// This is what `adopt` validates a plan with, what `reconcile` runs as its
+/// fifth gate, and what `telos add|edit|remove` finishes with once the op it
+/// is staging has passed [`apply_ops`]'s own preconditions. See
+/// [`apply_ops_idempotent`] for why those preconditions cannot be re-run
+/// over a complete change.
 pub fn validate_ops_idempotent(
     ws: &Workspace,
     ops: &[StagedOp],

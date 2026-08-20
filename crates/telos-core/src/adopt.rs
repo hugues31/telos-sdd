@@ -26,7 +26,8 @@
 //!
 //! # What `adopt` refuses
 //!
-//! Exactly two things, and both hand over to `revert` rather than guessing:
+//! Three things, and each of them hands the caller a next step rather than
+//! guessing at one:
 //!
 //! - A drifted `.tel` file that no longer parses. There is no entity to stage
 //!   -- `TELOS_PARSE_ERROR` with [`ADOPT_PARSE_HINT`].
@@ -34,7 +35,18 @@
 //!   `telos/bindings.tel`. An entity file's identity survives its deletion
 //!   (it is in the path), so a `remove` op can still be written; an opaque
 //!   file's content does not, so there is neither an identity to remove nor
-//!   bytes to accept. `revert` is what handles that.
+//!   bytes to accept. `revert` is what handles that ([`undeletable`]).
+//! - A `.tel` file whose declared entity belongs at another path
+//!   ([`require_identity`]): adopting it would stage an op claiming a file
+//!   *other* than the drifted one, leaving the drift uncaptured after an
+//!   `adopt` that reported success.
+//!
+//! A fourth refusal is not this module's, but reaches the caller through it
+//! all the same: the delta `plan_adopt` returns still has to describe a spec
+//! that resolves. Drift that deletes a notion three intents still name is
+//! planned without complaint here and refused by
+//! [`crate::overlay::validate_ops_idempotent`] at the CLI layer, with the
+//! semantic pass' own diagnostics.
 
 use std::fs;
 
@@ -336,18 +348,22 @@ fn unparseable(path: &RepoPath, diagnostics: Vec<Diagnostic>) -> TelosError {
 
 /// A deleted file that carries no entity, so no op can express its deletion.
 ///
-/// Bound code and an unbound spec file get the same refusal and different
-/// hints: dropping a binding is a real step for the first and meaningless
-/// for the second.
+/// Bound code and an unbound spec file get the same message shape and
+/// different hints: dropping a binding is a real next step for the first and
+/// meaningless for the second. `lock` is what tells them apart -- a path in
+/// `lock.code` is there because a binding put it there.
 fn undeletable(lock: &Lock, path: &RepoPath) -> TelosError {
-    let hint = if lock.code.contains_key(path) {
-        format!("restore `{path}` with `telos revert`, or remove the binding that covers it")
+    let (what, hint) = if lock.code.contains_key(path) {
+        (
+            "bound file ",
+            "restore it with `telos revert`, or remove its binding",
+        )
     } else {
-        format!("restore `{path}` with `telos revert`")
+        ("", "restore it with `telos revert`")
     };
     TelosError::new(
         ErrorCode::TelosIntegrityViolation,
-        format!("cannot adopt the deletion of `{path}`: only spec entity files can be removed by a change"),
+        format!("cannot adopt: {what}`{path}` was deleted"),
     )
     .hint(hint)
 }

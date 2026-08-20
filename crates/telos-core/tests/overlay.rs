@@ -18,7 +18,10 @@ use telos_core::counters::{Alloc, Counters, floors};
 use telos_core::error::{Diagnostic, ErrorCode};
 use telos_core::ids::{ConstraintId, IntentId, NotionName, RepoPath};
 use telos_core::model::{Intent, Notion, StagedOp, TelFile};
-use telos_core::overlay::{apply_ops, notions_of, op_before_after, parse_base, validate_ops};
+use telos_core::overlay::{
+    apply_ops, apply_ops_idempotent, notions_of, op_before_after, parse_base,
+    validate_ops_idempotent,
+};
 use telos_core::payload::{intent_from_json, notion_from_json, patch_intent};
 use telos_core::workspace::Workspace;
 
@@ -365,19 +368,80 @@ fn apply_ops_leaves_an_accept_op_alone() {
     assert_eq!(overlay, base);
 }
 
-// --- validate_ops -----------------------------------------------------------
+// --- apply_ops_idempotent ---------------------------------------------------
+//
+// The second application (D7): each op puts its post-state at its target
+// path and refuses nothing, so it can be replayed over a tree that already
+// shows it -- which is exactly what `adopt` produces and what `reconcile`
+// then has to validate. These tests pin the two halves of that: that it
+// agrees with `apply_ops` wherever `apply_ops` applies at all, and that it
+// is a no-op where `apply_ops` would refuse.
+
+/// The delta `adopt` produces for a hand-created file and a hand-deleted
+/// one, in one plan.
+fn adopted_delta() -> [StagedOp; 2] {
+    [
+        StagedOp::AddNotion(refund_notion()),
+        StagedOp::RemoveConstraint(ConstraintId(3)),
+    ]
+}
+
+/// Where both apply, both produce the same spec: the lenient application is
+/// not a *different* overlay, only a more tolerant way of reaching the same
+/// one.
+#[test]
+fn apply_ops_idempotent_agrees_with_apply_ops_wherever_both_apply() {
+    let (_tmp, ws) = corpus();
+    let base = base_of(&ws);
+    let ops = adopted_delta();
+
+    let strict = apply_ops(base.clone(), &ops).unwrap();
+
+    assert_eq!(apply_ops_idempotent(base, &ops), strict);
+}
+
+/// The property the whole split rests on: replaying a delta over a tree that
+/// already shows it changes nothing. `adopt` stages ops describing the disk,
+/// and `reconcile` re-applies them to that same disk -- so if this were not a
+/// no-op, an adopted change could not be reconciled at all.
+#[test]
+fn apply_ops_idempotent_is_a_no_op_on_an_already_applied_delta() {
+    let (_tmp, ws) = corpus();
+    let base = base_of(&ws);
+    let ops = adopted_delta();
+
+    let once = apply_ops_idempotent(base, &ops);
+    let twice = apply_ops_idempotent(once.clone(), &ops);
+
+    assert_eq!(once, twice);
+    // And `once` really is the post-state, not the base: the added notion is
+    // there, the removed constraint is gone.
+    assert_eq!(
+        find(&once, "telos/notions/Refund.tel"),
+        Some(TelFile::Notion(refund_notion()))
+    );
+    assert_eq!(find(&once, "telos/constraints/CON-0003.tel"), None);
+
+    // The contrast that justifies the second function at all: the strict
+    // application refuses the very same replay.
+    let refused = apply_ops(once, &ops).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::TelosIntegrityViolation);
+    assert_eq!(refused.message, "notion `Refund` already exists");
+}
+
+// --- validate_ops_idempotent ------------------------------------------------
 
 /// The point of the overlay: an intent may name a notion that exists only
 /// because an earlier op of the same change added it.
 #[test]
-fn validate_ops_accepts_a_notion_and_an_intent_that_uses_it() {
+fn validate_ops_idempotent_accepts_a_notion_and_an_intent_that_uses_it() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
     let mut alloc = corpus_alloc(&ws);
     let staged = apply_ops(base, &[StagedOp::AddNotion(refund_notion())]).unwrap();
     let intent = refund_intent(&notions_of(&staged), &mut alloc);
 
-    let model = validate_ops(
+    let model = validate_ops_idempotent(
         &ws,
         &[
             StagedOp::AddNotion(refund_notion()),
@@ -390,7 +454,7 @@ fn validate_ops_accepts_a_notion_and_an_intent_that_uses_it() {
     assert!(model.intents.contains_key(&IntentId(43)));
 }
 
-/// What `validate_ops` judges is the spec the *whole* delta describes, not
+/// What the validation judges is the spec the *whole* delta describes, not
 /// each intermediate state: the semantic pass runs once, on the overlay the
 /// last op leaves behind. So these two ops validate in either order.
 ///
@@ -400,14 +464,14 @@ fn validate_ops_accepts_a_notion_and_an_intent_that_uses_it() {
 /// (`notions_of` over the ops staged before it), so the intent could not
 /// even be built before its notion was staged.
 #[test]
-fn validate_ops_judges_the_final_overlay_not_each_intermediate_state() {
+fn validate_ops_idempotent_judges_the_final_overlay_not_each_intermediate_state() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
     let mut alloc = corpus_alloc(&ws);
     let staged = apply_ops(base, &[StagedOp::AddNotion(refund_notion())]).unwrap();
     let intent = refund_intent(&notions_of(&staged), &mut alloc);
 
-    let model = validate_ops(
+    let model = validate_ops_idempotent(
         &ws,
         &[
             StagedOp::AddIntent(intent),
@@ -423,7 +487,7 @@ fn validate_ops_judges_the_final_overlay_not_each_intermediate_state() {
 /// diagnostic, reported against the file the staged entity would be
 /// written to.
 #[test]
-fn validate_ops_reports_a_dangling_reference_in_a_staged_op() {
+fn validate_ops_idempotent_reports_a_dangling_reference_in_a_staged_op() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
     let mut alloc = corpus_alloc(&ws);
@@ -431,7 +495,7 @@ fn validate_ops_reports_a_dangling_reference_in_a_staged_op() {
     let intent = refund_intent(&notions_of(&staged), &mut alloc);
 
     // The notion the intent needs is never staged.
-    let diagnostics = validate_ops(&ws, &[StagedOp::AddIntent(intent)]).unwrap_err();
+    let diagnostics = validate_ops_idempotent(&ws, &[StagedOp::AddIntent(intent)]).unwrap_err();
 
     assert!(
         diagnostics
@@ -446,24 +510,51 @@ fn validate_ops_reports_a_dangling_reference_in_a_staged_op() {
     );
 }
 
+/// **The safety property of the whole idempotent path**, pinned rather than
+/// argued: `apply_ops_idempotent` cannot enforce rule 2 of §3.3 (it refuses
+/// nothing), so a removal that leaves a referrer dangling has to be caught by
+/// the semantic pass instead. It is -- with a different, file-located
+/// message, and the same refusal.
+///
+/// `INT-0017` is required by `INT-0042`, which is exactly the case
+/// `apply_ops` reports as `` cannot remove intent INT-0017: INT-0042
+/// requires it ``. Both are asserted here, side by side, so that a change to
+/// either path has to face the comparison.
 #[test]
-fn validate_ops_surfaces_an_apply_failure_as_a_diagnostic() {
+fn validate_ops_idempotent_catches_a_rule_2_violation_as_an_unresolvable_reference() {
     let (_tmp, ws) = corpus();
+    let base = base_of(&ws);
+    let ops = [StagedOp::RemoveIntent(IntentId(17))];
 
-    let diagnostics = validate_ops(&ws, &[StagedOp::RemoveIntent(IntentId(17))]).unwrap_err();
-
-    assert_eq!(codes(&diagnostics), [ErrorCode::TelosIntegrityViolation]);
+    // The staging path: refused, naming the referrer.
+    let strict = apply_ops(base, &ops).unwrap_err();
+    assert_eq!(strict.code, ErrorCode::TelosIntegrityViolation);
     assert_eq!(
-        diagnostics[0].message,
+        strict.message,
         "cannot remove intent INT-0017: INT-0042 requires it"
+    );
+
+    // The whole-change path: refused too, by the reference INT-0042 is left
+    // holding.
+    let diagnostics = validate_ops_idempotent(&ws, &ops).unwrap_err();
+    assert_eq!(codes(&diagnostics), [ErrorCode::TelosReferenceUnknown]);
+    assert!(
+        diagnostics[0].message.contains("INT-0017"),
+        "the diagnostic must name the reference that no longer resolves: {:?}",
+        diagnostics[0]
+    );
+    assert_eq!(
+        diagnostics[0].file.as_ref().map(RepoPath::as_str),
+        Some("telos/intents/INT-0042.tel"),
+        "and locate it in the file that still points at it"
     );
 }
 
 #[test]
-fn validate_ops_with_no_op_is_the_sealed_model() {
+fn validate_ops_idempotent_with_no_op_is_the_sealed_model() {
     let (_tmp, ws) = corpus();
 
-    let model = validate_ops(&ws, &[]).unwrap();
+    let model = validate_ops_idempotent(&ws, &[]).unwrap();
 
     assert_eq!(model.intents.len(), 2);
     assert_eq!(model.notions.len(), 4);

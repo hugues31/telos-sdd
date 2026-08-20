@@ -245,10 +245,11 @@ fn collect_tel_files(dir: &Path, prefix: &str, out: &mut Vec<RepoPath>) -> Resul
     Ok(())
 }
 
-/// Lifts a [`TelosError`] into a file-less [`Diagnostic`], for the two
-/// places that must answer with a diagnostics list but can fail with a bare
-/// error: [`Workspace::parse_spec_files`] and [`crate::overlay::validate_ops`].
-pub(crate) fn telos_error_as_diagnostic(e: TelosError) -> Diagnostic {
+/// Lifts a [`TelosError`] into a file-less [`Diagnostic`], for
+/// [`Workspace::parse_spec_files`] -- which must answer with a diagnostics
+/// list but can fail with a bare error, when listing the spec files is what
+/// went wrong rather than parsing one.
+fn telos_error_as_diagnostic(e: TelosError) -> Diagnostic {
     Diagnostic {
         code: e.code,
         message: e.message,

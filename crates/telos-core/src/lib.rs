@@ -10,6 +10,7 @@ pub mod graph;
 pub mod ids;
 pub mod lock;
 pub mod model;
+pub mod payload;
 pub mod semantic;
 pub mod span;
 pub mod state;

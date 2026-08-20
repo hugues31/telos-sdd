@@ -571,7 +571,7 @@ fn loop_drift() {
 ///    of §7.4's story, and it is what proves the re-derived lock is a real
 ///    resolution and not just a file on disk.
 ///
-/// # The one M3 amendment (T5), and why it weakens nothing
+/// # The one M3 amendment (T5), and what this loop does *not* prove
 ///
 /// The pinned `--full` result gained a `"witness_warnings": []` line, and
 /// nothing else in this loop moved. The field is M3's, additive, and always
@@ -580,12 +580,23 @@ fn loop_drift() {
 /// take here, and pinning it is one more thing asserted rather than one
 /// fewer.
 ///
-/// What matters is what did **not** have to change: both branches edit an
-/// intent's `telos` without touching its scenarios, so the emitted scenario
-/// fragments are identical and D7's witness gate exempts them. That
-/// exemption is load-bearing for this loop -- were it wrong, both branch
-/// reconciles would refuse with `TELOS_SCENARIO_RED_EXPECTED`, and the fix
-/// would be in the exemption, never here.
+/// This loop is **inert on the witness gate**, and deliberately left that
+/// way. The `billing` corpus ships `[test] cmd = ""` (D13), and a project
+/// with no runner owes no witness -- `check_witnesses` returns at that
+/// carve-out before it ever asks who owes one. So the two branch reconciles
+/// here would pass whatever D7's scope rule said, and nothing about that
+/// rule may be inferred from this loop being green. Wiring a runner in just
+/// to make it say something would move the `--full` envelope this loop
+/// pins, for a property it is not the right place to assert.
+///
+/// The scope rule -- an intent edited without touching its scenarios owes no
+/// new witness, because the emitted fragments are identical -- is pinned
+/// where it can actually fail: `crates/telos/tests/reconcile.rs`, by
+/// `rebinding_a_pair_the_sealed_file_already_holds_leaves_it_unchanged` (a
+/// no-op `edit intent`, under `strict`, *with* a runner configured) and by
+/// the strict-mode family around it, which prove the gate refuses when a
+/// witness really is owed. `required_witnesses`' own unit tests
+/// (`telos-core/src/witness.rs`) pin the fragment comparison itself.
 #[test]
 fn loop_merge() {
     let tmp = with_fixture();

@@ -788,7 +788,17 @@ const BINDINGS: &str = "telos/bindings.tel";
 struct Feature {
     change: String,
     intent: String,
-    scenario: String,
+    /// Every scenario id `add intent` allocated, in payload order -- read
+    /// straight out of `result.scenario_ids`, never derived from another id
+    /// by arithmetic.
+    scenarios: Vec<String>,
+}
+
+impl Feature {
+    /// The first (and, for most fixtures here, only) scenario of the delta.
+    fn scenario(&self) -> &str {
+        &self.scenarios[0]
+    }
 }
 
 /// Runs `telos <args>` and returns the parsed envelope, whatever its verdict.
@@ -886,9 +896,10 @@ fn scenario_payload(title: &str) -> Value {
 /// Stages the delta every M3 test works from -- the two notions and the
 /// intent carrying `scenarios` -- into a fresh change, and approves it.
 ///
-/// `Feature.scenario` is the *first* scenario's id; a caller that stages two
-/// derives the second from the same result. No id is hardcoded anywhere: the
-/// allocator's answers are read back out of the envelopes (§14's anti-goal).
+/// `Feature.scenarios` is `result.scenario_ids` verbatim, in payload order,
+/// so a caller that stages three reads all three from the envelope. No id is
+/// hardcoded anywhere, and none is *computed* from another either -- the
+/// allocator's answers are read back as they come (§14's anti-goal).
 fn approved_feature(dir: &Path, scenarios: Vec<Value>) -> Feature {
     let change = ok_result(dir, &["change", "open", MOTIVATION, "--json"])["id"]
         .as_str()
@@ -925,10 +936,12 @@ fn approved_feature(dir: &Path, scenarios: Vec<Value>) -> Feature {
 
     let feature = Feature {
         intent: added["result"]["id"].as_str().unwrap().to_string(),
-        scenario: added["result"]["scenario_ids"][0]
-            .as_str()
+        scenarios: added["result"]["scenario_ids"]
+            .as_array()
             .expect("`add intent` reports the scenario ids it allocated")
-            .to_string(),
+            .iter()
+            .map(|id| id.as_str().expect("a scenario id is a string").to_string())
+            .collect(),
         change,
     };
     approve_id(dir, &feature.change);
@@ -991,10 +1004,10 @@ fn implemented() -> (tempfile::TempDir, Feature) {
         vec![scenario_payload("a full payment settles the invoice")],
     );
 
-    write_test_file(tmp.path(), &[&feature.scenario], "");
-    witness(tmp.path(), &feature.scenario, "red");
+    write_test_file(tmp.path(), &[feature.scenario()], "");
+    witness(tmp.path(), feature.scenario(), "red");
     set_marker(tmp.path());
-    witness(tmp.path(), &feature.scenario, "green");
+    witness(tmp.path(), feature.scenario(), "green");
     write_and_bind_code(tmp.path(), &feature.intent);
 
     (tmp, feature)
@@ -1042,8 +1055,8 @@ fn reconcile_derives_the_bindings_file_from_the_journal() {
         format!(
             "implements \"{CODE_FILE}\" -> {}\nproves     \"{TEST_FILE}::{}\" -> {}\n",
             feature.intent,
-            test_fn(&feature.scenario),
-            feature.scenario
+            test_fn(feature.scenario()),
+            feature.scenario()
         )
     );
 }
@@ -1104,10 +1117,10 @@ fn a_scenario_with_no_run_at_all_is_refused_and_nothing_is_written() {
         error,
         json!({
             "code": "TELOS_SCENARIO_RED_EXPECTED",
-            "message": format!("scenario {} has no sealed red witness", feature.scenario),
+            "message": format!("scenario {} has no sealed red witness", feature.scenario()),
             "hint": format!(
                 "run `telos test {}` to record a red witness before implementing",
-                feature.scenario
+                feature.scenario()
             ),
         })
     );
@@ -1120,38 +1133,46 @@ fn a_scenario_with_no_run_at_all_is_refused_and_nothing_is_written() {
     assert_eq!(read(tmp.path(), BINDINGS), "", "and derive nothing");
 }
 
-/// A red witness with no green on the same bytes: the implementation has not
-/// happened yet, so the reconcile refuses -- naming the *first* scenario that
-/// owes one, in id order, which is what makes a fixing agent converge.
+/// A red witness with no green on the same bytes -- and, with it, the
+/// convergence property the gate's ordering exists for: **two** scenarios owe
+/// a witness here, and the refusal names the lower-numbered one.
 ///
-/// Two scenarios, deliberately: the second is the one that owes a green,
-/// while the first is fully witnessed and, through its `proves`, is what
-/// keeps rule 5 (gate 6) from firing on `tests/billing.rs` before this gate
-/// is reached at all.
+/// Three scenarios, each playing a distinct part:
+///
+/// - the **first** is witnessed red *and* green, so it is `Intact` -- and its
+///   `proves`, folded from the green, is what keeps rule 5 (gate 6) from
+///   firing on `tests/billing.rs` before this gate is reached at all;
+/// - the **second** has a red and no green: `MissingGreen`, the verdict this
+///   test is named for;
+/// - the **third** was never run at all: `MissingRed`, a *different* verdict,
+///   and the one that would surface if the gate reported the last failure, an
+///   arbitrary one, or a list.
+///
+/// So the assertion below pins two things at once: the frozen red-without-
+/// green wording, and that the first failing scenario in id order is the one
+/// -- and the only one -- reported.
 #[test]
-fn a_red_witness_with_no_green_on_the_same_bytes_is_refused() {
+fn a_red_witness_with_no_green_names_the_first_failing_scenario() {
     let tmp = configured("strict");
     let feature = approved_feature(
         tmp.path(),
         vec![
             scenario_payload("a full payment settles the invoice"),
             scenario_payload("a partial payment leaves the invoice open"),
+            scenario_payload("an overpayment settles the invoice too"),
         ],
     );
-    let second = format!(
-        "SCN-{:04}",
-        feature
-            .scenario
-            .trim_start_matches("SCN-")
-            .parse::<u32>()
-            .unwrap()
-            + 1
-    );
-    write_test_file(tmp.path(), &[&feature.scenario, &second], "");
-    witness(tmp.path(), &feature.scenario, "red");
-    witness(tmp.path(), &second, "red");
+    let [witnessed, no_green, never_run] = match feature.scenarios.as_slice() {
+        [a, b, c] => [a.clone(), b.clone(), c.clone()],
+        other => panic!("`add intent` allocated {} scenario ids", other.len()),
+    };
+
+    // The third scenario deliberately gets no test function and no run.
+    write_test_file(tmp.path(), &[&witnessed, &no_green], "");
+    witness(tmp.path(), &witnessed, "red");
+    witness(tmp.path(), &no_green, "red");
     set_marker(tmp.path());
-    witness(tmp.path(), &feature.scenario, "green");
+    witness(tmp.path(), &witnessed, "green");
 
     let error = reconcile_id_err(tmp.path(), &feature.change);
 
@@ -1160,12 +1181,13 @@ fn a_red_witness_with_no_green_on_the_same_bytes_is_refused() {
         json!({
             "code": "TELOS_SCENARIO_RED_EXPECTED",
             "message": format!(
-                "scenario {second} has a red witness but no green run on the same bytes"
+                "scenario {no_green} has a red witness but no green run on the same bytes"
             ),
             "hint": format!(
-                "run `telos test {second}` again once the implementation is in place"
+                "run `telos test {no_green}` again once the implementation is in place"
             ),
-        })
+        }),
+        "the gate must report {no_green}, not {never_run} and not both"
     );
 }
 
@@ -1179,11 +1201,11 @@ fn a_test_edited_between_its_red_and_its_green_is_refused_as_sealed() {
         tmp.path(),
         vec![scenario_payload("a full payment settles the invoice")],
     );
-    write_test_file(tmp.path(), &[&feature.scenario], "");
-    witness(tmp.path(), &feature.scenario, "red");
-    write_test_file(tmp.path(), &[&feature.scenario], "// second thoughts\n");
+    write_test_file(tmp.path(), &[feature.scenario()], "");
+    witness(tmp.path(), feature.scenario(), "red");
+    write_test_file(tmp.path(), &[feature.scenario()], "// second thoughts\n");
     set_marker(tmp.path());
-    witness(tmp.path(), &feature.scenario, "green");
+    witness(tmp.path(), feature.scenario(), "green");
 
     let error = reconcile_id_err(tmp.path(), &feature.change);
 
@@ -1193,12 +1215,12 @@ fn a_test_edited_between_its_red_and_its_green_is_refused_as_sealed() {
             "code": "TELOS_TEST_SEALED",
             "message": format!(
                 "the test file `{TEST_FILE}` changed after the red witness for {} was sealed",
-                feature.scenario
+                feature.scenario()
             ),
             "hint": format!(
                 "the red witness is invalid; run `telos test {}` again on the current \
                  bytes before reconciling",
-                feature.scenario
+                feature.scenario()
             ),
         })
     );
@@ -1209,7 +1231,7 @@ fn a_test_edited_between_its_red_and_its_green_is_refused_as_sealed() {
 #[test]
 fn a_test_edited_after_its_green_is_refused_as_sealed() {
     let (tmp, feature) = implemented();
-    write_test_file(tmp.path(), &[&feature.scenario], "// touched afterwards\n");
+    write_test_file(tmp.path(), &[feature.scenario()], "// touched afterwards\n");
 
     let error = reconcile_id_err(tmp.path(), &feature.change);
 
@@ -1218,7 +1240,7 @@ fn a_test_edited_after_its_green_is_refused_as_sealed() {
         error["message"],
         json!(format!(
             "the test file `{TEST_FILE}` changed after the red witness for {} was sealed",
-            feature.scenario
+            feature.scenario()
         ))
     );
 }
@@ -1245,7 +1267,7 @@ fn advisory_reports_the_missing_witness_instead_of_refusing() {
             "checks_run": 0,
             "tests_run": 0,
             "witness_warnings": [
-                format!("scenario {} has no sealed red witness", feature.scenario)
+                format!("scenario {} has no sealed red witness", feature.scenario())
             ]
         })
     );
@@ -1278,7 +1300,7 @@ fn advisory_prints_the_warning_in_human_mode() {
     assert!(
         stdout.contains(&format!(
             "warning: scenario {} has no sealed red witness",
-            feature.scenario
+            feature.scenario()
         )),
         "the advisory warning is not in the human output:\n{stdout}"
     );

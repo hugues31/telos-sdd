@@ -442,9 +442,35 @@ fn a_journalled_change_claims_its_test_files_and_bound_paths() {
     ] {
         assert!(claims.contains(&RepoPath::new(path)), "{path}: {claims:?}");
     }
-    // D2: bindings.tel is derived at reconcile and claimed by no one.
-    assert!(!claims.contains(&RepoPath::new("telos/bindings.tel")));
     assert_eq!(claims.len(), 4);
+}
+
+/// D2/D9: the spec tree is written by ops and by reconcile, never
+/// journalled -- so no journal line may name a path under `telos/`, and a
+/// change file that tries does not parse.
+///
+/// Asserting that some well-behaved fixture's `claims()` happens to exclude
+/// `telos/bindings.tel` would have proved nothing: a change file is a text
+/// file, `claims()` returns what the journal holds, and reconcile's drift
+/// gate admits any path the change claims. This is the test that closes
+/// that door.
+#[test]
+fn a_journal_line_naming_the_spec_tree_does_not_parse() {
+    for line in [
+        "  bind \"telos/bindings.tel\" -> INT-0042",
+        "  run  SCN-0107 green \"telos/bindings.tel\" \"e69de29\"",
+        "  run  SCN-0107 red \"telos/intents/INT-0042.tel::scn_0107\" \"e69de29\"",
+    ] {
+        let src = format!(
+            "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
+             {line}\n}}\n",
+            "0".repeat(64)
+        );
+        assert_reports(
+            &parse_err(&src),
+            "a journal line cannot name a path under telos/",
+        );
+    }
 }
 
 #[test]

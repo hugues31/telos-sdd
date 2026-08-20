@@ -328,10 +328,18 @@ impl Change {
     /// legitimate work in progress: the implementer edits the test file the
     /// runs name and the source file the binds name, and that drift is
     /// admissible to *this* change's reconcile and carried over for every
-    /// other. `telos/bindings.tel` is never among them -- no journal line
-    /// names it, because a binding is journalled as a `bind` line and only
-    /// folded into `bindings.tel` at reconcile (D2). Were it claimable, one
-    /// change would lock the file every other change has to rewrite.
+    /// other.
+    ///
+    /// No path under `telos/` can appear among them, `telos/bindings.tel`
+    /// least of all: the grammar refuses a journal line naming one
+    /// (`parse_change_file`), so the guarantee holds for a change file
+    /// edited by hand as much as for one written by `telos test`. It has to
+    /// be the grammar's, because a claim is a licence to drift the file
+    /// until this change reconciles -- and `bindings.tel` is sealed,
+    /// rewritten by every reconcile from the folded journal (D2), and owned
+    /// by no one. Note that this method itself enforces nothing: hand a
+    /// `Change` a journal entry naming `telos/` in code and it will be
+    /// claimed.
     pub fn claims(&self) -> BTreeSet<RepoPath> {
         self.ops
             .iter()
@@ -1064,17 +1072,36 @@ mod tests {
         assert_eq!(change.claims().len(), 3);
     }
 
-    /// D2: `bindings.tel` is derived at reconcile, never claimed.
+    /// D2: `bindings.tel` is derived at reconcile, never claimed -- and
+    /// what keeps it out of [`Change::claims`] is the *grammar*, so that is
+    /// what this asserts.
     ///
-    /// It cannot appear here by construction -- no journal line names it,
-    /// and no op stages it in this change -- and the point of asserting it
-    /// is that a future line kind must not change that: a claimed
-    /// `bindings.tel` would let one change lock the file every other change
-    /// has to rewrite.
+    /// Asserting instead that some hand-built fixture happens not to name
+    /// it would prove nothing: `claims` returns whatever the journal holds,
+    /// and a change file is a text file an agent may edit. A claimed
+    /// `bindings.tel` would lock the file every other change has to
+    /// rewrite, and would slip drift on a sealed file past reconcile's
+    /// drift gate (D9), so the refusal belongs where files become models.
     #[test]
-    fn the_bindings_file_is_never_a_claim() {
-        let claims = implementing_change().claims();
-        assert!(!claims.contains(&RepoPath::new("telos/bindings.tel")));
+    fn no_journal_line_can_name_a_path_under_telos() {
+        let path = RepoPath::new("telos/changes/CHG-0001.tel");
+        for line in [
+            "  bind \"telos/bindings.tel\" -> INT-0001",
+            "  run  SCN-0001 green \"telos/bindings.tel\" \"cafe\"",
+            "  run  SCN-0001 red \"telos/intents/INT-0001.tel::scn_0001\" \"cafe\"",
+        ] {
+            let src = format!(
+                "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
+                 {line}\n}}\n",
+                "0".repeat(64)
+            );
+            let diags = crate::syntax::parse_change_file(&path, &src)
+                .expect_err("a journal line under telos/ must not parse");
+            assert_eq!(
+                diags[0].message, "a journal line cannot name a path under telos/",
+                "for `{line}`"
+            );
+        }
     }
 
     // --- journal_bindings (D2) -------------------------------------------

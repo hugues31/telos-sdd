@@ -85,6 +85,10 @@ const CHANGE_STATUSES: [(&str, ChangeStatus); 5] = [
 /// The two verdicts a `run` line may carry (Annex A, D1).
 const WITNESSES: [(&str, Witness); 2] = [("red", Witness::Red), ("green", Witness::Green)];
 
+/// How an unknown verdict is named back -- the closed set in full, the way
+/// [`CHANGE_STATUS_WORDS`] names the statuses.
+const WITNESS_WORDS: &str = "`red` or `green`";
+
 /// How an unknown change status is named back: the whole closed set, in the
 /// `expected ..., found ...` shape every other diagnostic uses.
 const CHANGE_STATUS_WORDS: &str =
@@ -515,6 +519,39 @@ impl<'a> P<'a> {
         let span = self.peek().span;
         self.advance();
         Ok(Sp { node, span })
+    }
+
+    /// A word out of a *small* closed set, reported by listing the whole
+    /// set: « expected `red` or `green`, found `blue` », with the closest
+    /// known word offered as a hint.
+    ///
+    /// The two vocabularies written this way -- a change's statuses and a
+    /// run's verdicts -- are the ones an agent has no other way to
+    /// discover, and each list costs one line. Bigger sets go through
+    /// [`P::word_from_set`], which names the *kind* of word expected
+    /// instead ("unknown notion kind `x`"): listing nine attribute types in
+    /// a message helps nobody.
+    ///
+    /// `words` is the rendered list, shared with the `found`-less form the
+    /// caller needs when the token is not a word at all.
+    fn listed_word<T: Copy>(
+        &mut self,
+        words: &str,
+        table: &[(&'static str, T)],
+    ) -> Result<T, Diagnostic> {
+        let TokKind::LowerIdent(word) = &self.peek().kind else {
+            return Err(self.expected(words));
+        };
+        let span = self.peek().span;
+        if let Some(entry) = table.iter().find(|entry| entry.0 == word.as_str()) {
+            let value = entry.1;
+            self.advance();
+            return Ok(value);
+        }
+        let hint = closest(word, table.iter().map(|entry| entry.0))
+            .map(|known| format!("closest is `{known}`"));
+        let message = format!("expected {words}, found `{word}`");
+        Err(self.diag_at(span, message, hint))
     }
 
     /// A word out of a closed set (notion kind, intent status, statement
@@ -1397,29 +1434,8 @@ impl<'a> P<'a> {
     }
 
     /// The five statuses of D16.
-    ///
-    /// Unlike the other closed sets (which go through
-    /// [`P::word_from_set`]), an unknown status is reported by *listing*
-    /// them: a change's lifecycle is the one vocabulary an agent has no
-    /// other way to discover, and the whole list costs one line. The
-    /// closest-word suggestion is still offered, as a hint.
     fn change_status(&mut self) -> Result<ChangeStatus, Diagnostic> {
-        let TokKind::LowerIdent(word) = &self.peek().kind else {
-            return Err(self.expected(CHANGE_STATUS_WORDS));
-        };
-        let span = self.peek().span;
-        if let Some(entry) = CHANGE_STATUSES
-            .iter()
-            .find(|entry| entry.0 == word.as_str())
-        {
-            let status = entry.1;
-            self.advance();
-            return Ok(status);
-        }
-        let hint = closest(word, CHANGE_STATUSES.iter().map(|entry| entry.0))
-            .map(|known| format!("closest is `{known}`"));
-        let message = format!("expected {CHANGE_STATUS_WORDS}, found `{word}`");
-        Err(self.diag_at(span, message, hint))
+        self.listed_word(CHANGE_STATUS_WORDS, &CHANGE_STATUSES)
     }
 
     /// `digest-field = "digest" , string-lit`, the string being the
@@ -1515,6 +1531,11 @@ impl<'a> P<'a> {
     /// Only reached on `run` or `bind`, which the body loop matched to
     /// decide the phase; the final `Err` is unreachable in practice and
     /// kept so the rule reads on its own.
+    ///
+    /// Both line kinds name a path, and neither may name one under
+    /// `telos/` ([`P::code_path_outside_the_spec_tree`]) -- the rule that
+    /// makes [`crate::model::Change::claims`]'s guarantee a property of the
+    /// grammar rather than of the commands that usually write these lines.
     fn journal_line(&mut self) -> Result<JournalEntry, Diagnostic> {
         if self.at_kw("run") {
             self.advance();
@@ -1523,6 +1544,7 @@ impl<'a> P<'a> {
             let text = self.expect_str("a test reference")?;
             let test = TestRef::from_str(&text.node)
                 .map_err(|err| self.diag_at(text.span, err.message, err.hint))?;
+            self.code_path_outside_the_spec_tree(&test.path, text.span)?;
             // The oid is opaque (D1): 40 hex in a sha1 repository, 64 in a
             // sha256 one, and never anything this parser should adjudicate.
             let oid = self.expect_str("the blob oid string after the test reference")?;
@@ -1536,37 +1558,52 @@ impl<'a> P<'a> {
         }
         if self.at_kw("bind") {
             self.advance();
-            let path = self.expect_str("a code path")?;
+            let text = self.expect_str("a code path")?;
+            let path = RepoPath::new(text.node);
+            self.code_path_outside_the_spec_tree(&path, text.span)?;
             self.expect(&TokKind::Arrow, "`->`")?;
             let intent = self.expect_intent_id()?.node;
             self.end_of_field()?;
-            return Ok(JournalEntry::Bind {
-                path: RepoPath::new(path.node),
-                intent,
-            });
+            return Ok(JournalEntry::Bind { path, intent });
         }
         Err(self.expected("`run` or `bind`"))
     }
 
-    /// The two verdicts a run may carry.
+    /// Refuses a journal path inside the spec tree (D2, D3, D9).
     ///
-    /// The set is two words wide, so it is named in full rather than
-    /// abbreviated to "a verdict" -- and the closest match is still offered
-    /// as a hint, which is what turns `gren` into a one-line fix.
-    fn witness(&mut self) -> Result<Witness, Diagnostic> {
-        let TokKind::LowerIdent(word) = &self.peek().kind else {
-            return Err(self.expected("`red` or `green`"));
-        };
-        let span = self.peek().span;
-        if let Some(entry) = WITNESSES.iter().find(|entry| entry.0 == word.as_str()) {
-            let witness = entry.1;
-            self.advance();
-            return Ok(witness);
+    /// A journal line names *code*: the test file a run was taken on, the
+    /// source file a bind attaches to an intent. Both become claims of the
+    /// change (D3), and a claim is a licence to drift the file until this
+    /// change reconciles -- which is exactly what `telos/**` must never
+    /// hand out. `telos/bindings.tel` is the sharp case: it is sealed, it
+    /// is rewritten by *every* reconcile from the folded journal (D2), and
+    /// a change claiming it would both lock it against the others and let
+    /// unreviewed drift through reconcile's own drift gate. The rest of the
+    /// spec tree is no better: an entity file is written by an `op`, whose
+    /// content the approval digest covers -- journalling one would be a way
+    /// to touch the spec without approving it.
+    ///
+    /// Enforced here rather than in the commands that normally write these
+    /// lines, because a change file is a plain text file an agent may edit
+    /// by hand: the invariant has to be a property of what parses.
+    fn code_path_outside_the_spec_tree(
+        &self,
+        path: &RepoPath,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if !path.as_str().starts_with("telos/") {
+            return Ok(());
         }
-        let hint = closest(word, WITNESSES.iter().map(|entry| entry.0))
-            .map(|w| format!("closest is `{w}`"));
-        let message = format!("expected `red` or `green`, found `{word}`");
-        Err(self.diag_at(span, message, hint))
+        Err(self.diag_at(
+            span,
+            "a journal line cannot name a path under telos/".to_string(),
+            Some("journal lines name code and test files; the spec tree is written by ops and by reconcile".to_string()),
+        ))
+    }
+
+    /// The two verdicts a run may carry.
+    fn witness(&mut self) -> Result<Witness, Diagnostic> {
+        self.listed_word(WITNESS_WORDS, &WITNESSES)
     }
 
     /// `"accept" , string-lit , string-lit`: the path, then the blob oid it
@@ -3761,6 +3798,61 @@ mod tests {
                 assert_eq!(found.len(), 1, "for `{line}`: {found:#?}");
                 assert_eq!(found[0].message, expected, "for `{line}`");
             }
+        }
+
+        #[test]
+        fn a_journal_line_may_not_name_a_path_under_telos() {
+            // D2/D3/D9: a journal path is a claim, and a claim licenses
+            // drift until reconcile -- which `telos/**` must never grant.
+            // Enforced by the grammar so a hand-edited change file cannot
+            // buy what the commands would never write.
+            let cases = [
+                "  bind \"telos/bindings.tel\" -> INT-0001",
+                "  bind \"telos/telos.toml\" -> INT-0001",
+                "  bind \"telos/intents/INT-0001.tel\" -> INT-0001",
+                "  run  SCN-0001 green \"telos/bindings.tel\" \"cafe\"",
+                "  run  SCN-0001 red \"telos/notions/Invoice.tel::scn_0001\" \"cafe\"",
+            ];
+            for line in cases {
+                let src = journalled(&format!("{line}\n"));
+                let found = diags(&src);
+                assert_eq!(found.len(), 1, "for `{line}`: {found:#?}");
+                assert_eq!(
+                    found[0].message, "a journal line cannot name a path under telos/",
+                    "for `{line}`"
+                );
+                assert_eq!(found[0].code, ErrorCode::TelosParseError);
+                assert_eq!(
+                    found[0].hint.as_deref(),
+                    Some(
+                        "journal lines name code and test files; \
+                         the spec tree is written by ops and by reconcile"
+                    )
+                );
+                // Reported on the offending string, not on the keyword.
+                let col = line.find('"').unwrap() + 1;
+                assert_eq!((found[0].line, found[0].col), (Some(5), Some(col as u32)));
+            }
+        }
+
+        #[test]
+        fn a_path_that_merely_starts_with_the_letters_telos_is_fine() {
+            // The refusal is about the spec directory, not about a prefix:
+            // `telosaurus.rs` is ordinary code.
+            let src = journalled(concat!(
+                "  bind \"telosaurus.rs\" -> INT-0001\n",
+                "  bind \"src/telos/adapter.rs\" -> INT-0001\n",
+                "  run  SCN-0001 red \"tests/telos_cli.rs\" \"cafe\"\n",
+            ));
+            assert_eq!(parse(&src).journal.len(), 3);
+        }
+
+        #[test]
+        fn a_refused_journal_path_never_reaches_claims() {
+            // The end the rule serves: reconcile's drift gate waves through
+            // any path the change claims, so `telos/**` must not get in.
+            let src = journalled("  bind \"telos/bindings.tel\" -> INT-0001\n");
+            assert!(parse_change_file(&change_path(), &src).is_err());
         }
 
         #[test]

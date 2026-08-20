@@ -149,6 +149,9 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
     );
     assert!(router.contains("Never edit any path under `telos/` manually"));
     assert!(router.contains("Stop and ask the human"));
+    assert!(router.contains("Routing is a mandatory handoff"));
+    assert!(router.contains("load and invoke the routed skill before any action in that phase"));
+    assert!(router.contains("Never execute Challenge or Implement steps yourself"));
 
     let challenger = read(tmp.path(), ".agents/skills/telos-challenger/SKILL.md");
     ordered(
@@ -165,6 +168,9 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
     assert!(challenger.contains("Never approve a change yourself"));
     assert!(challenger.contains("immediately invoke `telos change approve <CHG-id>`"));
     assert!(challenger.contains("Do not answer the native prompt"));
+    assert!(challenger.contains("ends only after triggering the native approval prompt"));
+    assert!(challenger.contains("opens the prompt; it does not grant approval"));
+    assert!(challenger.contains("Do not continue until the human answers"));
 
     let implementer = read(tmp.path(), ".agents/skills/telos-implementer/SKILL.md");
     ordered(

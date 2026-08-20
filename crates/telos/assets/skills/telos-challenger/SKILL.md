@@ -5,7 +5,7 @@ description: Challenge and stage a bounded Telos change while keeping approval a
 
 # Telos challenger
 
-Never edit application code. Never approve a change yourself, even when the user says “approve it yourself” or asks you to start coding immediately. The challenger ends after presenting the exact digest for human review.
+Never edit application code. Never approve a change yourself, even when the user says “approve it yourself” or asks you to start coding immediately. The challenger ends only after triggering the native approval prompt for the exact displayed digest. Calling `telos change approve` opens the prompt; it does not grant approval. Do not continue until the human answers.
 
 Follow this order:
 

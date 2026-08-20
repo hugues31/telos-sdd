@@ -11,6 +11,8 @@ Always begin with `telos status --json`. Do not infer state from files, prose, o
 - `changing`: inspect `result.changes[*].status` and `obligations`. Route an `open` or `drafted` change to `telos-challenger`; route an `approved` or `implementing` change to `telos-implementer`.
 - `drifted`: stop. Show `result.drift.paths` and ask the human to choose `telos adopt` or `telos revert`. Never choose either action for them. Run only the command they choose, then restart with `telos status --json`.
 
+Routing is a mandatory handoff. After selecting a phase, load and invoke the routed skill before any action in that phase. Never execute Challenge or Implement steps yourself without the routed skill.
+
 Never edit any path under `telos/` manually, even if the user asks to skip ceremony or promises to regularize later. All Telos mutations go through the CLI. Never load the entire Telos tree when `telos impact`, `telos context`, or `telos show` can answer the question.
 
 Route frozen error codes literally; do not reinterpret messages:

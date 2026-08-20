@@ -1,7 +1,7 @@
 //! `changes.rs`, the change store, seen from outside the crate: filesystem
 //! CRUD over `telos/changes/*.tel` (`list_change_ids`, `read_change`,
-//! `write_change`, `delete_change`), and `open_change_infos`'s best-effort
-//! scan (D15).
+//! `write_change`, `delete_change`), and the best-effort scan `scan_changes`
+//! / `open_change_infos` answer with (D15).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use telos_core::changes::{
-    delete_change, list_change_ids, open_change_infos, read_change, write_change,
+    delete_change, list_change_ids, open_change_infos, read_change, scan_changes, write_change,
 };
 use telos_core::error::ErrorCode;
 use telos_core::ids::{ChangeId, NotionName};
@@ -264,4 +264,92 @@ fn open_change_infos_is_empty_when_no_change_is_open() {
     let ws = Workspace::discover(tmp.path()).unwrap();
 
     assert!(open_change_infos(&ws).unwrap().is_empty());
+}
+
+// --- scan_changes: the one pass both halves come out of (D14) -------------
+
+#[test]
+fn scan_changes_reports_every_change_parsed_and_summarized_in_one_pass() {
+    let tmp = copied_corpus();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    write_change(&ws, &sample_change(1)).unwrap();
+    write_change(&ws, &sample_change(2)).unwrap();
+
+    let scan = scan_changes(&ws).unwrap();
+
+    assert_eq!(
+        scan.parsed.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![ChangeId(1), ChangeId(2)]
+    );
+    assert_eq!(
+        scan.infos.iter().map(|i| i.id).collect::<Vec<_>>(),
+        vec![ChangeId(1), ChangeId(2)]
+    );
+    // Both halves describe the same files: an info's claims are its parsed
+    // change's claims, never a second, independently computed answer.
+    for (change, info) in scan.parsed.iter().zip(&scan.infos) {
+        assert_eq!(info.claims, change.claims());
+        assert_eq!(info.obligations, change.obligations());
+        assert_eq!(info.status, change.status);
+    }
+}
+
+#[test]
+fn scan_changes_keeps_an_unparseable_file_as_an_info_stub_and_out_of_parsed() {
+    let tmp = copied_corpus();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    write_change(&ws, &sample_change(1)).unwrap();
+    fs::write(
+        tmp.path().join("telos/changes/CHG-0002.tel"),
+        b"\x00not even a change file{{{".as_slice(),
+    )
+    .unwrap();
+
+    let scan = scan_changes(&ws).unwrap();
+
+    // D15: the damaged file is still reported -- so the project's state
+    // stays answerable -- but nothing can be parsed out of it, so no caller
+    // that reads ops or a journal ever sees it.
+    assert_eq!(
+        scan.parsed.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![ChangeId(1)]
+    );
+    assert_eq!(
+        scan.infos.iter().map(|i| i.id).collect::<Vec<_>>(),
+        vec![ChangeId(1), ChangeId(2)]
+    );
+    assert_eq!(scan.infos[1].status, ChangeStatus::Open);
+    assert!(scan.infos[1].claims.is_empty());
+    assert_eq!(
+        scan.infos[1].obligations,
+        vec!["repair telos/changes/CHG-0002.tel (unparseable)".to_string()]
+    );
+}
+
+#[test]
+fn open_change_infos_is_exactly_the_scans_infos() {
+    let tmp = copied_corpus();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    write_change(&ws, &sample_change(1)).unwrap();
+    fs::write(
+        tmp.path().join("telos/changes/CHG-0002.tel"),
+        b"garbage".as_slice(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        open_change_infos(&ws).unwrap(),
+        scan_changes(&ws).unwrap().infos
+    );
+}
+
+#[test]
+fn scan_changes_is_empty_when_no_change_is_open() {
+    let tmp = copied_corpus();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+
+    let scan = scan_changes(&ws).unwrap();
+
+    assert!(scan.parsed.is_empty());
+    assert!(scan.infos.is_empty());
 }

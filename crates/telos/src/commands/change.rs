@@ -304,8 +304,18 @@ fn diff_next_actions(change: &Change, stale: bool) -> Vec<String> {
 /// the base is no longer the sealed one. Requires at least one staged op --
 /// there is nothing to approve otherwise, and an `open` change (zero ops)
 /// can never pass this, so `approve` only ever moves a change out of
-/// `drafted` or re-confirms one already `approved` (D16: idempotent,
-/// recalculating the digest every time).
+/// `drafted` or re-confirms one already `approved`/`implementing` (D16:
+/// idempotent, recalculating the digest every time).
+///
+/// D13: an `implementing` change re-approved *stays* `implementing`. Two
+/// reasons, and either alone would settle it. The grammar's: a change with a
+/// journal must be `implementing` (`parse_change_file`), so writing
+/// `approved` over one would produce a file nothing can read back. The
+/// protocol's: the journal is evidence that implementation has begun, and
+/// re-reviewing the delta does not un-begin it. What the re-approval does
+/// move is the digest -- the freshly staged ops are what was just reviewed
+/// -- while the witnesses already recorded stay judged by the reconcile's
+/// own per-scenario, per-oid gate, never by the digest.
 fn approve(ctx: &Ctx, id: &str) -> CmdResult {
     let id = parse_change_id(id)?;
     let project = project(ctx)?;
@@ -320,13 +330,17 @@ fn approve(ctx: &Ctx, id: &str) -> CmdResult {
         .hint("stage operations with telos add|edit|remove first"));
     }
 
-    change.status = ChangeStatus::Approved;
+    let status = match change.status {
+        ChangeStatus::Implementing => ChangeStatus::Implementing,
+        _ => ChangeStatus::Approved,
+    };
+    change.status = status;
     change.approved_digest = Some(change.ops_digest());
     write_change(&project.ws, &change)?;
 
     let digest = change.approved_digest.expect("just set above");
     Ok(Outcome {
-        result: json!({ "id": change.id, "digest": digest, "status": ChangeStatus::Approved.as_str() }),
+        result: json!({ "id": change.id, "digest": digest, "status": status.as_str() }),
         human: format!("{id}: approved, digest {digest}"),
         next_actions: vec![format!("telos change reconcile {id}")],
     })

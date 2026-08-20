@@ -113,7 +113,61 @@ pub fn delete_change(ws: &Workspace, id: ChangeId) -> Result<(), TelosError> {
     }
 }
 
+/// One pass over the change store: every change that parsed, and the
+/// [`OpenChangeInfo`] summary of every change the store holds.
+///
+/// The two halves are deliberately *not* the same length. `infos` covers
+/// every id [`list_change_ids`] returned, a file that failed to parse
+/// included (as the D15 stub -- see [`open_change_infos`]); `parsed` holds
+/// only the changes that really parsed, so a caller reading ops or a journal
+/// never has to wonder whether what it is holding is trustworthy. Both are
+/// in ascending id order, and `infos[i]` describes `parsed[i]` only while no
+/// file has been skipped -- pair them by id, never by index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeScan {
+    pub parsed: Vec<Change>,
+    pub infos: Vec<OpenChangeInfo>,
+}
+
+/// Reads and summarizes the whole change store in one pass (D14).
+///
+/// Every caller that needs both the parsed changes and their claim-aware
+/// summaries -- the CLI's `Project`, above all -- goes through this rather
+/// than reading the directory twice: two passes could observe two different
+/// stores (a change written between them) and answer with an `info` whose
+/// claims do not match the ops its `parsed` twin carries.
+///
+/// Best-effort exactly as [`open_change_infos`] is, which is now a thin
+/// wrapper around this: an unparseable file contributes its stub to `infos`
+/// and nothing to `parsed`, and a file that vanished between the listing and
+/// the read contributes to neither.
+pub fn scan_changes(ws: &Workspace) -> Result<ChangeScan, TelosError> {
+    let mut parsed = Vec::new();
+    let mut infos = Vec::new();
+
+    for id in list_change_ids(ws)? {
+        match read_scanned(ws, id) {
+            Scanned::Vanished => continue,
+            Scanned::Unparseable => infos.push(unparseable_info(id)),
+            Scanned::Parsed(change) => {
+                infos.push(OpenChangeInfo {
+                    id: change.id,
+                    status: change.status,
+                    claims: change.claims(),
+                    obligations: change.obligations(),
+                });
+                parsed.push(*change);
+            }
+        }
+    }
+
+    Ok(ChangeScan { parsed, infos })
+}
+
 /// Every open change, as [`OpenChangeInfo`] -- best-effort, per D15.
+///
+/// The `infos` half of [`scan_changes`], for the callers that need nothing
+/// else (`compute_state`, `change list`).
 ///
 /// A change file that fails to parse is not an error here: it is reported
 /// as an [`OpenChangeInfo`] of its own, `status: Open`, no claim (an
@@ -140,41 +194,46 @@ pub fn delete_change(ws: &Workspace, id: ChangeId) -> Result<(), TelosError> {
 /// still errors loudly on all of this -- only this best-effort enumeration
 /// degrades.
 pub fn open_change_infos(ws: &Workspace) -> Result<Vec<OpenChangeInfo>, TelosError> {
-    let ids = list_change_ids(ws)?;
-    Ok(ids
-        .into_iter()
-        .filter_map(|id| read_open_change_info(ws, id))
-        .collect())
+    Ok(scan_changes(ws)?.infos)
 }
 
-/// Reads and (best-effort) reports one change file for [`open_change_infos`].
+/// What one best-effort read of a change file yielded, for [`scan_changes`].
 ///
-/// `None` only for the file having vanished since [`list_change_ids`] saw it
-/// -- the "list, then read" TOCTOU every id here is already exposed to --
-/// there is nothing left to repair, so that id is dropped rather than
-/// reported. Every other outcome is `Some`: a clean parse, a syntax error, a
-/// file that is not valid UTF-8 at all (`parse_change_file` takes `&str`,
-/// so it can never even be offered such bytes), or any other per-file I/O
-/// failure (a permission error, say) all fold into the same best-effort
-/// [`unparseable_info`] -- see [`open_change_infos`]'s doc comment for why.
-fn read_open_change_info(ws: &Workspace, id: ChangeId) -> Option<OpenChangeInfo> {
+/// `Parsed` boxes its change because the other two variants carry nothing:
+/// a `Change` is large enough that an unboxed variant would make every
+/// `Scanned` that size.
+enum Scanned {
+    Parsed(Box<Change>),
+    /// A syntax error, bytes that are not valid UTF-8, or any other per-file
+    /// I/O failure once the id was already confirmed present.
+    Unparseable,
+    /// The file vanished since [`list_change_ids`] saw it.
+    Vanished,
+}
+
+/// Reads one change file, best-effort, for [`scan_changes`].
+///
+/// [`Scanned::Vanished`] only for the file having disappeared since
+/// [`list_change_ids`] saw it -- the "list, then read" TOCTOU every id here
+/// is already exposed to -- there is nothing left to repair, so that id is
+/// dropped rather than reported. Everything else that can go wrong -- a
+/// syntax error, a file that is not valid UTF-8 at all (`parse_change_file`
+/// takes `&str`, so it can never even be offered such bytes), any other
+/// per-file I/O failure (a permission error, say) -- folds into
+/// [`Scanned::Unparseable`], see [`open_change_infos`]'s doc comment for why.
+fn read_scanned(ws: &Workspace, id: ChangeId) -> Scanned {
     let path = change_path(ws, id);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(_) => return Some(unparseable_info(id)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Scanned::Vanished,
+        Err(_) => return Scanned::Unparseable,
     };
     match String::from_utf8(bytes) {
         Ok(src) => match parse_change_file(&repo_path_for(id), &src) {
-            Ok(change) => Some(OpenChangeInfo {
-                id: change.id,
-                status: change.status,
-                claims: change.claims(),
-                obligations: change.obligations(),
-            }),
-            Err(_diagnostics) => Some(unparseable_info(id)),
+            Ok(change) => Scanned::Parsed(Box::new(change)),
+            Err(_diagnostics) => Scanned::Unparseable,
         },
-        Err(_not_utf8) => Some(unparseable_info(id)),
+        Err(_not_utf8) => Scanned::Unparseable,
     }
 }
 
@@ -278,15 +337,15 @@ mod tests {
     /// as one that vanished right after being listed) is skipped, not
     /// reported.
     #[test]
-    fn read_open_change_info_skips_a_file_that_is_not_there() {
+    fn read_scanned_skips_a_file_that_is_not_there() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = workspace(tmp.path());
 
-        assert_eq!(read_open_change_info(&ws, ChangeId(1)), None);
+        assert!(matches!(read_scanned(&ws, ChangeId(1)), Scanned::Vanished));
     }
 
     #[test]
-    fn read_open_change_info_is_best_effort_on_invalid_utf8() {
+    fn read_scanned_is_best_effort_on_invalid_utf8() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = workspace(tmp.path());
         fs::create_dir_all(changes_dir(&ws)).unwrap();
@@ -296,10 +355,12 @@ mod tests {
         )
         .unwrap();
 
-        let info = read_open_change_info(&ws, ChangeId(1)).unwrap();
-
+        assert!(matches!(
+            read_scanned(&ws, ChangeId(1)),
+            Scanned::Unparseable
+        ));
         assert_eq!(
-            info,
+            unparseable_info(ChangeId(1)),
             OpenChangeInfo {
                 id: ChangeId(1),
                 status: ChangeStatus::Open,

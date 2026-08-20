@@ -99,6 +99,21 @@ enum Command {
     },
     /// Restore every drifted path to the state the seal records.
     Revert,
+    /// Run a scenario's test and seal the verdict as a witness in the change
+    /// that owns it.
+    Test {
+        /// The scenario to witness (`SCN-0108`).
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        scenario: Option<String>,
+        /// Witness every scenario the open, approved changes owe one for.
+        /// Takes no scenario id.
+        #[arg(long)]
+        all: bool,
+        /// Run this file's tests instead of discovering one by the
+        /// `scn_NNNN` naming convention.
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+    },
     /// Stage the deletion of an entity into an open change.
     Remove {
         /// What kind of entity to remove.
@@ -135,6 +150,7 @@ impl Command {
             // The two exits from drift, each its own command (Annex E).
             Command::Adopt { .. } => "adopt",
             Command::Revert => "revert",
+            Command::Test { .. } => "test",
         }
     }
 }
@@ -184,6 +200,11 @@ fn execute(command: &Command) -> CmdResult {
         }
         Command::Adopt { into } => commands::adopt::run(&ctx()?, into.as_deref()),
         Command::Revert => commands::revert::run(&ctx()?),
+        Command::Test {
+            scenario,
+            all,
+            file,
+        } => commands::test::run(&ctx()?, scenario.as_deref(), *all, file.as_deref()),
     }
 }
 

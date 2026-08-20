@@ -14,12 +14,13 @@ pub mod query;
 pub mod revert;
 pub mod show;
 pub mod status;
+pub mod test;
 
 use std::path::PathBuf;
 
 use serde_json::json;
 
-use telos_core::changes::{OpenChangeInfo, list_change_ids, open_change_infos, read_change};
+use telos_core::changes::{OpenChangeInfo, list_change_ids, read_change, scan_changes};
 use telos_core::counters::{Alloc, floors, read_counters};
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
@@ -80,6 +81,13 @@ pub(crate) struct Project {
     /// computed from because it carries what the state does not: each
     /// change's `claims`, which is what the D5 gate reads.
     pub changes: Vec<OpenChangeInfo>,
+    /// The same scan's parsed half (D14): every change whose file really
+    /// parsed, in ascending id order. What the commands that have to look
+    /// *inside* a change read -- `test` (T3) resolving which change owns a
+    /// scenario, `bind` (T4) which one owns an intent -- rather than
+    /// re-reading the store a second time and risking a second answer.
+    /// Shorter than `changes` exactly when a file failed to parse.
+    pub parsed: Vec<Change>,
     pub state: StateReport,
 }
 
@@ -91,17 +99,23 @@ pub(crate) struct Project {
 /// always reported the same way: no `telos/` (`TELOS_NOT_INITIALIZED` from
 /// [`Workspace::discover`]), then no `telos.lock` ([`require_lock`]), then
 /// no git repository, then the state itself.
+///
+/// The change store is read exactly once, through [`scan_changes`]: both
+/// halves of that one pass are kept, so no command ever has to choose
+/// between paying for a second scan and answering from a store that has
+/// since moved.
 pub(crate) fn project(ctx: &Ctx) -> Result<Project, TelosError> {
     let ws = Workspace::discover(&ctx.cwd)?;
     let lock = require_lock(&ws)?;
     let git = GitRepo::discover(&ctx.cwd)?;
-    let changes = open_change_infos(&ws)?;
-    let state = compute_state(&ws, &lock, &git, &changes)?;
+    let scan = scan_changes(&ws)?;
+    let state = compute_state(&ws, &lock, &git, &scan.infos)?;
     Ok(Project {
         ws,
         lock,
         git,
-        changes,
+        changes: scan.infos,
+        parsed: scan.parsed,
         state,
     })
 }

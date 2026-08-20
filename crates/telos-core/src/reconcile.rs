@@ -21,9 +21,15 @@
 //! 3. **Digest** (D3). The delta must still be the one that was approved.
 //! 4. **Accept OIDs** (D7). Each `accept` op sealed a specific blob; the
 //!    file must still hash to it.
-//! 5. **The overlay** ([`validate_ops`]). The spec the delta describes must
-//!    parse and resolve -- rules 1, 3 and 4 of §3.3, plus rule 2 inside
-//!    [`crate::overlay::apply_ops`].
+//! 5. **The overlay** ([`validate_ops_idempotent`]). The spec the delta
+//!    describes must parse and resolve -- rules 1, 3 and 4 of §3.3, and rule
+//!    2 with it, since an entity removed while something still points at it
+//!    leaves an unresolvable reference. The *idempotent* application is what
+//!    a whole change needs rather than the staging one: a delta `adopt`
+//!    produced describes a working tree that already shows it (D7), so the
+//!    staging preconditions -- add-what-exists, remove-what-does-not -- would
+//!    refuse the very state they are meant to protect. See
+//!    [`crate::overlay::apply_ops_idempotent`].
 //! 6. **Rule 5** (D8). No code without telos, over the *post* model.
 //! 7. **Constraint checks** (D11), for the constraints this delta puts in
 //!    scope.
@@ -71,7 +77,7 @@ use crate::lock::{Lock, seal};
 use crate::model::{
     Binding, Change, ChangeStatus, Constraint, Scope, StagedOp, TelFile, TelosModel, TestRef,
 };
-use crate::overlay::{parse_base, validate_ops};
+use crate::overlay::{parse_base, validate_ops_idempotent};
 use crate::semantic::build_model;
 use crate::state::{DRIFT_HINT, compute_state};
 use crate::workspace::Workspace;
@@ -115,7 +121,7 @@ pub fn reconcile_change(
     require_fresh_approval(change)?;
     require_accepted_bytes(git, change)?;
 
-    let model = validate_ops(ws, &change.ops).map_err(diagnostics_to_error)?;
+    let model = validate_ops_idempotent(ws, &change.ops).map_err(diagnostics_to_error)?;
     require_no_orphan_code(ws, &model)?;
 
     let impacted = impacted_nodes(ws, &model, &change.ops);

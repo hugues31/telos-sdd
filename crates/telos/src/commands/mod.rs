@@ -3,6 +3,7 @@
 //! [`crate::render`], and having exactly one place that writes to a stream is
 //! what keeps every command's human and JSON output consistent.
 
+pub mod adopt;
 pub mod change;
 pub mod check;
 pub mod impact;
@@ -10,6 +11,7 @@ pub mod init;
 pub mod list;
 pub mod mutate;
 pub mod query;
+pub mod revert;
 pub mod show;
 pub mod status;
 
@@ -161,6 +163,26 @@ pub(crate) fn require_no_unclaimed_drift(project: &Project) -> Result<(), TelosE
         .hint(DRIFT_HINT));
     }
     Ok(())
+}
+
+/// The exact opposite gate, and the one `adopt` and `revert` open with
+/// (T12): both commands exist to *leave* the drifted state, so being asked
+/// to run in any other one is a caller mistake, not damage.
+///
+/// `TELOS_CHANGE_STATE_INVALID` rather than a drift code, for the reason
+/// that code carries everywhere else (`reconcile` on an unapproved change,
+/// `check --sealed` on a changing project): the caller asked for a
+/// transition out of a state the project is not in. `verb` is the command's
+/// own word, so the message reads as the answer to what was actually typed.
+pub(crate) fn require_drift(project: &Project, verb: &str) -> Result<(), TelosError> {
+    if project.state.state == ProjectStateKind::Drifted {
+        return Ok(());
+    }
+    Err(TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        format!("nothing to {verb}: the project has not drifted"),
+    )
+    .hint("run `telos status` to see the project's state"))
 }
 
 /// D15's addition to `check --sealed`: "sealed and unmodified" cannot be

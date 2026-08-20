@@ -34,6 +34,15 @@ use serde::Serialize;
 use crate::error::{ErrorCode, TelosError};
 use crate::ids::RepoPath;
 
+/// The frozen hint of the one `TELOS_GIT_ERROR` [`GitRepo::cat_blob`]
+/// raises: an OID the seal records that the object store does not hold.
+///
+/// It lives here, next to the command that produces it, because the caller
+/// that surfaces it -- `telos revert` -- is in another crate, and the
+/// remedy it names ("commit the sealed state") is about git, not about
+/// reverting.
+pub const MISSING_BLOB_HINT: &str = "the sealed content is not in the git object store; commit the sealed state or restore the file by hand";
+
 /// An opaque git object id: 40 hex characters for a sha1 repository, 64 for
 /// a sha256 one. Never parsed or interpreted, only compared and displayed.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -233,6 +242,54 @@ impl GitRepo {
             .zip(lines)
             .map(|(path, oid)| (path.clone(), Oid(oid.to_string())))
             .collect())
+    }
+
+    /// Reads one blob's bytes back out of the object store: `git cat-file
+    /// blob <oid>`, with `cwd = root`.
+    ///
+    /// The exact inverse of [`GitRepo::blob_oids`] for
+    /// [`crate::adopt::revert`]'s purposes -- given an OID the seal records,
+    /// answer with the content it names -- and the reason `revert` needs a
+    /// *committed* project while `adopt` does not: `blob_oids` only hashes
+    /// (no `-w`), so a seal can perfectly well record OIDs no object store
+    /// holds. That case is the one refusal here, and it carries
+    /// [`MISSING_BLOB_HINT`], which names the remedy.
+    ///
+    /// Answers with the blob's bytes as stored, i.e. *after* the clean
+    /// filter that produced the OID and without the smudge filter a
+    /// checkout would apply. That is the right choice for restoring a
+    /// sealed path: what comes back hashes to the OID it came from, which is
+    /// precisely what makes the project coherent again. On a repository
+    /// whose `.gitattributes` rewrites line endings on checkout, a restored
+    /// file therefore holds the *canonical* (clean) form rather than the
+    /// working-tree form -- the same form `telos` seals, compares and
+    /// emits.
+    pub fn cat_blob(&self, oid: &Oid) -> Result<Vec<u8>, TelosError> {
+        let output = Command::new("git")
+            .arg("cat-file")
+            .arg("blob")
+            .arg(&oid.0)
+            .current_dir(&self.root)
+            .output()
+            .map_err(|e| {
+                TelosError::new(
+                    ErrorCode::TelosGitError,
+                    format!("git is required and was not found on PATH: {e}"),
+                )
+            })?;
+
+        if !output.status.success() {
+            return Err(TelosError::new(
+                ErrorCode::TelosGitError,
+                format!(
+                    "`git cat-file blob {oid}` failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            )
+            .hint(MISSING_BLOB_HINT));
+        }
+
+        Ok(output.stdout)
     }
 
     /// Converts a repo-relative, `/`-separated [`RepoPath`] into an

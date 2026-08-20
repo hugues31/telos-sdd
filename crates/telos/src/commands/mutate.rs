@@ -17,8 +17,10 @@
 //!    ops ago, and `edit` patches the entity as this change last left it.
 //! 4. **One file, one change** (D5): the op's target path must not be
 //!    claimed by another open change.
-//! 5. **The whole overlay is validated** ([`validate_ops`]) with the new op
-//!    appended -- rule 2 of §3.3, every reference, every literal.
+//! 5. **The new op is checked against the overlay** ([`apply_ops`] -- rule 2
+//!    of §3.3, and whether the target exists at all), **then the whole spec
+//!    the delta describes is validated** ([`validate_ops_idempotent`]) --
+//!    every reference, every literal.
 //! 6. **Only then does anything reach the disk**, change file first,
 //!    `counters.toml` second.
 //!
@@ -48,7 +50,8 @@ use telos_core::model::{
     intent_path, notion_path,
 };
 use telos_core::overlay::{
-    apply_ops, find_file, notions_of, parse_base, unknown_entity, validate_ops,
+    apply_ops, apply_ops_idempotent, find_file, notions_of, parse_base, unknown_entity,
+    validate_ops_idempotent,
 };
 use telos_core::payload::{
     constraint_from_json, intent_from_json, notion_from_json, patch_constraint, patch_intent,
@@ -182,7 +185,11 @@ impl Staging {
 
         let change = read_change(&project.ws, id)?;
         let base = parse_base(&project.ws).map_err(diagnostics_to_error)?;
-        let base = apply_ops(base, &change.ops)?;
+        // The change's *own* earlier ops are replayed idempotently: a change
+        // `adopt` produced (T12) describes a tree that already shows them,
+        // and refusing to build a base for the next op because of that would
+        // make an adopted change the one kind nobody can add to.
+        let base = apply_ops_idempotent(base, &change.ops);
 
         Ok(Staging {
             project,
@@ -244,6 +251,17 @@ impl Staging {
     fn finish(mut self, op: StagedOp, scenario_ids: Option<Vec<ScenarioId>>) -> CmdResult {
         require_unclaimed(&self.project, self.change.id, &op.target_path())?;
 
+        // Step 5 in two halves, because the two halves judge different
+        // things. The op's own preconditions -- add of what already exists,
+        // edit/remove of what does not, rule 2 of §3.3 -- are judged
+        // strictly, against the overlay this change already describes: this
+        // op is being staged *now*, and its mistakes are the caller's to fix
+        // now. The spec as a whole is judged after, over the full delta,
+        // idempotently: an op an earlier `adopt` staged describes a tree that
+        // already shows it, and re-judging its preconditions here would
+        // refuse a change that is perfectly applicable.
+        apply_ops(self.base.clone(), std::slice::from_ref(&op))?;
+
         let entity = op.entity();
         let key = op.key();
         let verb = op.verb();
@@ -255,7 +273,8 @@ impl Staging {
             self.change.status = ChangeStatus::Drafted;
         }
 
-        validate_ops(&self.project.ws, &self.change.ops).map_err(diagnostics_to_error)?;
+        validate_ops_idempotent(&self.project.ws, &self.change.ops)
+            .map_err(diagnostics_to_error)?;
 
         write_change(&self.project.ws, &self.change)?;
         // Only an op that minted an id has a counter to persist; the others
@@ -287,7 +306,15 @@ impl Staging {
 /// stage the same file twice, a claim keeps others out, it is not a lock
 /// against its owner. `Project::changes` is ordered by id, so a path two
 /// changes somehow claimed names the lower one, deterministically.
-fn require_unclaimed(project: &Project, mine: ChangeId, path: &RepoPath) -> Result<(), TelosError> {
+///
+/// Shared with `adopt` (T12), which stages several ops at once and runs this
+/// on each of them: one definition of what a claim collision is, and one
+/// message for it.
+pub(crate) fn require_unclaimed(
+    project: &Project,
+    mine: ChangeId,
+    path: &RepoPath,
+) -> Result<(), TelosError> {
     for info in &project.changes {
         if info.id != mine && info.claims.contains(path) {
             return Err(TelosError::new(

@@ -90,6 +90,15 @@ enum Command {
         #[arg(long)]
         change: String,
     },
+    /// Capture the project's drift as staged operations of a change.
+    Adopt {
+        /// Append the operations to this change (`CHG-0001`) instead of
+        /// opening a new one.
+        #[arg(long, value_name = "CHG-NNNN")]
+        into: Option<String>,
+    },
+    /// Restore every drifted path to the state the seal records.
+    Revert,
     /// Stage the deletion of an entity into an open change.
     Remove {
         /// What kind of entity to remove.
@@ -123,6 +132,9 @@ impl Command {
             Command::Add { .. } => "add",
             Command::Edit { .. } => "edit",
             Command::Remove { .. } => "remove",
+            // The two exits from drift, each its own command (Annex E).
+            Command::Adopt { .. } => "adopt",
+            Command::Revert => "revert",
         }
     }
 }
@@ -170,6 +182,8 @@ fn execute(command: &Command) -> CmdResult {
         Command::Remove { kind, key, change } => {
             commands::mutate::remove(&ctx()?, *kind, key, change)
         }
+        Command::Adopt { into } => commands::adopt::run(&ctx()?, into.as_deref()),
+        Command::Revert => commands::revert::run(&ctx()?),
     }
 }
 

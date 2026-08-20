@@ -30,6 +30,17 @@
 //! the spec tree: no-code-without-telos (rule 5) needs `telos.toml`'s globs
 //! and the working tree, and the red-witness discipline needs test runs.
 //! Both belong to reconcile.
+//!
+//! # Two ways to apply the same ops
+//!
+//! [`apply_ops`] is the *staging* one: it reads the base as the sealed tree
+//! and refuses an op that contradicts it. [`apply_ops_idempotent`] is the
+//! *whole-change* one: it puts each op's post-state at its target path and
+//! refuses nothing, because the base it runs against may already show part
+//! of the delta -- which is exactly what `adopt` produces (D7). Its doc
+//! comment carries the full argument; the short version is that the three
+//! refusals are about the op, and only the staging caller is in a position
+//! to act on them.
 
 use std::collections::BTreeMap;
 
@@ -338,6 +349,91 @@ pub fn validate_ops(ws: &Workspace, ops: &[StagedOp]) -> Result<TelosModel, Vec<
     let base = parse_base(ws)?;
     let overlay = apply_ops(base, ops).map_err(|e| vec![telos_error_as_diagnostic(e)])?;
     build_model(overlay)
+}
+
+/// [`apply_ops`] with the staging preconditions dropped: each op simply puts
+/// its post-state at its target path, and is therefore a no-op against a
+/// base that already shows it.
+///
+/// Infallible, because with the preconditions gone there is nothing left to
+/// refuse: an `add` whose slot is taken *sets* it (the same thing an `edit`
+/// does), a `remove` whose slot is already empty leaves it empty, an
+/// `accept` is inert. The verdict on the result is [`build_model`]'s alone.
+///
+/// # Why this exists (D7)
+///
+/// [`apply_ops`]' three refusals -- add-what-exists, edit/remove-what-does-
+/// not, remove-what-is-referenced -- read the base as *the sealed tree*, and
+/// they are exactly right there: `telos add notion Invoice` on a project
+/// that already has one is a mistake, and saying so early is the point.
+///
+/// A whole change validated at reconcile time is a different question, and
+/// `adopt` is what makes the difference visible. Adopting a hand-deleted
+/// `CON-0003.tel` stages `remove constraint CON-0003` -- against a base read
+/// from a disk where the file is *already gone*. Adopting a hand-created
+/// `Rogue.tel` stages `add notion Rogue` -- against a base that already
+/// holds it. Under [`apply_ops`] both would be refused as contradictions,
+/// when in fact both describe precisely the state on disk. The base is no
+/// longer the sealed tree, so the preconditions no longer mean what they
+/// were written to mean.
+///
+/// What survives untouched is the part that is about the *spec* rather than
+/// about the op: [`build_model`] still rejects every dangling reference, so
+/// rule 2 of §3.3 is still enforced at reconcile -- an entity removed while
+/// something still points at it fails as an unresolvable reference instead
+/// of as a named referrer. Only the message differs, and the good message is
+/// kept where it does the most good: at staging time, where the mistake was
+/// just made.
+pub fn apply_ops_idempotent(
+    mut base: Vec<(RepoPath, TelFile)>,
+    ops: &[StagedOp],
+) -> Vec<(RepoPath, TelFile)> {
+    for op in ops {
+        // `Accept` seals bytes the model holds no entity for -- inert here,
+        // exactly as in `apply_ops`.
+        let post = match op {
+            StagedOp::Accept { .. } => continue,
+            StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => Some(TelFile::Notion(n.clone())),
+            StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => Some(TelFile::Intent(i.clone())),
+            StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => {
+                Some(TelFile::Constraint(c.clone()))
+            }
+            StagedOp::RemoveNotion(_)
+            | StagedOp::RemoveIntent(_)
+            | StagedOp::RemoveConstraint(_) => None,
+        };
+
+        let path = op.target_path();
+        let slot = base.iter().position(|(p, _)| *p == path);
+        match (slot, post) {
+            (Some(slot), Some(file)) => base[slot].1 = file,
+            (Some(slot), None) => {
+                base.remove(slot);
+            }
+            (None, Some(file)) => {
+                base.push((path, file));
+                base.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+            }
+            (None, None) => {}
+        }
+    }
+    base
+}
+
+/// [`validate_ops`] over [`apply_ops_idempotent`]: the spec a delta
+/// describes must build, whether or not the working tree already shows part
+/// of that delta.
+///
+/// This is what `adopt` validates a plan with and what `reconcile` runs as
+/// its fifth gate -- the two places that judge a *complete* change rather
+/// than one op being staged now. See [`apply_ops_idempotent`] for why the
+/// preconditions cannot apply there.
+pub fn validate_ops_idempotent(
+    ws: &Workspace,
+    ops: &[StagedOp],
+) -> Result<TelosModel, Vec<Diagnostic>> {
+    let base = parse_base(ws)?;
+    build_model(apply_ops_idempotent(base, ops))
 }
 
 /// The canonical text of op `idx`'s target, before and after that op --

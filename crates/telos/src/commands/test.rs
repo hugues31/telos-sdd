@@ -42,7 +42,7 @@ use serde_json::{Value, json};
 
 use telos_core::changes::write_change;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::exec::{run_shell, substitute_filter};
+use telos_core::exec::run_shell_with_filter;
 use telos_core::ids::{ChangeId, RepoPath, ScenarioId};
 use telos_core::model::{
     Change, ChangeStatus, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun, Witness,
@@ -360,14 +360,13 @@ fn journal_run(
         .name
         .clone()
         .unwrap_or_else(|| test.path.as_str().to_string());
-    let command = substitute_filter(cmd, &filter);
-
-    let outcome = run_shell(&command, &project.ws.repo_root)?;
-    let witness = if outcome.status == 0 {
+    let execution = run_shell_with_filter(cmd, &filter, &project.ws.repo_root)?;
+    let witness = if execution.result.status == 0 {
         Witness::Green
     } else {
         Witness::Red
     };
+    let command = execution.command;
 
     let mut oids = project.git.blob_oids(std::slice::from_ref(&test.path))?;
     let oid = oids.remove(&test.path).ok_or_else(|| {

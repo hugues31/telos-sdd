@@ -72,22 +72,52 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
     let disk = project.ws.load_model().map_err(diagnostics_to_error)?;
 
     let (intent_id, owner) = resolve_intent(&project, &disk, &entity_ref)?;
-
-    let (model, change) = match owner {
-        Some(change) => (post_model(&project, change)?, Some(change.id)),
-        None => (disk, None),
-    };
-    let intent = model
-        .intents
-        .get(&intent_id)
-        .ok_or_else(|| unknown_intent(&project, &model, intent_id))?;
-
-    let pack = build_pack(&model, intent, change);
+    let pack = resolved_pack(&project, &disk, intent_id, owner)?;
     Ok(Outcome {
         result: to_json(&pack),
         human: to_human(&pack),
         next_actions: Vec::new(),
     })
+}
+
+/// Builds the exact public context pack for an intent id.
+///
+/// Rebuild plan uses this boundary rather than rebuilding context semantics
+/// from its combined ordering model. Untouched intents therefore stay on the
+/// persisted base, while an added/edited intent sees only its owning change's
+/// post-overlay model, exactly as `telos context INT-…` does.
+pub(crate) fn pack_for_intent(
+    project: &Project,
+    disk: &TelosModel,
+    intent_id: IntentId,
+) -> Result<Pack, TelosError> {
+    let (_, owner) = resolve_intent(project, disk, &EntityRef::Intent(intent_id))?;
+    resolved_pack(project, disk, intent_id, owner)
+}
+
+fn resolved_pack(
+    project: &Project,
+    disk: &TelosModel,
+    intent_id: IntentId,
+    owner: Option<&Change>,
+) -> Result<Pack, TelosError> {
+    match owner {
+        Some(change) => {
+            let model = post_model(project, change)?;
+            let intent = model
+                .intents
+                .get(&intent_id)
+                .ok_or_else(|| unknown_intent(project, &model, intent_id))?;
+            Ok(build_pack(&model, intent, Some(change.id)))
+        }
+        None => {
+            let intent = disk
+                .intents
+                .get(&intent_id)
+                .ok_or_else(|| unknown_intent(project, disk, intent_id))?;
+            Ok(build_pack(disk, intent, None))
+        }
+    }
 }
 
 /// «`context` applies to intents and scenarios» -- the frozen refusal for a

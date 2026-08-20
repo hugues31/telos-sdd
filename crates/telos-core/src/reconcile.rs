@@ -134,7 +134,7 @@ use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
 use crate::config::TddPolicy;
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
-use crate::exec::{run_shell, substitute_filter};
+use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::NodeRef;
@@ -971,11 +971,13 @@ fn run_tests(
             .name
             .clone()
             .unwrap_or_else(|| test.path.as_str().to_string());
-        let command = substitute_filter(cmd, &filter);
-
-        match run_shell(&command, &ws.repo_root) {
-            Ok(result) if result.status == 0 => tests_run += 1,
-            Ok(_) | Err(_) => return Err(test_failed(&rendered, &command)),
+        match run_shell_with_filter(cmd, &filter, &ws.repo_root) {
+            Ok(run) if run.result.status == 0 => tests_run += 1,
+            Ok(run) => return Err(test_failed(&rendered, &run.command)),
+            Err(_) => {
+                let command = substitute_filter(cmd, &filter);
+                return Err(test_failed(&rendered, &command));
+            }
         }
     }
     Ok(tests_run)

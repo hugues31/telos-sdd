@@ -1,17 +1,20 @@
 //! Read-only reconstruction planning and executable scenario progress.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Component;
 
 use clap::Subcommand;
 use serde_json::{Value, json};
 
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::exec::{run_shell, substitute_filter};
-use telos_core::ids::{ChangeId, IntentId, RepoPath};
-use telos_core::model::{Binding, Change, StagedOp, TelosModel, TestRef};
+use telos_core::exec::{run_shell_with_filter, substitute_filter};
+use telos_core::ids::{IntentId, ScenarioId};
+use telos_core::model::{Binding, Change, TelosModel, TestRef};
 use telos_core::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
 use telos_core::rebuild;
 use telos_core::semantic::build_model;
+use telos_core::witness::find_test_for;
 use telos_core::workspace::Workspace;
 
 use crate::commands::{Ctx, diagnostics_to_error, project, require_no_unclaimed_drift};
@@ -26,7 +29,7 @@ pub enum RebuildCommand {
 }
 
 pub fn run(ctx: &Ctx, command: &RebuildCommand) -> CmdResult {
-    let input = load(ctx)?;
+    let input = load(ctx, matches!(command, RebuildCommand::Plan))?;
     match command {
         RebuildCommand::Plan => plan(&input),
         RebuildCommand::Status => status(&input),
@@ -36,7 +39,7 @@ pub fn run(ctx: &Ctx, command: &RebuildCommand) -> CmdResult {
 struct RebuildInput {
     ws: Workspace,
     model: TelosModel,
-    owners: BTreeMap<IntentId, ChangeId>,
+    contexts: BTreeMap<IntentId, Value>,
 }
 
 /// Loads the effective reconstruction model without writing it.
@@ -45,31 +48,66 @@ struct RebuildInput {
 /// present, the ordinary project preamble supplies the exact drift verdict;
 /// a changing project then folds all parseable changes together before one
 /// semantic pass judges their combined result.
-fn load(ctx: &Ctx) -> Result<RebuildInput, TelosError> {
+fn load(ctx: &Ctx, include_contexts: bool) -> Result<RebuildInput, TelosError> {
     let discovered = Workspace::discover(&ctx.cwd)?;
-    if !discovered.lock_path().exists() {
+    let lock_path = discovered.lock_path();
+    let has_lock_entry = match fs::symlink_metadata(&lock_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(TelosError::new(
+                ErrorCode::TelosInternal,
+                format!("failed to access {}: {error}", lock_path.display()),
+            ));
+        }
+    };
+    if !has_lock_entry {
         let model = discovered.load_model().map_err(diagnostics_to_error)?;
+        let contexts = if include_contexts {
+            model
+                .intents
+                .values()
+                .map(|intent| {
+                    let pack = crate::commands::context::build_pack(&model, intent, None);
+                    (intent.id, crate::commands::context::to_json(&pack))
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         return Ok(RebuildInput {
             ws: discovered,
             model,
-            owners: BTreeMap::new(),
+            contexts,
         });
     }
 
     let project = project(ctx)?;
     require_no_unclaimed_drift(&project)?;
+    require_parseable_changes(&project)?;
+    let disk = project.ws.load_model().map_err(diagnostics_to_error)?;
 
     if project.parsed.is_empty() {
-        let model = project.ws.load_model().map_err(diagnostics_to_error)?;
+        let contexts = if include_contexts {
+            disk.intents
+                .keys()
+                .map(|id| {
+                    let pack = crate::commands::context::pack_for_intent(&project, &disk, *id)?;
+                    Ok((*id, crate::commands::context::to_json(&pack)))
+                })
+                .collect::<Result<BTreeMap<_, _>, TelosError>>()?
+        } else {
+            BTreeMap::new()
+        };
         return Ok(RebuildInput {
             ws: project.ws,
-            model,
-            owners: BTreeMap::new(),
+            model: disk,
+            contexts,
         });
     }
 
     let base = parse_base(&project.ws).map_err(diagnostics_to_error)?;
-    let owners = intent_owners(&project.parsed)?;
+    require_no_conflicting_claims(&project.parsed)?;
     let mut folded = base;
     for change in &project.parsed {
         folded = apply_ops_idempotent(folded, &change.ops);
@@ -78,19 +116,42 @@ fn load(ctx: &Ctx) -> Result<RebuildInput, TelosError> {
         folded = fold_journal_bindings(folded, change);
     }
     let model = build_model(folded).map_err(diagnostics_to_error)?;
+    let contexts = if include_contexts {
+        model
+            .intents
+            .keys()
+            .map(|id| {
+                let pack = crate::commands::context::pack_for_intent(&project, &disk, *id)?;
+                Ok((*id, crate::commands::context::to_json(&pack)))
+            })
+            .collect::<Result<BTreeMap<_, _>, TelosError>>()?
+    } else {
+        BTreeMap::new()
+    };
 
     Ok(RebuildInput {
         ws: project.ws,
         model,
-        owners,
+        contexts,
     })
 }
 
-/// Records which change owns each added/edited intent and rejects the first
-/// cross-change target collision instead of allowing later ops to win.
-fn intent_owners(changes: &[Change]) -> Result<BTreeMap<IntentId, ChangeId>, TelosError> {
-    let mut claims: BTreeMap<RepoPath, ChangeId> = BTreeMap::new();
-    let mut owners = BTreeMap::new();
+fn require_parseable_changes(project: &crate::commands::Project) -> Result<(), TelosError> {
+    let parsed: BTreeSet<_> = project.parsed.iter().map(|change| change.id).collect();
+    if let Some(invalid) = project
+        .changes
+        .iter()
+        .find(|change| !parsed.contains(&change.id))
+    {
+        return telos_core::changes::read_change(&project.ws, invalid.id).map(|_| ());
+    }
+    Ok(())
+}
+
+/// Rejects the first cross-change target collision instead of allowing later
+/// idempotent ops to win silently.
+fn require_no_conflicting_claims(changes: &[Change]) -> Result<(), TelosError> {
+    let mut claims = BTreeMap::new();
 
     for change in changes {
         for op in &change.ops {
@@ -104,20 +165,10 @@ fn intent_owners(changes: &[Change]) -> Result<BTreeMap<IntentId, ChangeId>, Tel
                 ));
             }
             claims.insert(path, change.id);
-
-            match op {
-                StagedOp::AddIntent(intent) | StagedOp::EditIntent(intent) => {
-                    owners.insert(intent.id, change.id);
-                }
-                StagedOp::RemoveIntent(intent) => {
-                    owners.remove(intent);
-                }
-                _ => {}
-            }
         }
     }
 
-    Ok(owners)
+    Ok(())
 }
 
 fn plan(input: &RebuildInput) -> CmdResult {
@@ -125,21 +176,12 @@ fn plan(input: &RebuildInput) -> CmdResult {
         .into_iter()
         .enumerate()
         .map(|(index, step)| {
-            let intent = input
-                .model
-                .intents
-                .get(&step.intent)
-                .expect("the planner only emits intents held by its model");
-            let pack = crate::commands::context::build_pack(
-                &input.model,
-                intent,
-                input.owners.get(&step.intent).copied(),
-            );
             json!({
                 "n": index + 1,
                 "intent": step.intent,
                 "requires": step.requires,
-                "context": crate::commands::context::to_json(&pack),
+                "context": input.contexts.get(&step.intent)
+                    .expect("plan admission built one public pack per planned intent"),
             })
         })
         .collect();
@@ -172,11 +214,14 @@ fn status(input: &RebuildInput) -> CmdResult {
         let mut tests = Vec::with_capacity(proofs.len());
         let mut green = !proofs.is_empty();
 
-        for test in proofs.values() {
+        for test in &proofs {
             let filter = test.name.as_deref().unwrap_or_else(|| test.path.as_str());
             let command = substitute_filter(&runner, filter);
-            let target_green = if input.ws.abs_path(&test.path).is_file() {
-                run_shell(&command, &input.ws.repo_root)?.status == 0
+            let target_green = if proof_resolves(&input.ws, *scenario, test)? {
+                run_shell_with_filter(&runner, filter, &input.ws.repo_root)?
+                    .result
+                    .status
+                    == 0
             } else {
                 false
             };
@@ -210,28 +255,92 @@ fn status(input: &RebuildInput) -> CmdResult {
     })
 }
 
-/// Distinct proving targets in canonical locator order.
-fn proofs_for(model: &TelosModel, id: telos_core::ids::ScenarioId) -> BTreeMap<String, TestRef> {
-    model
+/// Distinct proving targets in structural `(path, optional name)` order.
+fn proofs_for(model: &TelosModel, id: ScenarioId) -> Vec<TestRef> {
+    let mut proofs: Vec<TestRef> = model
         .bindings
         .iter()
         .filter_map(|binding| match binding {
-            Binding::Proves { test, scenario } if scenario.node == id => {
-                Some((test.to_string(), test.clone()))
-            }
+            Binding::Proves { test, scenario } if scenario.node == id => Some(test.clone()),
             _ => None,
         })
-        .collect()
+        .collect();
+    proofs.sort_by(|a, b| {
+        (a.path.as_str(), a.name.as_deref()).cmp(&(b.path.as_str(), b.name.as_deref()))
+    });
+    proofs.dedup();
+    proofs
+}
+
+/// A proof target resolves only inside the repository and outside `telos/`.
+/// Named targets must additionally match the exact identifier discovered by
+/// the established `scn_NNNN` boundary scan.
+fn proof_resolves(
+    ws: &Workspace,
+    scenario: ScenarioId,
+    test: &TestRef,
+) -> Result<bool, TelosError> {
+    if !is_safe_test_path(test.path.as_str()) {
+        return Ok(false);
+    }
+
+    let absolute = ws.abs_path(&test.path);
+    if !absolute.is_file() {
+        return Ok(false);
+    }
+    let Ok(root) = fs::canonicalize(&ws.repo_root) else {
+        return Ok(false);
+    };
+    let Ok(canonical) = fs::canonicalize(&absolute) else {
+        return Ok(false);
+    };
+    let Ok(telos) = fs::canonicalize(&ws.telos_dir) else {
+        return Ok(false);
+    };
+    if !canonical.starts_with(root) || canonical.starts_with(telos) {
+        return Ok(false);
+    }
+
+    if test.name.is_some() {
+        let discovered = find_test_for(ws, scenario, Some(&test.path))?;
+        return Ok(discovered.name == test.name);
+    }
+    Ok(true)
+}
+
+fn is_safe_test_path(raw: &str) -> bool {
+    if raw.is_empty()
+        || raw.starts_with('/')
+        || raw.starts_with('\\')
+        || raw.contains('\\')
+        || raw.contains('\0')
+        || raw.as_bytes().get(1).is_some_and(|second| *second == b':')
+    {
+        return false;
+    }
+
+    let mut first = None;
+    for component in std::path::Path::new(raw).components() {
+        match component {
+            Component::Normal(part) => {
+                if first.is_none() {
+                    first = part.to_str();
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    first.is_some_and(|part| part != "telos")
 }
 
 fn require_runner(ws: &Workspace) -> Result<String, TelosError> {
-    let command = ws.config.test.cmd.trim();
-    if command.is_empty() {
+    if ws.config.test.cmd.trim().is_empty() {
         return Err(TelosError::new(
             ErrorCode::TelosTestNotFound,
             "no `[test] cmd` is configured in telos/telos.toml",
         )
         .hint("set [test] cmd, e.g. `cargo test {filter}`"));
     }
-    Ok(command.to_string())
+    Ok(ws.config.test.cmd.clone())
 }

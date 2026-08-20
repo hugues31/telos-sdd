@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use telos_core::config::{Config, Globs};
 use telos_core::error::ErrorCode;
-use telos_core::exec::{run_shell, substitute_filter};
+use telos_core::exec::{run_shell, run_shell_with_filter, substitute_filter};
 use telos_core::globs::{glob_matches, orphan_code};
 use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, TelosModel, TestRef};
@@ -312,4 +312,73 @@ fn run_shell_runs_with_the_given_cwd() {
 
     assert_eq!(result.status, 0);
     assert!(result.stdout.contains("marker.txt"));
+}
+
+#[test]
+fn filtered_shell_run_preserves_display_but_passes_metacharacters_as_one_argument() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (filter, template, displayed) = if cfg!(windows) {
+        (
+            "proof&mkdir injected",
+            "if exist {filter} (exit 0) else (exit 1)",
+            "if exist proof&mkdir injected (exit 0) else (exit 1)",
+        )
+    } else {
+        (
+            "proof;mkdir injected",
+            "test -f {filter}",
+            "test -f proof;mkdir injected",
+        )
+    };
+    fs::write(tmp.path().join(filter), "proof\n").unwrap();
+
+    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+
+    assert_eq!(run.command, displayed);
+    assert_eq!(run.result.status, 0);
+    assert!(!tmp.path().join("injected").exists());
+}
+
+#[test]
+fn filtered_shell_run_keeps_leading_display_whitespace() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let run = run_shell_with_filter("  git --version {filter}  ", "", tmp.path()).unwrap();
+
+    assert_eq!(run.command, "  git --version");
+}
+
+#[test]
+fn filtered_shell_run_supports_a_placeholder_already_quoted_as_one_argument() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (filter, template, displayed) = if cfg!(windows) {
+        (
+            "proof&mkdir injected",
+            "if exist \"{filter}\" (exit 0) else (exit 1)",
+            "if exist \"proof&mkdir injected\" (exit 0) else (exit 1)",
+        )
+    } else {
+        (
+            "proof;mkdir injected",
+            "test -f \"{filter}\"",
+            "test -f \"proof;mkdir injected\"",
+        )
+    };
+    fs::write(tmp.path().join(filter), "proof\n").unwrap();
+
+    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+
+    assert_eq!(run.command, displayed);
+    assert_eq!(run.result.status, 0);
+    assert!(!tmp.path().join("injected").exists());
+}
+
+#[test]
+fn filtered_shell_run_rejects_a_placeholder_embedded_in_a_quoted_fragment() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let err = run_shell_with_filter("echo \"prefix-{filter}\"", "proof", tmp.path()).unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::TelosParseError);
+    assert!(err.message.contains("whole quoted argument"));
 }

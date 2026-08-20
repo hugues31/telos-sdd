@@ -119,6 +119,13 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
             Ok(commands) => commands,
             Err(()) => return deny_ambiguous_shell(),
         };
+        if commands.iter().any(|command| {
+            command.argv.first().is_some_and(|program| {
+                uses_opaque_inline_eval(program_name(program), &command.argv)
+            })
+        }) {
+            return deny_opaque_inline_eval();
+        }
         if directly_mutates_telos(&commands, &cwd, &root) {
             return deny_manual_write();
         }
@@ -497,7 +504,6 @@ fn directly_mutates_telos(commands: &[SimpleCommand], cwd: &Path, root: &Path) -
         if program == "telos" {
             return false;
         }
-
         let any_unsafe_path = command
             .argv
             .iter()
@@ -522,6 +528,96 @@ fn directly_mutates_telos(commands: &[SimpleCommand], cwd: &Path, root: &Path) -
             _ => any_unsafe_path && !is_proven_read_only(program, &command.argv),
         }
     })
+}
+
+/// Inline interpreter programs are opaque to this shell parser: their source
+/// can construct a write target without exposing it as an argv path. Refuse
+/// the interpreter's eval mode structurally, regardless of source text, while
+/// leaving ordinary `interpreter path/to/script` invocations available.
+fn uses_opaque_inline_eval(program: &str, command: &[String]) -> bool {
+    let args = command
+        .iter()
+        .skip(1)
+        .take_while(|argument| argument.as_str() != "--");
+
+    if versioned_program(program, "python") || versioned_program(program, "pypy") {
+        return args.clone().any(|argument| short_option(argument, 'c'));
+    }
+    if versioned_program(program, "ruby") {
+        return args.clone().any(|argument| short_option(argument, 'e'));
+    }
+    if versioned_program(program, "perl") {
+        return args
+            .clone()
+            .any(|argument| short_option(argument, 'e') || short_option(argument, 'E'));
+    }
+    if matches!(program, "node" | "nodejs") {
+        return args.clone().any(|argument| {
+            short_option(argument, 'e')
+                || short_option(argument, 'p')
+                || long_option(argument, "eval")
+                || long_option(argument, "print")
+        });
+    }
+    if versioned_program(program, "php") {
+        return args
+            .clone()
+            .any(|argument| short_option(argument, 'r') || long_option(argument, "run"));
+    }
+    if versioned_program(program, "lua") || versioned_program(program, "luajit") {
+        return args.clone().any(|argument| short_option(argument, 'e'));
+    }
+    if matches!(program, "awk" | "gawk" | "mawk" | "nawk") {
+        return awk_uses_inline_program(command);
+    }
+    false
+}
+
+fn versioned_program(program: &str, stem: &str) -> bool {
+    program == stem
+        || program.strip_prefix(stem).is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == '.')
+        })
+}
+
+fn short_option(argument: &str, option: char) -> bool {
+    argument
+        .strip_prefix('-')
+        .filter(|options| !options.starts_with('-'))
+        .is_some_and(|options| options.contains(option))
+}
+
+fn long_option(argument: &str, option: &str) -> bool {
+    argument == format!("--{option}") || argument.starts_with(&format!("--{option}="))
+}
+
+fn awk_uses_inline_program(command: &[String]) -> bool {
+    let mut index = 1;
+    let mut reads_program_file = false;
+    while let Some(argument) = command.get(index).map(String::as_str) {
+        match argument {
+            "--" => return !reads_program_file && command.get(index + 1).is_some(),
+            "-f" | "--file" => {
+                reads_program_file = true;
+                index += 2;
+            }
+            "-F" | "-v" | "--assign" => index += 2,
+            _ if argument.starts_with("-f") && argument.len() > 2 => {
+                reads_program_file = true;
+                index += 1;
+            }
+            _ if argument.starts_with("--file=") => {
+                reads_program_file = true;
+                index += 1;
+            }
+            _ if argument.starts_with('-') => index += 1,
+            _ => return !reads_program_file,
+        }
+    }
+    false
 }
 
 fn argument_requires_denial(argument: &str, cwd: &Path, root: &Path) -> bool {
@@ -673,6 +769,14 @@ fn deny_ambiguous_shell() -> GuardDecision {
     GuardDecision {
         decision: Decision::Deny,
         reason: "Shell syntax is not proven safe by the Telos guard; use a direct, simple command"
+            .into(),
+    }
+}
+
+fn deny_opaque_inline_eval() -> GuardDecision {
+    GuardDecision {
+        decision: Decision::Deny,
+        reason: "Inline interpreter evaluation is not analyzable by the Telos guard; run a reviewed script file instead"
             .into(),
     }
 }

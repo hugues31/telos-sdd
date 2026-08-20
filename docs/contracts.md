@@ -512,10 +512,14 @@ Freezes the change's ops digest — the review a later `reconcile` checks the
 base against. Gated on drift, like `open`. Refuses a change with zero
 staged ops: `TELOS_CHANGE_STATE_INVALID`, `` change CHG-0001 has no staged
 operations ``, hint `stage operations with telos add|edit|remove first`.
-Idempotent otherwise — re-approving an already-`approved` change just
-recomputes the digest.
+Idempotent otherwise. Re-approval accepts both `approved` and `implementing`
+changes, preserves the entering status in `result.status` (`approved` or
+`implementing`), refreshes `approved_digest` from the current ops digest, and
+makes the next `change diff` report `stale: false`. In particular,
+re-approving after implementation evidence was journalled never moves an
+`implementing` change backward to `approved`.
 
-`result`: `{"id": "CHG-0001", "digest": "sha256:...", "status": "approved"}`.
+`result`: `{"id": "CHG-0001", "digest": "sha256:...", "status": "approved"|"implementing"}`.
 `next_actions`: `["telos change reconcile CHG-0001"]`.
 
 ### `change reconcile <id>|--full`
@@ -801,11 +805,16 @@ The exact JSON result is identical with or without `--agents`:
 `next_actions`: `["telos status"]`.
 
 It merges one owned `PreToolUse` command hook without deleting unrelated
-hooks. The guard refuses direct agent writes to the repository `telos/` tree
-and accepts only CLI-mediated mutations. Generated Codex rules request native
-human confirmation for `telos change approve`, `telos adopt`, and
-`telos revert`. Before approval, the challenger presents `change diff`’s
-`result.digest`; before adopt/revert, the router presents the relevant drift
-paths. The rules themselves are static prompts and carry neither value. The
-generated context deliberately remains a portable bounded `telos context`
-pack, never a whole-spec or host-specific prompt dump.
+hooks. Codex repository configuration is not assumed active: before relying
+on the generated guard or rules, open `/hooks`, review and trust the repository
+`.codex` layer, and verify the exact `telos agent-guard --host codex` hook.
+Until that review and trust is complete, `.codex/hooks.json` and
+`.codex/rules/telos.rules` must be treated as inactive. Once active, the guard
+refuses direct agent writes to the repository `telos/` tree and accepts only
+CLI-mediated mutations. Generated Codex rules request native human
+confirmation for `telos change approve`, `telos adopt`, and `telos revert`.
+Before approval, the challenger presents `change diff`’s `result.digest`;
+before adopt/revert, the router presents the relevant drift paths. The rules
+themselves are static prompts and carry neither value. The generated context
+deliberately remains a portable bounded `telos context` pack, never a
+whole-spec or host-specific prompt dump.

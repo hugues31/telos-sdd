@@ -334,6 +334,64 @@ fn guard_fails_closed_on_ambiguous_shell_syntax() {
 }
 
 #[test]
+fn guard_denies_opaque_inline_interpreter_evaluation() {
+    let tmp = repo();
+    for command in [
+        r#"python3 -c "open('telos/bindings.tel','w').write('x')""#,
+        r#"python -c "print('no visible path')""#,
+        r#"ruby -e "File.write('telos/bindings.tel', 'x')""#,
+        r#"perl -e "open(F, '>', 'telos/bindings.tel')""#,
+        r#"node -e "require('fs').writeFileSync('telos/bindings.tel','x')""#,
+        r#"php -r "file_put_contents('telos/bindings.tel', 'x');""#,
+        r#"lua -e "io.open('telos/bindings.tel', 'w')""#,
+        r#"awk 'BEGIN { print "x" > "telos/bindings.tel" }'"#,
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "deny",
+            "{command}"
+        );
+    }
+
+    let out = hook(
+        tmp.path(),
+        "claude",
+        json!({
+            "cwd": tmp.path(),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "python -c \"print('opaque')\""},
+        }),
+    );
+    assert!(
+        out["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("run a reviewed script file")
+    );
+}
+
+#[test]
+fn guard_allows_safe_interpreter_script_files() {
+    let tmp = repo();
+    for command in [
+        "python3 scripts/check.py",
+        "ruby scripts/check.rb",
+        "perl scripts/check.pl",
+        "node scripts/check.js",
+        "php scripts/check.php",
+        "lua scripts/check.lua",
+        "awk -f scripts/check.awk src/input.txt",
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "claude", command),
+            "allow",
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn guard_round_two_denies_shell_wrapper_options_before_c() {
     let tmp = repo();
     assert_eq!(
@@ -791,6 +849,18 @@ fn codex_configuration_merge_preserves_unrelated_content_and_owned_blocks_once()
     assert!(agents.starts_with("# User instructions\n\nKeep this.\n"));
     assert_eq!(agents.matches("<!-- telos-sdd:start -->").count(), 1);
     assert_eq!(agents.matches("<!-- telos-sdd:end -->").count(), 1);
+    for instruction in [
+        "Do not rely on the generated Codex guard or rules until setup is reviewed and trusted",
+        "Open `/hooks`",
+        "review and trust the repository `.codex` layer",
+        "verify the exact `telos agent-guard --host codex` hook",
+        "treat `.codex/hooks.json` and `.codex/rules/telos.rules` as inactive",
+    ] {
+        assert!(
+            agents.contains(instruction),
+            "generated AGENTS.md lacks activation instruction: {instruction}\n{agents}"
+        );
+    }
     let rules = read(tmp.path(), ".codex/rules/telos.rules");
     assert!(rules.starts_with("# user rule\n"));
     assert_eq!(rules.matches("# telos-sdd:start").count(), 1);

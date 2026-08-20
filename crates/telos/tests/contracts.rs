@@ -412,3 +412,36 @@ fn published_contract_freezes_the_m3_surface() {
         );
     }
 }
+
+#[test]
+fn published_contract_pins_reapproval_and_codex_activation() {
+    let contracts = include_str!("../../../docs/contracts.md");
+    let normalized = contracts.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for required in [
+        "Re-approval accepts both `approved` and `implementing` changes",
+        "preserves the entering status in `result.status` (`approved` or `implementing`)",
+        "refreshes `approved_digest` from the current ops digest, and makes the next `change diff` report `stale: false`",
+        "open `/hooks`, review and trust the repository `.codex` layer",
+        "verify the exact `telos agent-guard --host codex` hook",
+        "Until that review and trust is complete, `.codex/hooks.json` and `.codex/rules/telos.rules` must be treated as inactive",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "docs/contracts.md must freeze: {required}"
+        );
+    }
+}
+
+#[test]
+fn readme_and_acceptance_comments_match_the_completed_m3_suite() {
+    let readme = include_str!("../../../README.md");
+    let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized.contains("all three run in the ordinary test suite"));
+    assert!(normalized.contains("The ignored-test list is expected to be empty"));
+    assert!(!readme.contains("un-ignored one at a time"));
+    assert!(!readme.contains("what is still ignored"));
+
+    let acceptance = include_str!("acceptance_loops.rs");
+    assert!(!acceptance.contains("`#[ignore]`d loops"));
+}

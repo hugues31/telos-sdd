@@ -143,8 +143,7 @@ fn run_err(dir: &Path, args: &[&str], code: &str) -> Value {
 // branches and resolving their merge conflict). `common/mod.rs` already has
 // a private helper exactly like this one for its own fixtures -- it isn't
 // exported, and per the task brief `common/mod.rs` stays untouched for these
-// `#[ignore]`d loops, so this is a small local copy rather than a shared
-// export.
+// acceptance loops, so this is a small local copy rather than a shared export.
 
 /// Runs `git <args>` in `dir` and asserts it succeeded.
 fn git(dir: &Path, args: &[&str]) {

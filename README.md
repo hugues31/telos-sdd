@@ -25,8 +25,8 @@ roadmap: **feature** (open → challenge → approve → red/green → reconcile
 loop → `coherent`), **merge** (two sealed branches → lock conflict →
 `reconcile --full` → `coherent`). They live in
 [`crates/telos/tests/acceptance_loops.rs`](crates/telos/tests/acceptance_loops.rs)
-and are un-ignored one at a time as the milestone implementing their last
-command lands. List what is still ignored:
+and all three run in the ordinary test suite. The ignored-test list is
+expected to be empty; verify it with:
 
 ```sh
 cargo test --workspace -- --ignored --list
@@ -81,10 +81,15 @@ approved change and leave its reviewed delta digest fresh.
 
 `telos init --agents claude,codex` installs the same `telos`,
 `telos-challenger`, and `telos-implementer` skills for the selected hosts and
-their preventive guards. The guard blocks direct agent edits under `telos/`;
-use the CLI for spec mutations. Before approval, the challenger presents the
-`change diff` digest; for adopting or reverting, the router presents the
-relevant drift paths. The native prompts themselves are static confirmations.
+their preventive guards. For Codex, repository configuration is not assumed
+active: before relying on the guard or rules, open `/hooks`, review and trust
+the repository `.codex` layer, and verify the exact
+`telos agent-guard --host codex` hook. Until that review and trust is complete,
+treat `.codex/hooks.json` and `.codex/rules/telos.rules` as inactive. Once
+active, the guard blocks direct agent edits under `telos/`; use the CLI for
+spec mutations. Before approval, the challenger presents the `change diff`
+digest; for adopting or reverting, the router presents the relevant drift
+paths. The native prompts themselves are static confirmations.
 
 ## Docs
 

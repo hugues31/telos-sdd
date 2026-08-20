@@ -16,8 +16,8 @@ by git blob hash. Nobody, human or agent, edits `telos/*.tel` by hand.
 
 ## Status
 
-v0.7 M1 (engine) and M2 (transactions) complete — M3 agents, M4 view, M5
-rebuild proof upcoming.
+v0.7 M1 (engine), M2 (transactions), and M3 (agent workflow) are complete —
+M4 view and M5 rebuild proof upcoming.
 
 The three acceptance loops from the spec (§14) are the project's executable
 roadmap: **feature** (open → challenge → approve → red/green → reconcile →
@@ -46,14 +46,45 @@ digest-bound approvals, drift capture and restore (`adopt`, `revert`), and
 way to seal a pre-existing spec tree. The CLI contracts are frozen in
 [`docs/contracts.md`](docs/contracts.md).
 
+M3 adds the bounded agent work pack (`telos context INT-…`), journalled
+implementation evidence (`telos test`, `telos bind`), strict or advisory
+red/green witness enforcement at reconcile, and optional host integrations
+from `telos init --agents`. Context is intentionally intent-sized and
+portable: an agent receives one intent’s scenarios, used notions, applicable
+constraints, bindings, and one-hop neighbours — never the whole spec.
+
 ## Quickstart
 
 ```sh
 cargo build --workspace
 cd your-repo
-telos init
+telos init --agents codex
 telos status
 ```
+
+## M3 workflow
+
+```sh
+# Inspect the bounded pack before implementing one approved change.
+telos context INT-0042 --json
+
+# Start with a red witness, implement, then record green evidence.
+telos test SCN-0108 --file tests/billing.rs --json
+telos bind src/billing/invoice.rs INT-0042 --json
+telos test SCN-0108 --json
+telos change reconcile CHG-0001 --json
+```
+
+`telos test` records red when the configured runner exits non-zero; that is
+evidence, not a failed CLI command. In strict projects reconciliation requires
+an intact red/green witness. `bind` and `test` journal evidence into the
+approved change and leave its reviewed delta digest fresh.
+
+`telos init --agents claude,codex` installs the same `telos`,
+`telos-challenger`, and `telos-implementer` skills for the selected hosts and
+their preventive guards. The guard blocks direct agent edits under `telos/`;
+use the CLI for spec mutations. Approval, adopting drift, and reverting stay
+native human-confirmed actions, with the current diff digest shown first.
 
 ## Docs
 

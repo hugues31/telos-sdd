@@ -171,3 +171,46 @@ fn checks_error_body_stays_the_frozen_triple_even_with_several_diagnostics() {
         )
     );
 }
+
+/// M3 extends the public surface with bounded context, red/green witnesses,
+/// journalled bindings, and the two reconciliation gates that enforce them.
+/// Keep the published contract at least as explicit as the executable one:
+/// this is deliberately a literal, representative freeze rather than prose
+/// that a caller must infer.
+#[test]
+fn published_contract_freezes_the_m3_surface() {
+    let contracts = include_str!("../../../docs/contracts.md");
+
+    for required in [
+        "`context <INT-id|SCN-id>`",
+        "`test <SCN-id|--all> [--file <path>]`",
+        "`bind <path> <INT-id>`",
+        "`TELOS_TEST_NOT_FOUND`",
+        "`TELOS_SCENARIO_RED_EXPECTED`",
+        "`TELOS_TEST_SEALED`",
+        "`open → drafted → approved → implementing → reconciled`",
+        "journal records are digest-inert",
+        "The ten gates, frozen order",
+        "strict versus advisory",
+        "Structurally skips gates 1–4, 7, and 8",
+        "`TELOS_DRIFT_DETECTED`",
+        "`TELOS_APPROVAL_STALE`",
+        "`TELOS_REFERENCE_UNKNOWN`",
+        "`TELOS_ORPHAN_CODE`",
+        "`TELOS_CONSTRAINT_FAILED`",
+        "`TELOS_CHANGE_STATE_INVALID`",
+        "`TELOS_FILE_CLAIMED`",
+        "`TELOS_NOT_INITIALIZED`",
+        "`TELOS_ALREADY_INITIALIZED`",
+        "`TELOS_PARSE_ERROR`",
+        "`TELOS_INTEGRITY_VIOLATION`",
+        "`TELOS_CYCLE_DETECTED`",
+        "`TELOS_GIT_ERROR`",
+        "`TELOS_INTERNAL`",
+    ] {
+        assert!(
+            contracts.contains(required),
+            "docs/contracts.md must freeze the M3 contract phrase: {required}"
+        );
+    }
+}

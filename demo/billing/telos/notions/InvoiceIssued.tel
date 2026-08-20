@@ -1,0 +1,3 @@
+notion InvoiceIssued event {
+  def  "An invoice was issued to a customer."
+}

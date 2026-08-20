@@ -1,0 +1,4 @@
+notion PaymentReceived event {
+  def  "A payment arrived for an invoice."
+  attr amount money
+}

@@ -1,0 +1,4 @@
+notion Customer entity {
+  def  "A person or company that receives invoices."
+  attr name string
+}

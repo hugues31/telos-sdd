@@ -1,0 +1,6 @@
+notion Invoice entity {
+  def  "A bill issued to a Customer for delivered work."
+  attr state   enum(open, settled, cancelled)
+  attr balance money
+  rel  issued-to -> Customer
+}

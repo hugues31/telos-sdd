@@ -21,4 +21,5 @@ pub mod span;
 pub mod state;
 pub mod suggest;
 pub mod syntax;
+pub mod witness;
 pub mod workspace;

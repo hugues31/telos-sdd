@@ -503,7 +503,6 @@ pub fn emit_journal_entry(e: &JournalEntry) -> String {
 /// makes that comparison sound -- spans differ between a parsed scenario and
 /// a staged one and would defeat structural equality, and the emitter has no
 /// notion of them.
-#[allow(dead_code)] // T2 (witness.rs) is its first caller.
 pub(crate) fn emit_scenario_fragment(s: &Scenario) -> String {
     let mut out = String::new();
     emit_scenario(&mut out, s);

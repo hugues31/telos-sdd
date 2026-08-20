@@ -40,6 +40,10 @@ pub enum ErrorCode {
     TelosGitError,
     /// Internal invariant broken (a bug).
     TelosInternal,
+    // M3 extension.
+    /// No test runner configured, or `telos test`/`witness_verdict`'s test
+    /// discovery (D4) found zero or more than one candidate.
+    TelosTestNotFound,
 }
 
 /// A non-localized engine error: a code, a human-readable message, and an
@@ -108,8 +112,9 @@ mod tests {
     #[test]
     fn error_code_serialization_is_frozen() -> Result<(), serde_json::Error> {
         // One assertion per variant -- this list IS the freeze. Annex B's
-        // `error.rs` enumerates 16 identifiers (9 codes frozen by spec §8 +
-        // 7 M1 extensions); every one of them is checked here.
+        // `error.rs` enumerates 17 identifiers (9 codes frozen by spec §8 +
+        // 7 M1 extensions + 1 M3 extension); every one of them is checked
+        // here.
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosDriftDetected)?,
             "\"TELOS_DRIFT_DETECTED\""
@@ -173,6 +178,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosInternal)?,
             "\"TELOS_INTERNAL\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosTestNotFound)?,
+            "\"TELOS_TEST_NOT_FOUND\""
         );
         Ok(())
     }

@@ -405,6 +405,58 @@ fn approving_an_implementing_change_keeps_it_implementing() {
     );
 }
 
+/// A re-approval after implementation has started reviews newly staged work
+/// without losing the journal-derived lifecycle state: it refreshes the ops
+/// digest, clears staleness, and leaves reconciliation as the next step.
+#[test]
+fn reapproving_after_implementation_refreshes_the_digest_but_keeps_implementing() {
+    let tmp = approved_owning_int_0042();
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+    telos(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"])
+        .output()
+        .unwrap();
+
+    let first_digest = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+        ["result"]["approved_digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let out = telos(
+        tmp.path(),
+        &[
+            "edit",
+            "intent",
+            BOUND_INTENT,
+            "--change",
+            "CHG-0001",
+            "--json",
+        ],
+    )
+    .write_stdin(r#"{"telos":"The implementation was re-reviewed."}"#)
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let stale = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
+    assert_eq!(stale["result"]["status"], json!("implementing"));
+    assert_eq!(stale["result"]["stale"], json!(true));
+    assert_eq!(stale["result"]["approved_digest"], json!(first_digest));
+
+    let reapproval = approve(tmp.path());
+    let refreshed_digest = reapproval["result"]["digest"].as_str().unwrap().to_owned();
+    assert_eq!(reapproval["result"]["status"], json!("implementing"));
+    assert_ne!(refreshed_digest, first_digest);
+
+    let fresh = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
+    assert_eq!(fresh["result"]["status"], json!("implementing"));
+    assert_eq!(fresh["result"]["stale"], json!(false));
+    assert_eq!(fresh["result"]["approved_digest"], json!(refreshed_digest));
+    assert_eq!(
+        fresh["next_actions"],
+        json!(["telos change reconcile CHG-0001"])
+    );
+}
+
 // --- the gates, in the order D6 freezes them --------------------------------
 
 /// An id no change and no spec file declares: the same `unknown scenario`

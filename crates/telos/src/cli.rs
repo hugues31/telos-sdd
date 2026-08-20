@@ -67,6 +67,14 @@ enum Command {
         /// name (`Invoice`).
         target: String,
     },
+    /// Print the bounded work pack of one intent: its scenarios, notions,
+    /// applicable constraints, bindings and 1-hop neighbours -- the unit of
+    /// agent context (spec §7.3).
+    Context {
+        /// An intent id (`INT-0042`) or a scenario id (`SCN-0107`), which
+        /// resolves to the intent that owns it.
+        target: String,
+    },
     /// Open, list, diff, approve, reconcile and abandon changes.
     Change {
         #[command(subcommand)]
@@ -146,6 +154,7 @@ impl Command {
             Command::List { .. } => "list",
             Command::Query { .. } => "query",
             Command::Impact { .. } => "impact",
+            Command::Context { .. } => "context",
             // One `command` for all three verbs: the envelope names the
             // command a caller invoked, and `telos change …` is one command
             // with subcommands, the same way `telos query …` is.
@@ -197,6 +206,7 @@ fn execute(command: &Command) -> CmdResult {
         Command::List { kind } => commands::list::run(&ctx()?, *kind),
         Command::Query { query } => commands::query::run(&ctx()?, query),
         Command::Impact { target } => commands::impact::run(&ctx()?, target),
+        Command::Context { target } => commands::context::run(&ctx()?, target),
         Command::Change { change } => commands::change::run(&ctx()?, change),
         Command::Add { kind, change } => {
             commands::mutate::add(&ctx()?, *kind, change, &stdin_payload()?)

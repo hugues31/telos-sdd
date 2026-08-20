@@ -7,6 +7,7 @@ pub mod adopt;
 pub mod bind;
 pub mod change;
 pub mod check;
+pub mod context;
 pub mod impact;
 pub mod init;
 pub mod list;

@@ -4,6 +4,7 @@
 //! what keeps every command's human and JSON output consistent.
 
 pub mod adopt;
+pub mod bind;
 pub mod change;
 pub mod check;
 pub mod impact;
@@ -25,9 +26,9 @@ use telos_core::counters::{Alloc, floors, read_counters};
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::graph::NodeRef;
-use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
+use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, RepoPath, ScenarioId};
 use telos_core::lock::Lock;
-use telos_core::model::{Change, TelosModel};
+use telos_core::model::{Change, ChangeStatus, TelosModel};
 use telos_core::state::{DRIFT_HINT, ProjectStateKind, StateReport, compute_state};
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
@@ -197,6 +198,89 @@ pub(crate) fn require_drift(project: &Project, verb: &str) -> Result<(), TelosEr
         format!("nothing to {verb}: the project has not drifted"),
     )
     .hint("run `telos status` to see the project's state"))
+}
+
+// --- shared gates for the implementation commands (`test`, `bind`) ---------
+//
+// A run and a bind are the same shape of thing where ownership and review
+// are concerned: both are journal entries written into a change that must
+// already have been reviewed, and both have to break the same deadlock (D6)
+// -- claiming a path is what legitimizes the very drift that claiming it
+// causes. `test` (T3) and `bind` (T4) share the three functions below rather
+// than each keeping its own copy, so the two commands can never quietly
+// diverge on what "approved" or "admissible drift" means.
+
+/// Whether a change is far enough along to have a journal line written
+/// against it: `approved` outright, or `implementing` -- already implemented
+/// in part, so idempotently still approved (D5, D13).
+pub(crate) fn is_approved(change: &Change) -> bool {
+    matches!(
+        change.status,
+        ChangeStatus::Approved | ChangeStatus::Implementing
+    )
+}
+
+/// A run or a bind may only be journalled against a delta someone reviewed
+/// (D5).
+///
+/// The message is `reconcile`'s own, word for word (M2): the caller is in
+/// the same situation -- an unapproved change they asked the engine to act
+/// on -- and one situation deserves one wording. It is restated here rather
+/// than shared because `telos-core`'s copy is private to the reconcile
+/// pipeline and gates a `Change` mid-transaction; a second caller reaching
+/// into it would tie this command to that pipeline's shape.
+pub(crate) fn require_approved(change: &Change) -> Result<(), TelosError> {
+    if is_approved(change) {
+        return Ok(());
+    }
+    Err(TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        format!("change {} is not approved; approve it first", change.id),
+    )
+    .hint(format!(
+        "run `telos change diff {id}` then `telos change approve {id}`",
+        id = change.id
+    )))
+}
+
+/// D17's drift gate, with D6's carve-out.
+///
+/// The deadlock this exists to break: a sealed file has to be *edited* --
+/// the test file a scenario's witness will be taken on, or the source file a
+/// bind is about to attach to an intent -- before the journal line that
+/// would claim it (D3) can be written, and that line cannot be written until
+/// the edit is already in place. So the gate admits drift whose paths all
+/// lie within `claimed`, the files this very invocation is about to record
+/// journal entries against: the act of claiming them is what legitimizes
+/// their drift, exactly as `adopt` legitimizes the drift it captures.
+///
+/// Anything else is refused, with the shared message and hint of
+/// [`require_no_unclaimed_drift`] -- one drift refusal, one wording,
+/// whichever command raises it.
+///
+/// Note that `project.state.drift` has *already* had every open change's
+/// claims filtered out (`compute_state`, D5): what reaches here is the
+/// unclaimed remainder, which is the only thing the carve-out has to widen.
+pub(crate) fn require_no_foreign_drift(
+    project: &Project,
+    claimed: &[RepoPath],
+) -> Result<(), TelosError> {
+    if project.state.state != ProjectStateKind::Drifted {
+        return Ok(());
+    }
+    if project
+        .state
+        .drift
+        .iter()
+        .all(|entry| claimed.contains(&entry.path))
+    {
+        return Ok(());
+    }
+    Err(TelosError::new(
+        ErrorCode::TelosDriftDetected,
+        "the project has drifted from its seal",
+    )
+    .hint(DRIFT_HINT))
 }
 
 /// D15's addition to `check --sealed`: "sealed and unmodified" cannot be

@@ -114,6 +114,14 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         file: Option<String>,
     },
+    /// Record that a code file implements an intent, journalled into the
+    /// change that owns it.
+    Bind {
+        /// The code file that implements the intent (`src/billing/invoice.rs`).
+        path: String,
+        /// The intent it implements (`INT-0042`).
+        intent: String,
+    },
     /// Stage the deletion of an entity into an open change.
     Remove {
         /// What kind of entity to remove.
@@ -151,6 +159,7 @@ impl Command {
             Command::Adopt { .. } => "adopt",
             Command::Revert => "revert",
             Command::Test { .. } => "test",
+            Command::Bind { .. } => "bind",
         }
     }
 }
@@ -205,6 +214,7 @@ fn execute(command: &Command) -> CmdResult {
             all,
             file,
         } => commands::test::run(&ctx()?, scenario.as_deref(), *all, file.as_deref()),
+        Command::Bind { path, intent } => commands::bind::run(&ctx()?, path, intent),
     }
 }
 

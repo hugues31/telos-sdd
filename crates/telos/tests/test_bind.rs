@@ -633,3 +633,422 @@ fn test_requires_exactly_one_of_a_scenario_and_all() {
         );
     }
 }
+
+// =============================================================================
+// `telos bind`: the same shape of gates (D5, D6), and the dedup that makes
+// it idempotent -- `telos test` never checks a run against what is already
+// in the journal, but a re-bind of the identical pair must answer with the
+// one line already on disk, not a second copy of it.
+// =============================================================================
+
+/// The new, unbound code file the happy-path bind tests below claim: never
+/// part of the seal, so writing it introduces no drift of its own (`status`
+/// only ever compares the sealed spec files and `lock.code`, and a brand
+/// new file is in neither).
+const NEW_CODE_FILE: &str = "src/billing/new.rs";
+
+/// The corpus' already-bound code file -- `telos/bindings.tel` implements
+/// `INT-0042` with it -- so editing it after the seal is exactly the drift
+/// the carve-out tests below claim through `telos bind`.
+const INVOICE_CODE: &str = "src/billing/invoice.rs";
+
+/// The intent every happy-path bind below targets: `active` with one
+/// scenario and one binding already in the sealed corpus, so a no-op `edit
+/// intent` is enough to make an open change its owner (D5) without
+/// changing its content.
+const BOUND_INTENT: &str = "INT-0042";
+
+/// An intent the sealed corpus declares but no change stages: the owner
+/// gate (D5) has nothing to find.
+const UNOWNED_INTENT: &str = "INT-0017";
+
+/// Stages a no-op `edit intent INT-0042` into `CHG-0001`. An empty patch
+/// payload keeps every field exactly as `patch_intent`'s base default
+/// leaves it, so the only effect of this call is making `CHG-0001` the
+/// intent's owner (D5).
+fn edit_int_0042(dir: &Path) {
+    let out = telos(
+        dir,
+        &[
+            "edit",
+            "intent",
+            BOUND_INTENT,
+            "--change",
+            "CHG-0001",
+            "--json",
+        ],
+    )
+    .write_stdin("{}")
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+/// A project one `telos bind` away from its first binding: `CHG-0001`
+/// approved, owning `INT-0042` through a no-op edit.
+fn approved_owning_int_0042() -> TempDir {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    edit_int_0042(tmp.path());
+    approve(tmp.path());
+    tmp
+}
+
+/// A valid payload for a brand-new intent, built entirely on the corpus'
+/// own notions (`Invoice`'s `cancelled` state, unused by any sealed
+/// intent): what the overlay-only-intent test below stages before binding
+/// to the id the allocator hands back.
+fn new_intent_payload() -> String {
+    json!({
+        "title": "Invoices can be cancelled", "status": "active",
+        "telos": "Customers must be able to void an invoice raised in error.",
+        "statement": { "template": "event-driven", "when": "PaymentReceived",
+                       "on": "Invoice", "action": "set Invoice.state = cancelled" },
+        "refines": [], "requires": [], "excludes": [],
+        "scenarios": [
+          { "title": "a payment cancels a disputed invoice",
+            "given": [ {"notion": "Invoice", "fields": {"state": "open", "balance": "50.00 EUR"}} ],
+            "when":  {"notion": "PaymentReceived", "fields": {"amount": "50.00 EUR"}},
+            "then":  ["Invoice.state == cancelled"] } ]
+    })
+    .to_string()
+}
+
+/// Stages `add intent` into `CHG-0001` and returns the id the allocator
+/// minted -- an intent the sealed spec has never heard of, which is the
+/// whole point of the overlay-only test.
+fn stage_new_intent(dir: &Path) -> String {
+    let out = telos(dir, &["add", "intent", "--change", "CHG-0001", "--json"])
+        .write_stdin(new_intent_payload())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    json_stdout(&out)["result"]["id"]
+        .as_str()
+        .expect("`add intent` reports the allocated id")
+        .to_string()
+}
+
+/// Appends a comment to the corpus' already-bound, sealed code file --
+/// which drifts the project on exactly the path the carve-out tests bind.
+fn append_to_invoice_code(dir: &Path) {
+    let path = dir.join(INVOICE_CODE);
+    let mut src = fs::read_to_string(&path).unwrap();
+    src.push_str("// touched by the implementer\n");
+    fs::write(&path, src).unwrap();
+}
+
+// --- the happy path ----------------------------------------------------------
+
+/// The Annex C result, key for key, binding a brand-new file.
+#[test]
+fn bind_records_a_new_file_with_the_annex_c_result() {
+    let tmp = approved_owning_int_0042();
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+
+    let out = telos(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        json_stdout(&out),
+        json!({
+            "ok": true,
+            "command": "bind",
+            "result": {
+                "change": "CHG-0001",
+                "path": NEW_CODE_FILE,
+                "intent": BOUND_INTENT,
+            },
+            "error": null,
+            "next_actions": ["telos change reconcile CHG-0001"]
+        })
+    );
+}
+
+/// The journal line, byte for byte (Annex A's padding group).
+#[test]
+fn bind_appends_the_exact_journal_line() {
+    let tmp = approved_owning_int_0042();
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+
+    telos(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        change_file(tmp.path())
+            .contains(&format!("  bind \"{NEW_CODE_FILE}\" -> {BOUND_INTENT}\n")),
+        "{}",
+        change_file(tmp.path())
+    );
+}
+
+/// D5's transition: the first journalled bind takes an `approved` change to
+/// `implementing`, and the project -- which has no drift at all here -- is
+/// `changing`.
+#[test]
+fn bind_moves_the_owner_to_implementing() {
+    let tmp = approved_owning_int_0042();
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+
+    telos(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"])
+        .output()
+        .unwrap();
+
+    let envelope = run_json(tmp.path(), &["status", "--json"]);
+    assert_eq!(envelope["result"]["state"], json!("changing"));
+    assert_eq!(
+        envelope["result"]["changes"],
+        json!([{ "id": "CHG-0001", "status": "implementing", "obligations": ["reconcile"] }])
+    );
+}
+
+/// D1's whole point: journalling a bind is digest-inert, so the change that
+/// was approved before it is not stale after.
+#[test]
+fn bind_leaves_the_approval_fresh() {
+    let tmp = approved_owning_int_0042();
+    let approved_digest = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"])["result"]
+        ["approved_digest"]
+        .clone();
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+
+    telos(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"])
+        .output()
+        .unwrap();
+
+    let envelope = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
+    assert_eq!(envelope["result"]["stale"], json!(false));
+    assert_eq!(envelope["result"]["approved_digest"], approved_digest);
+    assert_eq!(envelope["result"]["status"], json!("implementing"));
+}
+
+/// Unlike a run, a bind is deduplicated (Annex C): the identical pair
+/// journalled twice is one line, and the second call answers with exactly
+/// the same result as the first.
+#[test]
+fn rebinding_the_same_pair_is_idempotent() {
+    let tmp = approved_owning_int_0042();
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+
+    let first = run_json(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"]);
+    let second = run_json(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"]);
+
+    assert_eq!(first, second);
+    let content = change_file(tmp.path());
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| line.starts_with("  bind "))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![format!("  bind \"{NEW_CODE_FILE}\" -> {BOUND_INTENT}")]
+    );
+}
+
+// --- the carve-out -------------------------------------------------------
+
+/// The precondition the carve-out exists for: editing the already-bound,
+/// sealed source file drifts the project *before* any journal line claims
+/// it.
+#[test]
+fn editing_the_bound_file_drifts_the_project_first() {
+    let tmp = approved_owning_int_0042();
+    append_to_invoice_code(tmp.path());
+
+    let envelope = run_json(tmp.path(), &["status", "--json"]);
+
+    assert_eq!(envelope["result"]["state"], json!("drifted"));
+    assert_eq!(
+        envelope["result"]["drift"],
+        json!({ "paths": [INVOICE_CODE], "suggestion": "telos adopt" })
+    );
+}
+
+/// The carve-out itself: `telos bind` succeeds even though the project was
+/// drifted on the exact path it just claimed, and the project settles at
+/// `changing` rather than `drifted`.
+#[test]
+fn bind_admits_the_drift_of_the_path_it_claims() {
+    let tmp = approved_owning_int_0042();
+    append_to_invoice_code(tmp.path());
+
+    let out = telos(tmp.path(), &["bind", INVOICE_CODE, BOUND_INTENT, "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let envelope = run_json(tmp.path(), &["status", "--json"]);
+    assert_eq!(envelope["result"]["state"], json!("changing"));
+    assert_eq!(envelope["result"]["drift"], Value::Null);
+}
+
+// --- the gates, in the order the flow freezes them --------------------------
+
+/// An id no change and no spec file declares: the same `unknown intent`
+/// shape `show`/`telos test` answer with, nearest existing id included.
+#[test]
+fn bind_on_an_unknown_intent_names_the_nearest_id() {
+    let tmp = with_fixture();
+
+    let error = error_of(tmp.path(), &["bind", NEW_CODE_FILE, "INT-9999", "--json"]);
+
+    assert_eq!(error["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert_eq!(error["message"], json!("unknown intent `INT-9999`"));
+    assert_eq!(error["hint"], json!("closest is INT-0042"));
+}
+
+/// D5: an intent the sealed spec declares but no open change claims is
+/// nobody's to bind.
+#[test]
+fn bind_on_an_intent_no_change_owns_is_refused() {
+    let tmp = with_fixture();
+
+    let error = error_of(
+        tmp.path(),
+        &["bind", NEW_CODE_FILE, UNOWNED_INTENT, "--json"],
+    );
+
+    assert_eq!(error["code"], json!("TELOS_CHANGE_STATE_INVALID"));
+    assert_eq!(
+        error["message"],
+        json!("no open change is implementing INT-0017")
+    );
+    assert_eq!(
+        error["hint"],
+        json!("stage it into a change and approve it first")
+    );
+}
+
+/// The owner exists but has not been reviewed: the M2 wording, reused.
+#[test]
+fn bind_on_a_drafted_owner_asks_for_the_approval_first() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    edit_int_0042(tmp.path());
+
+    let error = error_of(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"]);
+
+    assert_eq!(error["code"], json!("TELOS_CHANGE_STATE_INVALID"));
+    assert_eq!(
+        error["message"],
+        json!("change CHG-0001 is not approved; approve it first")
+    );
+    assert_eq!(
+        error["hint"],
+        json!("run `telos change diff CHG-0001` then `telos change approve CHG-0001`")
+    );
+}
+
+/// A path that does not exist on disk: the M2 seal wording, reused
+/// verbatim, no hint.
+#[test]
+fn bind_of_a_missing_path_names_it() {
+    let tmp = approved_owning_int_0042();
+
+    let error = error_of(
+        tmp.path(),
+        &["bind", "src/billing/missing.rs", BOUND_INTENT, "--json"],
+    );
+
+    assert_eq!(error["code"], json!("TELOS_INTEGRITY_VIOLATION"));
+    assert_eq!(
+        error["message"],
+        json!("binding references `src/billing/missing.rs`, which does not exist")
+    );
+    assert_eq!(error["hint"], Value::Null);
+}
+
+/// An absolute path is not repo-relative -- refused before any change or
+/// file is even looked at.
+#[test]
+fn bind_of_an_absolute_path_is_refused() {
+    let tmp = with_fixture();
+
+    let error = error_of(tmp.path(), &["bind", "/abs/x.rs", BOUND_INTENT, "--json"]);
+
+    assert_eq!(error["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert_eq!(
+        error["message"],
+        json!("cannot parse `/abs/x.rs` as a repository-relative path")
+    );
+    assert_eq!(error["hint"], Value::Null);
+}
+
+/// A path under `telos/` is refused with the grammar's own wording -- the
+/// same message `parse_change_file` would answer with if this line reached
+/// disk and were read back.
+#[test]
+fn bind_of_a_path_under_telos_is_refused() {
+    let tmp = with_fixture();
+
+    let error = error_of(
+        tmp.path(),
+        &["bind", "telos/bindings.tel", BOUND_INTENT, "--json"],
+    );
+
+    assert_eq!(error["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert_eq!(
+        error["message"],
+        json!("a journal line cannot name a path under telos/")
+    );
+    assert_eq!(error["hint"], Value::Null);
+}
+
+/// The carve-out is exactly one path wide (D6): drift anywhere else is
+/// still damage nobody claimed, and the command refuses before writing
+/// anything.
+#[test]
+fn bind_refuses_unclaimed_drift_elsewhere() {
+    let tmp = approved_owning_int_0042();
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+    let invoice_notion = tmp.path().join("telos/notions/Invoice.tel");
+    let mut src = fs::read_to_string(&invoice_notion).unwrap();
+    src.push('\n');
+    fs::write(&invoice_notion, src).unwrap();
+
+    let error = error_of(tmp.path(), &["bind", NEW_CODE_FILE, BOUND_INTENT, "--json"]);
+
+    assert_eq!(error["code"], json!("TELOS_DRIFT_DETECTED"));
+    assert_eq!(
+        error["message"],
+        json!("the project has drifted from its seal")
+    );
+    assert_eq!(error["hint"], json!(DRIFT_HINT));
+    // Nothing was written: the change is still approved, with no journal.
+    assert!(
+        !change_file(tmp.path()).contains("  bind "),
+        "{}",
+        change_file(tmp.path())
+    );
+}
+
+// --- an intent only the open change's overlay knows about -------------------
+
+/// D5's ownership rule reaches an intent `add intent` allocated a moment
+/// ago just as well as one the sealed spec has always known: the overlay is
+/// part of "known" and part of "owned" alike.
+#[test]
+fn bind_on_an_intent_only_the_open_change_knows_about() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    let new_intent = stage_new_intent(tmp.path());
+    approve(tmp.path());
+    fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
+
+    let out = telos(tmp.path(), &["bind", NEW_CODE_FILE, &new_intent, "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        json_stdout(&out)["result"],
+        json!({
+            "change": "CHG-0001",
+            "path": NEW_CODE_FILE,
+            "intent": new_intent,
+        })
+    );
+}

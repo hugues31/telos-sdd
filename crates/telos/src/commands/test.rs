@@ -48,10 +48,12 @@ use telos_core::model::{
     Change, ChangeStatus, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun, Witness,
 };
 use telos_core::overlay::parse_base;
-use telos_core::state::{DRIFT_HINT, ProjectStateKind};
 use telos_core::witness::{find_test_for, required_witnesses};
 
-use crate::commands::{Ctx, Project, diagnostics_to_error, nearest_id, project, unknown};
+use crate::commands::{
+    Ctx, Project, diagnostics_to_error, is_approved, nearest_id, project, require_approved,
+    require_no_foreign_drift, unknown,
+};
 use crate::envelope::{CmdResult, Outcome};
 
 /// `telos test`, both shapes. clap guarantees exactly one of `scenario` and
@@ -298,35 +300,6 @@ fn no_owner(scenario: ScenarioId) -> TelosError {
     .hint("stage it into a change and approve it first")
 }
 
-fn is_approved(change: &Change) -> bool {
-    matches!(
-        change.status,
-        ChangeStatus::Approved | ChangeStatus::Implementing
-    )
-}
-
-/// A witness may only be taken against a delta someone reviewed (D5).
-///
-/// The message is `reconcile`'s own, word for word (M2): the caller is in
-/// the same situation -- an unapproved change they asked the engine to act
-/// on -- and one situation deserves one wording. It is restated here rather
-/// than shared because `telos-core`'s copy is private to the reconcile
-/// pipeline and gates a `Change` mid-transaction; a second caller reaching
-/// into it would tie this command to that pipeline's shape.
-fn require_approved(change: &Change) -> Result<(), TelosError> {
-    if is_approved(change) {
-        return Ok(());
-    }
-    Err(TelosError::new(
-        ErrorCode::TelosChangeStateInvalid,
-        format!("change {} is not approved; approve it first", change.id),
-    )
-    .hint(format!(
-        "run `telos change diff {id}` then `telos change approve {id}`",
-        id = change.id
-    )))
-}
-
 /// `[test] cmd`, or the frozen `TELOS_TEST_NOT_FOUND` for a project that
 /// never wired a runner up (Annex F).
 ///
@@ -342,42 +315,6 @@ fn require_runner(project: &Project) -> Result<String, TelosError> {
         .hint("set [test] cmd, e.g. `cargo test {filter}`"));
     }
     Ok(cmd.to_string())
-}
-
-/// D17's drift gate, with D6's carve-out.
-///
-/// The deadlock this exists to break: a test file that was sealed has to be
-/// *edited* before its scenario can have a witness, and that edit is drift
-/// nobody claims -- the `run` line that would claim it (D3) cannot be
-/// written until the run has happened. So the gate admits drift whose paths
-/// all lie within `claimed`, the files this very invocation is about to
-/// record runs against: the act of claiming them is what legitimizes their
-/// drift, exactly as `adopt` legitimizes the drift it captures.
-///
-/// Anything else is refused, with the shared message and hint of
-/// [`crate::commands::require_no_unclaimed_drift`] -- one drift refusal,
-/// one wording, whichever command raises it.
-///
-/// Note that `project.state.drift` has *already* had every open change's
-/// claims filtered out (`compute_state`, D5): what reaches here is the
-/// unclaimed remainder, which is the only thing the carve-out has to widen.
-fn require_no_foreign_drift(project: &Project, claimed: &[RepoPath]) -> Result<(), TelosError> {
-    if project.state.state != ProjectStateKind::Drifted {
-        return Ok(());
-    }
-    if project
-        .state
-        .drift
-        .iter()
-        .all(|entry| claimed.contains(&entry.path))
-    {
-        return Ok(());
-    }
-    Err(TelosError::new(
-        ErrorCode::TelosDriftDetected,
-        "the project has drifted from its seal",
-    )
-    .hint(DRIFT_HINT))
 }
 
 // --- running and journalling --------------------------------------------------

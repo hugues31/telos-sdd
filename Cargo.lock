@@ -952,6 +952,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "clap",
+ "getrandom",
  "globset",
  "libc",
  "notify",

@@ -1,8 +1,7 @@
-//! `telos change <open|list|abandon>`: the lifecycle of a staged
-//! transaction, minus the verbs that need a delta (`diff`/`approve` land in
-//! T8, `reconcile` in T10 -- absent from the enum below rather than stubbed,
-//! so `telos change approve` is a clap usage error today, not a command that
-//! answers with something meaningless).
+//! `telos change <open|list|abandon|diff|approve>`: the lifecycle of a
+//! staged transaction, minus `reconcile` (T10 -- absent from the enum below
+//! rather than stubbed, so `telos change reconcile` is a clap usage error
+//! today, not a command that answers with something meaningless).
 //!
 //! Two rules shape every function here:
 //!
@@ -10,9 +9,10 @@
 //!   from [`write_change`] (hence from `emit_change`), its content from
 //!   [`read_change`] (hence from `parse_change_file`), and its deletion from
 //!   [`delete_change`]. Nothing here formats or decodes a change itself.
-//! - **Only `open` is gated (D17).** Opening a change stages new spec on top
-//!   of the sealed base, so it needs that base to still be the sealed one;
-//!   `list` and `abandon` read, or clean up, and a drifted project is
+//! - **`open` and `approve` are gated, `diff` is not (D17).** Opening a
+//!   change or freezing its digest both stage a review against the sealed
+//!   base, so both need that base to still be the sealed one; `list`,
+//!   `abandon` and `diff` read, or clean up, and a drifted project is
 //!   exactly when a caller needs them most.
 
 use clap::Subcommand;
@@ -22,13 +22,14 @@ use telos_core::changes::{delete_change, open_change_infos, read_change, write_c
 use telos_core::counters::write_counters;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::ids::ChangeId;
-use telos_core::model::{Change, ChangeStatus};
+use telos_core::model::{Change, ChangeStatus, StagedOp};
+use telos_core::overlay::{op_before_after, parse_base};
 use telos_core::workspace::Workspace;
 
-use crate::commands::{Ctx, allocator, project, require_no_unclaimed_drift};
+use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_no_unclaimed_drift};
 use crate::envelope::{CmdResult, Outcome};
 
-/// The three verbs M2's T5 exposes.
+/// The five verbs T8 leaves `change` with (T10 adds `reconcile`).
 #[derive(Debug, Clone, Subcommand)]
 pub enum ChangeCommand {
     /// Open a new, empty change and allocate its id.
@@ -43,6 +44,17 @@ pub enum ChangeCommand {
         /// The change to abandon (`CHG-0001`).
         id: String,
     },
+    /// Report a change's staged ops against the sealed base, one before/
+    /// after pair per op.
+    Diff {
+        /// The change to inspect (`CHG-0001`).
+        id: String,
+    },
+    /// Freeze a change's ops digest, approving it for reconcile.
+    Approve {
+        /// The change to approve (`CHG-0001`).
+        id: String,
+    },
 }
 
 pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
@@ -50,6 +62,8 @@ pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
         ChangeCommand::Open { motivation } => open(ctx, motivation),
         ChangeCommand::List => list(ctx),
         ChangeCommand::Abandon { id } => abandon(ctx, id),
+        ChangeCommand::Diff { id } => diff(ctx, id),
+        ChangeCommand::Approve { id } => approve(ctx, id),
     }
 }
 
@@ -156,6 +170,146 @@ fn abandon(ctx: &Ctx, id: &str) -> CmdResult {
         result: json!({ "id": id, "status": ChangeStatus::Abandoned.as_str() }),
         human: format!("abandoned {id}"),
         next_actions: Vec::new(),
+    })
+}
+
+// --- change diff -------------------------------------------------------------
+
+/// Reports a change's staged ops against the sealed base: one before/after
+/// pair per op, the current ops digest, the frozen `approved_digest` (if
+/// any), and whether the two disagree (`stale`, [`Change::is_stale`]).
+///
+/// Read-only and never gated on drift (D17): a change's own delta is judged
+/// against `telos/`'s spec files as they parse right now, whatever state
+/// the rest of the project is in -- exactly the moment a caller most needs
+/// to see it. [`parse_base`] only requires the base to *parse*, not to
+/// build a coherent model on its own (that is the overlay's job, run at
+/// staging time and at reconcile), so a base with an unrelated hole still
+/// answers here.
+fn diff(ctx: &Ctx, id: &str) -> CmdResult {
+    let id = parse_change_id(id)?;
+    let ws = Workspace::discover(&ctx.cwd)?;
+    let change = read_change(&ws, id)?;
+    let base = parse_base(&ws).map_err(diagnostics_to_error)?;
+
+    let digest = change.ops_digest();
+    let stale = change.is_stale();
+
+    let mut ops = Vec::with_capacity(change.ops.len());
+    let mut human_ops = Vec::with_capacity(change.ops.len());
+    for (i, op) in change.ops.iter().enumerate() {
+        let (before, after) = op_before_after(&base, &change.ops, i);
+        ops.push(json!({
+            "n": i + 1,
+            "op": op.verb(),
+            "entity": op.entity(),
+            "key": op.key(),
+            "before": before,
+            "after": after,
+        }));
+        human_ops.push(op_human(i + 1, op, &before, &after));
+    }
+
+    let mut human = vec![format!(
+        "{} {} digest={digest} approved={} stale={stale}",
+        change.id,
+        change.status.as_str(),
+        change.approved_digest.as_deref().unwrap_or("none"),
+    )];
+    human.extend(human_ops);
+
+    Ok(Outcome {
+        result: json!({
+            "id": change.id,
+            "status": change.status.as_str(),
+            "digest": digest,
+            "approved_digest": change.approved_digest,
+            "stale": stale,
+            "ops": ops,
+        }),
+        human: human.join("\n\n"),
+        next_actions: diff_next_actions(&change, stale),
+    })
+}
+
+/// One `#N verb entity key` section, terse and readable: the header line,
+/// then a `before:`/`after:` block each, `(none)` where [`op_before_after`]
+/// answered `None`.
+fn op_human(n: usize, op: &StagedOp, before: &Option<String>, after: &Option<String>) -> String {
+    let header = format!("#{n} {} {} {}", op.verb(), op.entity(), op.key());
+    let block = |label: &str, text: &Option<String>| match text {
+        Some(text) => format!("{label}:\n{text}"),
+        None => format!("{label}: (none)"),
+    };
+    format!(
+        "{header}\n{}\n{}",
+        block("before", before),
+        block("after", after)
+    )
+}
+
+/// `change diff`'s `next_actions`: what to do about the state it just
+/// reported.
+///
+/// `open`/`drafted` both still need a review (D16 -- `open` cannot reach
+/// here with staged ops, but the case costs nothing to cover uniformly). An
+/// `approved`/`implementing` change whose digest still matches is ready for
+/// `reconcile`; one that has gone stale (staged into after approval, D3)
+/// needs a fresh `approve` before anything else, which is also what
+/// re-approving does (idempotent, D16).
+fn diff_next_actions(change: &Change, stale: bool) -> Vec<String> {
+    match change.status {
+        ChangeStatus::Open | ChangeStatus::Drafted => {
+            vec![format!("telos change approve {}", change.id)]
+        }
+        ChangeStatus::Approved | ChangeStatus::Implementing if stale => {
+            vec![format!("telos change approve {}", change.id)]
+        }
+        ChangeStatus::Approved | ChangeStatus::Implementing => {
+            vec![format!("telos change reconcile {}", change.id)]
+        }
+        // Unreachable in practice -- an abandoned change's file is gone, so
+        // `read_change` above would already have refused with `unknown
+        // change`. Covered for exhaustiveness, not for a real caller.
+        ChangeStatus::Abandoned => Vec::new(),
+    }
+}
+
+// --- change approve ----------------------------------------------------------
+
+/// Freezes `change`'s ops digest (D3): the review a `reconcile` will later
+/// check its base against.
+///
+/// Gated on drift (D17), like `open`: approving is a judgement about the
+/// staged delta *against the sealed base*, and that judgement is void if
+/// the base is no longer the sealed one. Requires at least one staged op --
+/// there is nothing to approve otherwise, and an `open` change (zero ops)
+/// can never pass this, so `approve` only ever moves a change out of
+/// `drafted` or re-confirms one already `approved` (D16: idempotent,
+/// recalculating the digest every time).
+fn approve(ctx: &Ctx, id: &str) -> CmdResult {
+    let id = parse_change_id(id)?;
+    let project = project(ctx)?;
+    require_no_unclaimed_drift(&project)?;
+
+    let mut change = read_change(&project.ws, id)?;
+    if change.ops.is_empty() {
+        return Err(TelosError::new(
+            ErrorCode::TelosChangeStateInvalid,
+            format!("change {id} has no staged operations"),
+        )
+        .hint("stage operations with telos add|edit|remove first"));
+    }
+
+    change.status = ChangeStatus::Approved;
+    change.approved_digest = Some(change.ops_digest());
+    write_change(&project.ws, &change)?;
+
+    let digest = change.approved_digest.expect("just set above");
+    Ok(Outcome {
+        result: json!({ "id": change.id, "digest": digest, "status": ChangeStatus::Approved.as_str() }),
+        human: format!("{id}: approved, digest {digest}"),
+        next_actions: vec![format!("telos change reconcile {id}")],
     })
 }
 

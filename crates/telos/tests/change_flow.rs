@@ -627,3 +627,369 @@ fn check_without_sealed_passes_while_a_change_is_open() {
 
     telos(tmp.path(), &["check"]).assert().success();
 }
+
+// --- change diff / change approve -----------------------------------------
+
+/// Runs one staging command (`add`/`edit`) with `payload` on stdin and
+/// returns its `result`, asserting only that it succeeded -- the same
+/// helper `tests/mutate.rs` uses, duplicated because integration test
+/// binaries share no code but `common`.
+fn stage_ok(dir: &std::path::Path, args: &[&str], payload: &str) -> Value {
+    let mut cmd = telos(dir, args);
+    let out = cmd.write_stdin(payload.to_string()).output().unwrap();
+    let envelope = json_stdout(&out);
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "expected success, got {envelope}"
+    );
+    envelope["result"].clone()
+}
+
+/// A small `add notion` payload with no attrs or rels -- the minimal 1-op
+/// change `change diff`'s golden test stages.
+fn vendor_payload() -> String {
+    json!({"name": "Vendor", "kind": "actor", "def": "A party the business pays."}).to_string()
+}
+
+/// The canonical block `add notion` with [`vendor_payload`] produces --
+/// `emit_notion`'s own output, unindented, the exact bytes `change diff`
+/// must report as the op's `after`.
+const VENDOR_CANONICAL: &str = "notion Vendor actor {\n  def  \"A party the business pays.\"\n}\n";
+
+/// Whether `digest` is `sha256:` followed by exactly 64 lowercase hex
+/// digits (D3) -- the shape `change diff`/`change approve` must report,
+/// without pinning the value itself.
+fn is_sha256_hex(digest: &str) -> bool {
+    match digest.strip_prefix("sha256:") {
+        Some(hex) => {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        }
+        None => false,
+    }
+}
+
+#[test]
+fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload(),
+    );
+
+    let out = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["command"], json!("change"));
+    let result = &envelope["result"];
+    assert_eq!(result["id"], json!("CHG-0001"));
+    assert_eq!(result["status"], json!("drafted"));
+    assert_eq!(result["approved_digest"], Value::Null);
+    assert_eq!(result["stale"], json!(false));
+    let digest = result["digest"].as_str().expect("digest is a string");
+    assert!(is_sha256_hex(digest), "not sha256:<64 hex>: {digest}");
+    assert_eq!(
+        result["ops"],
+        json!([{
+            "n": 1,
+            "op": "add",
+            "entity": "notion",
+            "key": "Vendor",
+            "before": null,
+            "after": VENDOR_CANONICAL,
+        }])
+    );
+    assert_eq!(
+        envelope["next_actions"],
+        json!(["telos change approve CHG-0001"])
+    );
+}
+
+/// `before` for an `edit` is the sealed base's own canonical block -- the
+/// corpus' `INT-0017.tel` bytes, read straight off disk, D1's round-trip
+/// being exactly what makes that legitimate -- and `after` is the patched
+/// intent's canonical block. Staging never touches the sealed file itself.
+#[test]
+fn change_diff_of_an_edit_reports_the_corpus_block_as_before_and_the_patch_as_after() {
+    let tmp = with_fixture();
+    let int_0017_path = tmp.path().join("telos/intents/INT-0017.tel");
+    let before = fs::read_to_string(&int_0017_path).unwrap();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &[
+            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+        ],
+        &json!({"telos": "An invoice must start its life open and unpaid -- reworded."})
+            .to_string(),
+    );
+
+    let out = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    let envelope = json_stdout(&out);
+    let op = &envelope["result"]["ops"][0];
+    assert_eq!(op["n"], json!(1));
+    assert_eq!(op["op"], json!("edit"));
+    assert_eq!(op["entity"], json!("intent"));
+    assert_eq!(op["key"], json!("INT-0017"));
+    assert_eq!(op["before"], json!(before));
+
+    // Staging wrote only the change file -- the sealed intent is untouched.
+    assert_eq!(fs::read_to_string(&int_0017_path).unwrap(), before);
+
+    let after = before.replace(
+        "An invoice must start its life open and unpaid.",
+        "An invoice must start its life open and unpaid -- reworded.",
+    );
+    assert_ne!(after, before, "the replacement must actually have applied");
+    assert_eq!(op["after"], json!(after));
+}
+
+/// Human mode: a summary line, then one `#N verb entity key` section per
+/// op with `before:`/`after:` blocks. Exact wording is free -- there is no
+/// golden test for it, only for `--json` (the same policy `status`/`check`
+/// document for their own human output).
+#[test]
+fn change_diff_human_mode_prints_per_op_sections() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload(),
+    );
+
+    let out = telos(tmp.path(), &["change", "diff", "CHG-0001"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("#1 add notion Vendor"), "{stdout}");
+    assert!(stdout.contains("before: (none)"), "{stdout}");
+    assert!(stdout.contains("after:\nnotion Vendor actor {"), "{stdout}");
+}
+
+/// `approve` writes `status approved` and a `digest` line into the change
+/// file, in `emit_change`'s own layout, byte for byte -- the digest itself
+/// is read back from the JSON result rather than pinned, since D3 does not
+/// freeze a value, only a shape and an algorithm.
+#[test]
+fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload(),
+    );
+
+    let out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["command"], json!("change"));
+    assert_eq!(envelope["result"]["id"], json!("CHG-0001"));
+    assert_eq!(envelope["result"]["status"], json!("approved"));
+    let digest = envelope["result"]["digest"]
+        .as_str()
+        .expect("digest is a string")
+        .to_string();
+    assert!(is_sha256_hex(&digest), "not sha256:<64 hex>: {digest}");
+    assert_eq!(
+        envelope["next_actions"],
+        json!(["telos change reconcile CHG-0001"])
+    );
+
+    let expected = format!(
+        "change CHG-0001 \"{MOTIVATION}\" {{\n  \
+           status approved\n  \
+           digest \"{digest}\"\n\
+         \n  \
+           op add notion Vendor actor {{\n    \
+             def  \"A party the business pays.\"\n  \
+           }}\n\
+         }}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join(CHG_0001)).unwrap(),
+        expected
+    );
+}
+
+/// `approve` of a change with no staged op is refused, with the exact
+/// message and hint the brief freezes -- and writes nothing: the file is
+/// left exactly as `change open` wrote it.
+#[test]
+fn change_approve_of_a_change_with_no_ops_is_change_state_invalid() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+
+    let out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
+    let envelope = json_stdout(&out);
+    assert_eq!(
+        envelope["error"]["code"],
+        json!("TELOS_CHANGE_STATE_INVALID")
+    );
+    assert_eq!(
+        envelope["error"]["message"],
+        json!("change CHG-0001 has no staged operations")
+    );
+    assert_eq!(
+        envelope["error"]["hint"],
+        json!("stage operations with telos add|edit|remove first")
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join(CHG_0001)).unwrap(),
+        CANONICAL_OPEN_CHANGE
+    );
+}
+
+/// Staging into an already-approved change is allowed (`mutate.rs`'s own
+/// design): nothing is lost, but the approval goes stale (D3) -- `diff`
+/// reports it, and re-`approve` clears it again, recalculating the digest
+/// (D16: idempotent).
+#[test]
+fn staging_after_approve_goes_stale_and_re_approve_clears_it() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload(),
+    );
+
+    let approve_out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    assert!(approve_out.status.success());
+    let first_digest = json_stdout(&approve_out)["result"]["digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &json!({
+            "name": "InvoiceCancelled", "kind": "event",
+            "def": "An invoice was cancelled before settlement."
+        })
+        .to_string(),
+    );
+
+    let diff_out = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    let envelope = json_stdout(&diff_out);
+    let result = &envelope["result"];
+    assert_eq!(result["status"], json!("approved"));
+    assert_eq!(result["stale"], json!(true));
+    assert_eq!(result["approved_digest"], json!(first_digest));
+    let live_digest = result["digest"].as_str().unwrap().to_string();
+    assert_ne!(live_digest, first_digest);
+    assert_eq!(
+        envelope["next_actions"],
+        json!(["telos change approve CHG-0001"])
+    );
+
+    let reapprove_out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    assert!(reapprove_out.status.success());
+    let second_digest = json_stdout(&reapprove_out)["result"]["digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(second_digest, live_digest);
+    assert_ne!(second_digest, first_digest);
+
+    let diff_out2 = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    let envelope2 = json_stdout(&diff_out2);
+    assert_eq!(envelope2["result"]["stale"], json!(false));
+    assert_eq!(envelope2["result"]["approved_digest"], json!(second_digest));
+    assert_eq!(
+        envelope2["next_actions"],
+        json!(["telos change reconcile CHG-0001"])
+    );
+}
+
+/// D17: `approve` is refused on unclaimed drift, same as `open`, and writes
+/// nothing -- the change stays `drafted`, no digest.
+#[test]
+fn change_approve_on_unclaimed_drift_is_refused() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload(),
+    );
+    drift(tmp.path());
+
+    let out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["error"]["code"], json!("TELOS_DRIFT_DETECTED"));
+    assert_eq!(envelope["error"]["hint"], json!(DRIFT_HINT));
+
+    let contents = fs::read_to_string(tmp.path().join(CHG_0001)).unwrap();
+    assert!(contents.contains("status drafted"), "{contents}");
+    assert!(!contents.contains("digest"), "{contents}");
+}
+
+/// D17: unlike `approve`, `diff` is allowed on unclaimed drift -- it reads,
+/// it does not stage a review against the base.
+#[test]
+fn change_diff_is_allowed_on_unclaimed_drift() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload(),
+    );
+    drift(tmp.path());
+
+    telos(tmp.path(), &["change", "diff", "CHG-0001"])
+        .assert()
+        .success();
+}

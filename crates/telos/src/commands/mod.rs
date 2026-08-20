@@ -16,6 +16,7 @@ pub mod init;
 pub mod list;
 pub mod mutate;
 pub mod query;
+pub mod rebuild;
 pub mod revert;
 pub mod show;
 pub mod status;

@@ -297,7 +297,7 @@ struct NeighborEntry {
 
 /// The whole pack of Annex C, already sorted and filtered per its rules --
 /// `to_json` and `to_human` each render the same data, once computed here.
-struct Pack {
+pub(crate) struct Pack {
     id: IntentId,
     change: Option<ChangeId>,
     canonical: String,
@@ -309,7 +309,7 @@ struct Pack {
     neighbors: Vec<NeighborEntry>,
 }
 
-fn build_pack(model: &TelosModel, intent: &Intent, change: Option<ChangeId>) -> Pack {
+pub(crate) fn build_pack(model: &TelosModel, intent: &Intent, change: Option<ChangeId>) -> Pack {
     Pack {
         id: intent.id,
         change,
@@ -448,7 +448,7 @@ fn neighbor(
 
 // --- rendering ---------------------------------------------------------------
 
-fn to_json(pack: &Pack) -> Value {
+pub(crate) fn to_json(pack: &Pack) -> Value {
     json!({
         "id": pack.id,
         "change": pack.change,

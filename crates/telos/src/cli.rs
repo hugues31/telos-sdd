@@ -16,7 +16,7 @@ use telos_core::error::{ErrorCode, TelosError};
 
 use crate::commands::{
     self, Ctx, agents::AgentHost, change::ChangeCommand, list::EntityType, mutate::EntityKind,
-    query::QueryCommand,
+    query::QueryCommand, rebuild::RebuildCommand,
 };
 use crate::envelope::CmdResult;
 use crate::render::render;
@@ -102,6 +102,11 @@ enum Command {
         /// resolves to the intent that owns it.
         target: String,
     },
+    /// Plan a reconstruction or measure its real scenario progress.
+    Rebuild {
+        #[command(subcommand)]
+        rebuild: RebuildCommand,
+    },
     /// Open, list, diff, approve, reconcile and abandon changes.
     Change {
         #[command(subcommand)]
@@ -185,6 +190,7 @@ impl Command {
             Command::Query { .. } => "query",
             Command::Impact { .. } => "impact",
             Command::Context { .. } => "context",
+            Command::Rebuild { .. } => "rebuild",
             // One `command` for all three verbs: the envelope names the
             // command a caller invoked, and `telos change …` is one command
             // with subcommands, the same way `telos query …` is.
@@ -268,6 +274,7 @@ fn execute(command: &Command) -> CmdResult {
         Command::Query { query } => commands::query::run(&ctx()?, query),
         Command::Impact { target } => commands::impact::run(&ctx()?, target),
         Command::Context { target } => commands::context::run(&ctx()?, target),
+        Command::Rebuild { rebuild } => commands::rebuild::run(&ctx()?, rebuild),
         Command::Change { change } => commands::change::run(&ctx()?, change),
         Command::Add { kind, change } => {
             commands::mutate::add(&ctx()?, *kind, change, &stdin_payload()?)

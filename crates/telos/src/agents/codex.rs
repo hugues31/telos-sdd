@@ -1,10 +1,9 @@
-use std::path::Path;
-
 use super::assets::SKILLS;
 use super::{
     PlannedWrite, merge_command_hook, merge_owned_block, planned_json, planned_text,
     read_optional_object, read_optional_text,
 };
+use crate::safe_fs::SafeRoot;
 use telos_core::error::TelosError;
 
 const START: &str = "<!-- telos-sdd:start -->";
@@ -40,7 +39,7 @@ prefix_rule(
 )
 # telos-sdd:end"#;
 
-pub fn plan(root: &Path) -> Result<Vec<PlannedWrite>, TelosError> {
+pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
     let mut writes = Vec::new();
     for (name, content) in SKILLS {
         writes.push(planned_text(
@@ -50,16 +49,14 @@ pub fn plan(root: &Path) -> Result<Vec<PlannedWrite>, TelosError> {
         )?);
     }
 
-    let agents_path = root.join("AGENTS.md");
-    let agents = read_optional_text(&agents_path)?;
+    let agents = read_optional_text(root, "AGENTS.md")?;
     writes.push(planned_text(
         root,
         "AGENTS.md",
         merge_owned_block(&agents, START, END, AGENTS_BLOCK),
     )?);
 
-    let hooks_path = root.join(".codex/hooks.json");
-    let mut hooks = read_optional_object(&hooks_path)?;
+    let mut hooks = read_optional_object(root, ".codex/hooks.json")?;
     merge_command_hook(
         &mut hooks,
         super::matcher(super::AgentHost::Codex),
@@ -67,8 +64,7 @@ pub fn plan(root: &Path) -> Result<Vec<PlannedWrite>, TelosError> {
     )?;
     writes.push(planned_json(root, ".codex/hooks.json", &hooks)?);
 
-    let rules_path = root.join(".codex/rules/telos.rules");
-    let rules = read_optional_text(&rules_path)?;
+    let rules = read_optional_text(root, ".codex/rules/telos.rules")?;
     let merged = merge_owned_block(&rules, "# telos-sdd:start", "# telos-sdd:end", RULES_BLOCK);
     writes.push(planned_text(root, ".codex/rules/telos.rules", merged)?);
     Ok(writes)

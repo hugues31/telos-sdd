@@ -9,6 +9,7 @@ mod commands;
 mod envelope;
 mod projection;
 mod render;
+mod safe_fs;
 mod view;
 
 use std::process::ExitCode;

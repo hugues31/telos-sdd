@@ -1,19 +1,15 @@
 //! The GitHub Actions sealed-state gate.
 
-use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
 use telos_core::error::{ErrorCode, TelosError};
 
-use crate::view::export::publish_no_replace;
+use crate::safe_fs::SafeRoot;
 
 const WORKFLOW_PATH: &str = ".github/workflows/telos.yml";
 const GITHUB_DIR: &str = ".github";
 const WORKFLOWS_DIR: &str = ".github/workflows";
-
-static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const WORKFLOW: &str = concat!(
     "name: Telos\n\n",
@@ -41,120 +37,46 @@ const WORKFLOW: &str = concat!(
 
 /// The fully validated immutable GitHub installation.
 pub struct InstallPlan {
-    root: PathBuf,
-    workflow: PathBuf,
+    root: SafeRoot,
 }
 
 pub fn preflight(root: &Path) -> Result<InstallPlan, TelosError> {
-    validate_ancestors(root)?;
-    let workflow = workflow_path(root);
-    match fs::symlink_metadata(&workflow) {
-        Ok(_) => Err(collision(&workflow)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(InstallPlan {
-            root: root.to_path_buf(),
-            workflow,
-        }),
-        Err(error) => Err(io_error("inspect", &workflow, error)),
+    let root = SafeRoot::open(root)
+        .map_err(|error| io_error("open", Path::new("repository root"), error))?;
+    validate_ancestors(&root)?;
+    match root.exists_no_follow(Path::new(WORKFLOW_PATH)) {
+        Ok(true) => Err(collision(Path::new(WORKFLOW_PATH))),
+        Ok(false) => Ok(InstallPlan { root }),
+        Err(error) => Err(io_error("inspect", Path::new(WORKFLOW_PATH), error)),
     }
 }
 
 impl InstallPlan {
     pub fn render(&self) -> Result<(), TelosError> {
-        self.render_with_before_publish(|| Ok(()))
+        self.render_with_before_write(|| Ok(()))
     }
 
-    fn render_with_before_publish<H>(&self, before_publish: H) -> Result<(), TelosError>
+    fn render_with_before_write<H>(&self, before_write: H) -> Result<(), TelosError>
     where
         H: FnOnce() -> io::Result<()>,
     {
-        ensure_ancestors(&self.root)?;
-        let staging = staging_path(&self.workflow)?;
-        let result = (|| {
-            fs::write(&staging, WORKFLOW).map_err(|error| io_error("write", &staging, error))?;
-            before_publish()
-                .map_err(|error| io_error("prepare publication for", &self.workflow, error))?;
-            publish_no_replace(&staging, &self.workflow, collision)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&staging);
-        }
-        result
+        self.root
+            .create_new_write_with(
+                Path::new(WORKFLOW_PATH),
+                WORKFLOW.as_bytes(),
+                before_write,
+                || Ok(()),
+            )
+            .map_err(render_error)
     }
 }
 
-fn validate_ancestors(root: &Path) -> Result<(), TelosError> {
+fn validate_ancestors(root: &SafeRoot) -> Result<(), TelosError> {
     for relative in [GITHUB_DIR, WORKFLOWS_DIR] {
-        validate_directory(&root.join(relative), relative)?;
+        root.validate_directory(Path::new(relative))
+            .map_err(|_| directory_collision(relative))?;
     }
     Ok(())
-}
-
-fn ensure_ancestors(root: &Path) -> Result<(), TelosError> {
-    for relative in [GITHUB_DIR, WORKFLOWS_DIR] {
-        let path = root.join(relative);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => return Err(directory_collision(relative)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir(&path).map_err(|error| {
-                    if error.kind() == io::ErrorKind::AlreadyExists {
-                        directory_collision(relative)
-                    } else {
-                        io_error("create", &path, error)
-                    }
-                })?;
-            }
-            Err(error) => return Err(io_error("inspect", &path, error)),
-        }
-        let canonical_root =
-            fs::canonicalize(root).map_err(|error| io_error("resolve", root, error))?;
-        let canonical =
-            fs::canonicalize(&path).map_err(|error| io_error("resolve", &path, error))?;
-        if !canonical.starts_with(canonical_root) {
-            return Err(directory_collision(relative));
-        }
-    }
-    Ok(())
-}
-
-fn validate_directory(path: &Path, relative: &str) -> Result<(), TelosError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
-        Ok(_) => Err(directory_collision(relative)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io_error("inspect", path, error)),
-    }
-}
-
-fn staging_path(workflow: &Path) -> Result<PathBuf, TelosError> {
-    let parent = workflow.parent().expect("workflow path has a parent");
-    for _ in 0..128 {
-        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(
-            ".telos.yml.staging-{}-{sequence}",
-            std::process::id()
-        ));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(_) => return Ok(candidate),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io_error("create", &candidate, error)),
-        }
-    }
-    Err(TelosError::new(
-        ErrorCode::TelosInternal,
-        format!(
-            "failed to create unique workflow staging file beside {}",
-            workflow.display()
-        ),
-    ))
-}
-
-fn workflow_path(root: &Path) -> PathBuf {
-    root.join(WORKFLOW_PATH)
 }
 
 fn collision(_path: &Path) -> TelosError {
@@ -163,6 +85,16 @@ fn collision(_path: &Path) -> TelosError {
         format!("`{WORKFLOW_PATH}` already exists"),
     )
     .hint("preserve or move the existing workflow before retrying")
+}
+
+fn render_error(error: io::Error) -> TelosError {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => collision(Path::new(WORKFLOW_PATH)),
+        io::ErrorKind::InvalidInput
+        | io::ErrorKind::NotADirectory
+        | io::ErrorKind::PermissionDenied => directory_collision(WORKFLOWS_DIR),
+        _ => io_error("write", Path::new(WORKFLOW_PATH), error),
+    }
 }
 
 fn directory_collision(relative: &str) -> TelosError {
@@ -188,21 +120,27 @@ mod tests {
     use super::{collision, preflight};
 
     #[test]
-    fn publish_race_preserves_the_late_workflow_owner_and_cleans_staging() {
+    fn reserved_final_write_does_not_follow_a_late_parent_swap() {
         let tmp = tempfile::tempdir().unwrap();
         let workflow = tmp.path().join(".github/workflows/telos.yml");
+        let outside = tempfile::tempdir().unwrap();
+        let github = tmp.path().join(".github");
         let plan = preflight(tmp.path()).unwrap();
         let barrier = Arc::new(Barrier::new(2));
         let actor_barrier = Arc::clone(&barrier);
-        let actor_workflow = workflow.clone();
+        let actor_github = github.clone();
+        let actor_outside = outside.path().to_path_buf();
         let actor = std::thread::spawn(move || {
             actor_barrier.wait();
-            fs::create_dir_all(actor_workflow.parent().unwrap())?;
-            fs::write(&actor_workflow, "late owner\n")
+            fs::rename(&actor_github, actor_github.with_extension("owned"))?;
+            #[cfg(unix)]
+            return std::os::unix::fs::symlink(actor_outside, actor_github);
+            #[cfg(not(unix))]
+            return fs::create_dir(actor_github);
         });
 
         let error = plan
-            .render_with_before_publish(|| {
+            .render_with_before_write(|| {
                 barrier.wait();
                 actor
                     .join()
@@ -214,24 +152,13 @@ mod tests {
             error.code,
             telos_core::error::ErrorCode::TelosChangeStateInvalid
         );
-        assert_eq!(error.message, collision(&workflow).message);
-        assert_eq!(fs::read_to_string(&workflow).unwrap(), "late owner\n");
-        assert!(
-            fs::read_dir(workflow.parent().unwrap())
-                .unwrap()
-                .all(|entry| {
-                    !entry
-                        .unwrap()
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".telos.yml.staging-")
-                })
-        );
+        assert!(!outside.path().join("workflows/telos.yml").exists());
+        assert!(!workflow.exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn publish_race_preserves_a_late_workflow_symlink_owner() {
+    fn final_create_new_preserves_a_late_workflow_symlink_owner() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -250,7 +177,7 @@ mod tests {
         });
 
         let error = plan
-            .render_with_before_publish(|| {
+            .render_with_before_write(|| {
                 barrier.wait();
                 actor
                     .join()

@@ -6,12 +6,13 @@ mod codex;
 pub mod guard;
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 use telos_core::error::{ErrorCode, TelosError};
+
+use crate::safe_fs::SafeRoot;
 
 pub use telos_core::config::AgentHost;
 
@@ -41,48 +42,57 @@ pub fn normalize(hosts: &[AgentHost]) -> Vec<AgentHost> {
 
 /// A deterministic write whose complete bytes were built before init writes.
 pub(crate) struct PlannedWrite {
-    path: PathBuf,
+    relative: PathBuf,
     bytes: Vec<u8>,
 }
 
 /// All requested host artifacts, including parsed and merged user content.
 pub struct InstallPlan {
-    root: PathBuf,
+    root: SafeRoot,
     writes: Vec<PlannedWrite>,
 }
 
 /// Parses, merges, serializes, and validates every requested host artifact
 /// before `init` writes anything.
 pub fn preflight(root: &Path, hosts: &[AgentHost]) -> Result<InstallPlan, TelosError> {
+    let root = SafeRoot::open(root)
+        .map_err(|error| io_error("open", Path::new("repository root"), error))?;
     let mut writes = Vec::new();
     for host in normalize(hosts) {
         match host {
-            AgentHost::Claude => writes.extend(claude::plan(root)?),
-            AgentHost::Codex => writes.extend(codex::plan(root)?),
+            AgentHost::Claude => writes.extend(claude::plan(&root)?),
+            AgentHost::Codex => writes.extend(codex::plan(&root)?),
         }
     }
-    Ok(InstallPlan {
-        root: root.to_path_buf(),
-        writes,
-    })
+    Ok(InstallPlan { root, writes })
 }
 
 /// Renders only the bytes cached by [`preflight`], after Telos is sealed.
 pub fn render(plan: &InstallPlan) -> Result<(), TelosError> {
+    render_with_before_write(plan, || Ok(()))
+}
+
+fn render_with_before_write<H>(plan: &InstallPlan, hook: H) -> Result<(), TelosError>
+where
+    H: FnOnce() -> io::Result<()>,
+{
+    let mut hook = Some(hook);
     for write in &plan.writes {
-        ensure_parent(
-            &plan.root,
-            write.path.parent().expect("planned target has a parent"),
-        )?;
-        validate_target(&plan.root, &write.path)?;
-        fs::write(&write.path, &write.bytes)
-            .map_err(|error| io_error("write", &write.path, error))?;
+        if let Some(hook) = hook.take() {
+            plan.root
+                .write_cached_with(&write.relative, &write.bytes, hook)
+                .map_err(|error| safe_error("write", &write.relative, error))?;
+        } else {
+            plan.root
+                .write_cached(&write.relative, &write.bytes)
+                .map_err(|error| safe_error("write", &write.relative, error))?;
+        }
     }
     Ok(())
 }
 
 pub(crate) fn planned_text(
-    root: &Path,
+    root: &SafeRoot,
     relative: &str,
     content: String,
 ) -> Result<PlannedWrite, TelosError> {
@@ -90,7 +100,7 @@ pub(crate) fn planned_text(
 }
 
 pub(crate) fn planned_json(
-    root: &Path,
+    root: &SafeRoot,
     relative: &str,
     object: &Map<String, Value>,
 ) -> Result<PlannedWrite, TelosError> {
@@ -104,91 +114,19 @@ pub(crate) fn planned_json(
     planned_bytes(root, relative, bytes)
 }
 
-fn planned_bytes(root: &Path, relative: &str, bytes: Vec<u8>) -> Result<PlannedWrite, TelosError> {
-    let path = root.join(relative);
-    validate_target(root, &path)?;
-    Ok(PlannedWrite { path, bytes })
+fn planned_bytes(
+    root: &SafeRoot,
+    relative: &str,
+    bytes: Vec<u8>,
+) -> Result<PlannedWrite, TelosError> {
+    let relative = PathBuf::from(relative);
+    root.validate_target(&relative)
+        .map_err(|error| safe_error("inspect", &relative, error))?;
+    Ok(PlannedWrite { relative, bytes })
 }
 
-fn validate_target(root: &Path, target: &Path) -> Result<(), TelosError> {
-    ensure_under_root(root, target)?;
-    let parent = target.parent().expect("planned target has a parent");
-    validate_existing_parents(root, parent)?;
-    match fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(()),
-        Ok(_) => Err(target_collision(root, target)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io_error("inspect", target, error)),
-    }
-}
-
-fn ensure_parent(root: &Path, parent: &Path) -> Result<(), TelosError> {
-    ensure_under_root(root, parent)?;
-    let relative = parent
-        .strip_prefix(root)
-        .expect("target was checked under root");
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => return Err(target_collision(root, &current)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(|error| {
-                    if error.kind() == io::ErrorKind::AlreadyExists {
-                        target_collision(root, &current)
-                    } else {
-                        io_error("create", &current, error)
-                    }
-                })?;
-            }
-            Err(error) => return Err(io_error("inspect", &current, error)),
-        }
-        let canonical_root =
-            fs::canonicalize(root).map_err(|error| io_error("resolve", root, error))?;
-        let canonical =
-            fs::canonicalize(&current).map_err(|error| io_error("resolve", &current, error))?;
-        if !canonical.starts_with(canonical_root) {
-            return Err(target_collision(root, &current));
-        }
-    }
-    Ok(())
-}
-
-fn validate_existing_parents(root: &Path, parent: &Path) -> Result<(), TelosError> {
-    ensure_under_root(root, parent)?;
-    let relative = parent
-        .strip_prefix(root)
-        .expect("target was checked under root");
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => return Err(target_collision(root, &current)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(io_error("inspect", &current, error)),
-        }
-    }
-    Ok(())
-}
-
-fn ensure_under_root(root: &Path, path: &Path) -> Result<(), TelosError> {
-    if path.starts_with(root) {
-        Ok(())
-    } else {
-        Err(TelosError::new(
-            ErrorCode::TelosInternal,
-            format!(
-                "generated host artifact escapes repository root: {}",
-                path.display()
-            ),
-        ))
-    }
-}
-
-fn target_collision(root: &Path, path: &Path) -> TelosError {
-    let display = path.strip_prefix(root).unwrap_or(path).display();
+fn target_collision(path: &Path) -> TelosError {
+    let display = path.display();
     TelosError::new(
         ErrorCode::TelosChangeStateInvalid,
         format!("`{display}` must be a real file or directory as required by Telos"),
@@ -196,11 +134,21 @@ fn target_collision(root: &Path, path: &Path) -> TelosError {
     .hint("repair the existing host configuration and rerun `telos init`")
 }
 
-pub(crate) fn read_optional_object(path: &Path) -> Result<Map<String, Value>, TelosError> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
-        Err(e) => return Err(io_error("read", path, e)),
+pub(crate) fn read_optional_object(
+    root: &SafeRoot,
+    relative: &str,
+) -> Result<Map<String, Value>, TelosError> {
+    let path = Path::new(relative);
+    let content = match root.read_optional(path) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|error| {
+            io_error(
+                "read",
+                path,
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?,
+        Ok(None) => return Ok(Map::new()),
+        Err(error) => return Err(safe_error("read", path, error)),
     };
     let value: Value = serde_json::from_str(&content).map_err(|e| {
         TelosError::new(
@@ -309,11 +257,18 @@ pub(crate) fn merge_owned_block(existing: &str, start: &str, end: &str, block: &
     merged
 }
 
-pub(crate) fn read_optional_text(path: &Path) -> Result<String, TelosError> {
-    match fs::read_to_string(path) {
-        Ok(content) => Ok(content),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(io_error("read", path, e)),
+pub(crate) fn read_optional_text(root: &SafeRoot, relative: &str) -> Result<String, TelosError> {
+    let path = Path::new(relative);
+    match root.read_optional(path) {
+        Ok(Some(bytes)) => String::from_utf8(bytes).map_err(|error| {
+            io_error(
+                "read",
+                path,
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        }),
+        Ok(None) => Ok(String::new()),
+        Err(error) => Err(safe_error("read", path, error)),
     }
 }
 
@@ -324,6 +279,55 @@ fn io_error(verb: &str, path: &Path, e: std::io::Error) -> TelosError {
     )
 }
 
+fn safe_error(verb: &str, path: &Path, error: io::Error) -> TelosError {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists
+        | io::ErrorKind::InvalidInput
+        | io::ErrorKind::NotADirectory
+        | io::ErrorKind::PermissionDenied => target_collision(path),
+        _ => io_error(verb, path, error),
+    }
+}
+
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::{Arc, Barrier};
+
+    use super::{AgentHost, ErrorCode, preflight, render_with_before_write};
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_agent_write_does_not_follow_a_late_parent_swap() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let plan = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();
+        let agents = tmp.path().join(".agents");
+        let barrier = Arc::new(Barrier::new(2));
+        let actor_barrier = Arc::clone(&barrier);
+        let actor_agents = agents.clone();
+        let actor_outside = outside.path().to_path_buf();
+        let actor = std::thread::spawn(move || {
+            actor_barrier.wait();
+            fs::rename(&actor_agents, actor_agents.with_extension("owned"))?;
+            symlink(actor_outside, actor_agents)
+        });
+
+        let error = render_with_before_write(&plan, || {
+            barrier.wait();
+            actor
+                .join()
+                .map_err(|_| std::io::Error::other("agent actor panicked"))?
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::TelosChangeStateInvalid);
+        assert!(!outside.path().join("skills/telos/SKILL.md").exists());
+    }
 }

@@ -952,16 +952,13 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "clap",
- "getrandom",
  "globset",
- "libc",
  "notify",
  "serde",
  "serde_json",
  "telos-core",
  "tempfile",
  "tokio",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

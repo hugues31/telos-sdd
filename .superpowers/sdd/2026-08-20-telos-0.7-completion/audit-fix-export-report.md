@@ -77,3 +77,87 @@ this fix and were not modified or staged here.
 
 Only the exporter, its direct `getrandom` dependency/lock entry, unit tests in
 the exporter module, and this report belong to the fix.
+
+## Round 2 — source-bound publication and owner-safe failure
+
+The first fix was rejected after four findings, all confirmed against the
+implementation and dependency sources:
+
+1. Linux `renameat2` and Darwin `renameatx_np` bind the parent directory but
+   still resolve the source object from a pathname. A replacement after the
+   identity check was therefore published.
+2. `create_dir` returns no directory handle. Reopening the name and then
+   recording its identity could adopt a replacement installed between the two
+   calls.
+3. `cap_std` deliberately opens Windows directories without
+   `FILE_SHARE_DELETE`; Microsoft documents that rename/delete access requires
+   that sharing flag on every extant handle. `MoveFileW` therefore conflicted
+   with the staging handle retained by the first fix.
+4. `cap_std`'s Windows `remove_open_dir_all` obtains the handle's path, closes
+   the handle, and removes by pathname. Its source explicitly documents this
+   unavoidable race.
+
+### Additional RED evidence
+
+- `rtk proxy cargo test -p telos between_creation_and_open -- --nocapture`
+  returned `Ok` and published the injected reservation replacement.
+- `rtk proxy cargo test -p telos after_identity_check -- --nocapture` returned
+  `Ok` and published the replacement installed after the last identity check.
+- `rtk proxy cargo test -p telos explicitly_incomplete -- --nocapture` failed
+  because a forced write error removed the staging directory and left no
+  explicit incomplete destination.
+
+### Replacement architecture
+
+Round 2 removes staging-directory publication entirely:
+
+- The final destination is reserved directly with create-only `create_dir`.
+- It is opened no-follow, must still be empty, and remains held for the whole
+  transaction. A symlink or non-empty substitution is refused before page
+  writes.
+- `index.html` is created first through the held handle with a small explicit
+  `Telos export incomplete` page. All remaining files use relative,
+  component-by-component no-follow traversal and `create_new`.
+- Before completion, the exporter enumerates the held tree and verifies the
+  exact expected paths and bytes. It then rewrites the already-held
+  `index.html` file with the rendered dashboard and verifies the final tree.
+- There is no source rename, pathname publication, recursive cleanup, or file
+  deletion. A failed transaction remains at the create-only destination with
+  an incomplete index (or partial owned output) and every retry refuses the
+  existing destination. No foreign entry is ever published or cleaned up by
+  the exporter.
+- The Linux/Darwin `libc`, Windows `windows-sys`, and random staging-name
+  dependencies are no longer needed and were removed.
+
+Successful output still has the exact six sorted paths and bytes from Task 4;
+the incomplete index is overwritten in place and adds no success-only file to
+the envelope or tree. Existing destination and symlink collision behavior is
+unchanged.
+
+### Why Unix cannot retain atomic directory publication here
+
+`mkdir`/`mkdirat` return only a status code, not the created directory object.
+`renameat`/`renameat2` and Darwin's `renameatx_np` accept parent descriptors but
+still require a source pathname. POSIX prohibits hard-linking directories, so
+the regular-file technique of linking a held inode into a create-only final
+name is unavailable. Without privileged mount operations, the portable APIs in
+scope provide neither create-and-return-handle nor rename-directory-by-handle.
+
+The residual same-UID boundary is explicit: an empty directory replacement in
+the `mkdir`-to-open interval is indistinguishable from the just-created empty
+directory. Such an empty replacement contains no foreign bytes to publish;
+all subsequent writes are create-only, exact contents are checked, and the
+exporter never removes it. A non-empty or symlink replacement is rejected by
+the deterministic tests. Continuous same-UID mutation after the final check is
+likewise outside any filesystem protocol available here.
+
+### Round 2 verification
+
+- `rtk cargo test -p telos view::export -- --nocapture` — 7 passed.
+- `rtk cargo test -p telos --test view_export -- --nocapture` — 7 passed.
+- `rtk rustfmt --edition 2024 --check crates/telos/src/view/export.rs` — exit 0.
+- `rtk cargo clippy -p telos --bin telos --tests -- -D warnings` — exit 0.
+- `rtk git diff --check` — exit 0.
+- Windows and Darwin target checks were attempted but both sysroots are absent
+  from the image (`can't find crate for core/std`). The exporter now contains
+  no OS-specific code or FFI; it uses the same `cap_std` calls on all targets.

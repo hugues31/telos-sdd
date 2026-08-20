@@ -192,3 +192,51 @@ identité d'inode réutilisable, et marqueur pouvant être forgé byte pour byte
 par un acteur qui contrôle déjà le dépôt. Deux contenus byte-identiques sont
 nécessairement indistinguables; ces cas sortent du modèle non-adversarial du
 seal.
+
+## Review fix round 3
+
+Le marker n'est plus seulement relu à la fin d'une phase. Deux transitions
+CAS persistées précèdent désormais les publications qu'elles autorisent:
+`preparing -> core_writing` avant le premier répertoire/fichier cœur, puis
+`sealed -> integrating` avant le premier artefact agent/CI. Les deux phases
+intermédiaires sont reprises directement après un crash; une invocation qui
+n'a pas elle-même effectué la transition ne peut pas considérer la phase
+désirée déjà présente comme un no-op.
+
+Chaque frontière exige un marker final régulier, ouvert nofollow, portant les
+octets exacts — phase incluse — lus au préflight. Le CAS stage les nouveaux
+octets dans un sibling complet puis recompare strictement les anciens octets
+avant le rename. `core_writing` est encore revalidé immédiatement avant le
+premier syscall de création cœur; `integrating` est revalidé avant agents,
+entre agents et CI, puis avant le cleanup.
+
+Les RED injectent, au moyen des hooks de frontière, trois mutations du marker
+après le préflight: octets étrangers, avance vers l'exacte phase suivante, et
+remplacement du fichier par un répertoire. Ils couvrent séparément un marker
+`preparing` juste avant la première écriture cœur et un marker `sealed` juste
+avant les intégrations. Le snapshot non-Git pris par le mutateur reste
+byte-identique après le refus: aucun nouvel artefact cœur/agent/CI n'apparaît,
+et le marker ou owner étranger reste en place. Le RED initial était l'absence
+de la frontière testable (`no run_with_boundary_hooks`); les deux tests sont
+ensuite passés GREEN pour les six interleavings.
+
+Vérification ciblée du round:
+
+```text
+rtk cargo test -p telos --bin telos commands::init::tests
+# 9 passed
+rtk cargo test -p telos --test agent_init
+# 39 passed
+rtk cargo test -p telos --test init_ci
+# 16 passed
+rtk cargo test -p telos --test cli_m1
+# 14 passed
+rtk cargo clippy --workspace --all-targets -- -D warnings
+# no issues
+```
+
+Le `rustfmt --check` ciblé et `git diff --check` sont verts. La limite
+adversariale est réduite à l'intervalle syscall non supprimable entre la
+dernière comparaison du marker et le rename/création suivant; une transaction
+globale multi-fichier reste non portable. Un acteur capable de forger le
+marker et tous les snapshots exacts reste hors du modèle de menace du seal.

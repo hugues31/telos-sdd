@@ -66,8 +66,13 @@ struct InitMarker {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 enum InitPhase {
+    // Boundary phases are persisted before their corresponding publications.
+    // A crash after either CAS therefore resumes the advanced phase instead
+    // of trusting bytes cached from the preceding preflight.
     Preparing,
+    CoreWriting,
     Sealed { lock: Vec<u8> },
+    Integrating { lock: Vec<u8> },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -107,12 +112,38 @@ fn run_with_hooks<F, H>(
     ctx: &Ctx,
     hosts: &[AgentHost],
     ci: Option<CiProvider>,
-    mut after_core_publish: H,
+    after_core_publish: H,
     render_agents: F,
 ) -> CmdResult
 where
     F: FnOnce(&agents::InstallPlan) -> Result<(), TelosError>,
     H: FnMut(&Path) -> std::io::Result<()>,
+{
+    run_with_boundary_hooks(
+        ctx,
+        hosts,
+        ci,
+        || Ok(()),
+        after_core_publish,
+        || Ok(()),
+        render_agents,
+    )
+}
+
+fn run_with_boundary_hooks<F, B, H, I>(
+    ctx: &Ctx,
+    hosts: &[AgentHost],
+    ci: Option<CiProvider>,
+    before_core_boundary: B,
+    mut after_core_publish: H,
+    before_integration_boundary: I,
+    render_agents: F,
+) -> CmdResult
+where
+    F: FnOnce(&agents::InstallPlan) -> Result<(), TelosError>,
+    B: FnOnce() -> std::io::Result<()>,
+    H: FnMut(&Path) -> std::io::Result<()>,
+    I: FnOnce() -> std::io::Result<()>,
 {
     let git = GitRepo::discover(&ctx.cwd)?;
     let root = git.root().to_path_buf();
@@ -187,28 +218,42 @@ where
             .map_err(|error| marker_error("create", error))?;
     }
 
-    let sealed_marker_bytes = match &marker.phase {
-        InitPhase::Preparing => finish_core(
+    let (core_marker, core_marker_bytes) = match marker.phase {
+        InitPhase::Preparing | InitPhase::CoreWriting => {
+            enter_core_boundary(&safe_root, &marker, &marker_bytes, before_core_boundary)?
+        }
+        InitPhase::Sealed { .. } | InitPhase::Integrating { .. } => (marker, marker_bytes),
+    };
+    let sealed_marker_bytes = match &core_marker.phase {
+        InitPhase::CoreWriting => finish_core(
             &safe_root,
             &root,
             &git,
-            &marker,
-            &marker_bytes,
+            &core_marker,
+            &core_marker_bytes,
             &mut after_core_publish,
         )?,
-        InitPhase::Sealed { .. } => marker_bytes,
+        InitPhase::Sealed { .. } | InitPhase::Integrating { .. } => core_marker_bytes,
+        InitPhase::Preparing => unreachable!("the core boundary advances the marker phase"),
     };
 
-    // Preflight can take arbitrary time. Recheck the authenticated core at
-    // the publication boundary, then once more before consuming the marker.
     let sealed_marker: InitMarker = serde_json::from_slice(&sealed_marker_bytes)
         .expect("Telos serialized this marker immediately above");
     validate_resume_core(&safe_root, &root, &git, &sealed_marker)?;
+    let (integrating_marker, integrating_marker_bytes) = enter_integration_boundary(
+        &safe_root,
+        &sealed_marker,
+        &sealed_marker_bytes,
+        before_integration_boundary,
+    )?;
+    validate_marker_exact(&safe_root, &integrating_marker_bytes)?;
     render_agents(&agent_plan)?;
+    validate_marker_exact(&safe_root, &integrating_marker_bytes)?;
     ci::render(&ci_plan)?;
-    validate_resume_core(&safe_root, &root, &git, &sealed_marker)?;
+    validate_resume_core(&safe_root, &root, &git, &integrating_marker)?;
+    validate_marker_exact(&safe_root, &integrating_marker_bytes)?;
     safe_root
-        .remove_file_if_matches(Path::new(INIT_MARKER_PATH), &sealed_marker_bytes)
+        .remove_file_if_matches(Path::new(INIT_MARKER_PATH), &integrating_marker_bytes)
         .map_err(|error| marker_error("remove", error))?;
 
     Ok(Outcome {
@@ -257,6 +302,78 @@ impl CorePlan {
     }
 }
 
+fn enter_core_boundary<B>(
+    safe_root: &SafeRoot,
+    marker: &InitMarker,
+    marker_on_disk: &[u8],
+    before_boundary: B,
+) -> Result<(InitMarker, Vec<u8>), TelosError>
+where
+    B: FnOnce() -> std::io::Result<()>,
+{
+    before_boundary()
+        .map_err(|error| io_error("enter core publication", Path::new(INIT_MARKER_PATH), error))?;
+    match marker.phase {
+        InitPhase::Preparing => {
+            let mut writing = marker.clone();
+            writing.phase = InitPhase::CoreWriting;
+            let writing_bytes = marker_bytes(&writing);
+            replace_exact_file(safe_root, INIT_MARKER_PATH, marker_on_disk, &writing_bytes)?;
+            Ok((writing, writing_bytes))
+        }
+        InitPhase::CoreWriting => {
+            validate_marker_exact(safe_root, marker_on_disk)?;
+            Ok((marker.clone(), marker_on_disk.to_vec()))
+        }
+        InitPhase::Sealed { .. } | InitPhase::Integrating { .. } => {
+            unreachable!("a sealed marker does not enter core publication")
+        }
+    }
+}
+
+/// Advances the marker before any integration final name can be published.
+/// `replace_exact_file` is deliberately strict: finding the desired next
+/// phase already present is still a stale-marker error, not an idempotent
+/// no-op, because this invocation did not perform that transition.
+fn enter_integration_boundary<I>(
+    safe_root: &SafeRoot,
+    marker: &InitMarker,
+    marker_on_disk: &[u8],
+    before_boundary: I,
+) -> Result<(InitMarker, Vec<u8>), TelosError>
+where
+    I: FnOnce() -> std::io::Result<()>,
+{
+    before_boundary().map_err(|error| {
+        io_error(
+            "enter integration publication",
+            Path::new(INIT_MARKER_PATH),
+            error,
+        )
+    })?;
+    match &marker.phase {
+        InitPhase::Sealed { lock } => {
+            let mut integrating = marker.clone();
+            integrating.phase = InitPhase::Integrating { lock: lock.clone() };
+            let integrating_bytes = marker_bytes(&integrating);
+            replace_exact_file(
+                safe_root,
+                INIT_MARKER_PATH,
+                marker_on_disk,
+                &integrating_bytes,
+            )?;
+            Ok((integrating, integrating_bytes))
+        }
+        InitPhase::Integrating { .. } => {
+            validate_marker_exact(safe_root, marker_on_disk)?;
+            Ok((marker.clone(), marker_on_disk.to_vec()))
+        }
+        InitPhase::Preparing | InitPhase::CoreWriting => {
+            unreachable!("an unsealed marker does not enter integration publication")
+        }
+    }
+}
+
 fn finish_core<H>(
     safe_root: &SafeRoot,
     root: &Path,
@@ -269,6 +386,7 @@ where
     H: FnMut(&Path) -> std::io::Result<()>,
 {
     validate_preparing_core(safe_root, root, git, &marker.core)?;
+    validate_marker_exact(safe_root, preparing_marker_bytes)?;
     create_required_directories(safe_root)?;
 
     for (relative, plan) in core_files(&marker.core) {
@@ -310,8 +428,10 @@ fn validate_resume_core(
     marker: &InitMarker,
 ) -> Result<(), TelosError> {
     match &marker.phase {
-        InitPhase::Preparing => validate_preparing_core(safe_root, root, git, &marker.core),
-        InitPhase::Sealed { lock } => {
+        InitPhase::Preparing | InitPhase::CoreWriting => {
+            validate_preparing_core(safe_root, root, git, &marker.core)
+        }
+        InitPhase::Sealed { lock } | InitPhase::Integrating { lock } => {
             validate_directory_shapes(safe_root, true)?;
             validate_deterministic_core_exact(safe_root, &marker.core)?;
             validate_core_file_exact(safe_root, LOCK_PATH, lock)?;
@@ -415,15 +535,36 @@ fn replace_exact_file(
     expected: &[u8],
     desired: &[u8],
 ) -> Result<(), TelosError> {
-    publish_core_file(
-        safe_root,
-        relative,
-        &CoreFile {
-            initial: Some(expected.to_vec()),
-            desired: desired.to_vec(),
-        },
-    )?;
+    if read_core(safe_root, relative)?.as_deref() != Some(expected) {
+        return Err(core_changed(Path::new(relative)));
+    }
+    let staged = safe_root
+        .stage_with(Path::new(relative), desired, |file, bytes| {
+            file.write_all(bytes)
+        })
+        .map_err(|error| core_write_error("stage", relative, error))?;
+    if staged
+        .read_target()
+        .map_err(|_| core_changed(Path::new(relative)))?
+        .as_deref()
+        != Some(expected)
+    {
+        return Err(core_changed(Path::new(relative)));
+    }
+    staged
+        .validate_parent_path(safe_root)
+        .map_err(|_| core_changed(Path::new(relative)))?;
+    staged
+        .publish_replace()
+        .map_err(|error| core_write_error("publish", relative, error))?;
     Ok(())
+}
+
+fn validate_marker_exact(safe_root: &SafeRoot, expected: &[u8]) -> Result<(), TelosError> {
+    match safe_root.read_optional(Path::new(INIT_MARKER_PATH)) {
+        Ok(Some(actual)) if actual == expected => Ok(()),
+        Ok(_) | Err(_) => Err(marker_collision()),
+    }
 }
 
 fn validate_core_file_exact(
@@ -673,6 +814,7 @@ fn first_error(diagnostics: Vec<Diagnostic>) -> TelosError {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::fs;
     use std::io;
@@ -681,7 +823,10 @@ mod tests {
 
     use telos_core::error::ErrorCode;
 
-    use super::{INIT_MARKER_PATH, LOCK_PATH, run, run_with_agent_renderer, run_with_hooks};
+    use super::{
+        INIT_MARKER_PATH, InitMarker, InitPhase, LOCK_PATH, marker_bytes, run,
+        run_with_agent_renderer, run_with_boundary_hooks, run_with_hooks,
+    };
     use crate::ci::CiProvider;
     use crate::commands::Ctx;
     use crate::commands::agents::{self, AgentHost};
@@ -856,6 +1001,106 @@ mod tests {
     }
 
     #[test]
+    fn marker_mutation_at_core_boundary_prevents_every_core_publication() {
+        for mutation in MarkerMutation::ALL {
+            let tmp = repo();
+            let ctx = Ctx {
+                cwd: tmp.path().to_path_buf(),
+            };
+            let after_mutation = RefCell::new(None);
+
+            let result = run_with_boundary_hooks(
+                &ctx,
+                &[AgentHost::Codex],
+                Some(CiProvider::Github),
+                || {
+                    mutation.apply(tmp.path());
+                    after_mutation.replace(Some(non_git_tree(tmp.path())));
+                    Ok(())
+                },
+                |_| Ok(()),
+                || Ok(()),
+                agents::render,
+            );
+
+            assert_eq!(
+                error_code(result),
+                ErrorCode::TelosChangeStateInvalid,
+                "{mutation:?}"
+            );
+            assert_eq!(
+                non_git_tree(tmp.path()),
+                after_mutation.into_inner().unwrap(),
+                "{mutation:?}"
+            );
+            assert!(!tmp.path().join("telos").exists(), "{mutation:?}");
+            assert!(!tmp.path().join(".agents").exists(), "{mutation:?}");
+            assert!(marker_path(tmp.path()).exists(), "{mutation:?}");
+        }
+    }
+
+    #[test]
+    fn marker_mutation_at_integration_boundary_prevents_every_new_integration() {
+        for mutation in MarkerMutation::ALL {
+            let tmp = repo();
+            let ctx = Ctx {
+                cwd: tmp.path().to_path_buf(),
+            };
+            let stopped_at_sealed = run_with_boundary_hooks(
+                &ctx,
+                &[AgentHost::Codex],
+                Some(CiProvider::Github),
+                || Ok(()),
+                |_| Ok(()),
+                || Err(io::Error::other("stop before integration transition")),
+                agents::render,
+            );
+            assert_eq!(error_code(stopped_at_sealed), ErrorCode::TelosInternal);
+            let marker_before: InitMarker =
+                serde_json::from_slice(&fs::read(marker_path(tmp.path())).unwrap()).unwrap();
+            assert!(matches!(marker_before.phase, InitPhase::Sealed { .. }));
+            assert!(!tmp.path().join(".agents").exists());
+            let after_mutation = RefCell::new(None);
+
+            let result = run_with_boundary_hooks(
+                &ctx,
+                &[AgentHost::Codex],
+                Some(CiProvider::Github),
+                || Ok(()),
+                |_| Ok(()),
+                || {
+                    mutation.apply(tmp.path());
+                    after_mutation.replace(Some(non_git_tree(tmp.path())));
+                    Ok(())
+                },
+                agents::render,
+            );
+
+            assert_eq!(
+                error_code(result),
+                ErrorCode::TelosChangeStateInvalid,
+                "{mutation:?}"
+            );
+            assert_eq!(
+                non_git_tree(tmp.path()),
+                after_mutation.into_inner().unwrap(),
+                "{mutation:?}"
+            );
+            assert!(
+                !tmp.path()
+                    .join(".agents/skills/telos-implementer/SKILL.md")
+                    .exists(),
+                "{mutation:?}"
+            );
+            assert!(
+                !tmp.path().join(".github/workflows/telos.yml").exists(),
+                "{mutation:?}"
+            );
+            assert!(marker_path(tmp.path()).exists(), "{mutation:?}");
+        }
+    }
+
+    #[test]
     fn a_foreign_init_marker_never_authorizes_project_writes() {
         let tmp = repo();
         let ctx = Ctx {
@@ -965,6 +1210,44 @@ mod tests {
         Directory,
         File(Vec<u8>),
         Symlink(PathBuf),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MarkerMutation {
+        Bytes,
+        Phase,
+        Directory,
+    }
+
+    impl MarkerMutation {
+        const ALL: [Self; 3] = [Self::Bytes, Self::Phase, Self::Directory];
+
+        fn apply(self, root: &Path) {
+            let marker = marker_path(root);
+            match self {
+                Self::Bytes => fs::write(marker, b"foreign marker owner\n").unwrap(),
+                Self::Phase => {
+                    let mut parsed: InitMarker =
+                        serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+                    parsed.phase = match parsed.phase {
+                        InitPhase::Preparing => InitPhase::CoreWriting,
+                        InitPhase::Sealed { lock } => InitPhase::Integrating { lock },
+                        InitPhase::CoreWriting | InitPhase::Integrating { .. } => {
+                            unreachable!("boundary tests begin in preparing or sealed")
+                        }
+                    };
+                    fs::write(marker, marker_bytes(&parsed)).unwrap();
+                }
+                Self::Directory => {
+                    fs::remove_file(&marker).unwrap();
+                    fs::create_dir(marker).unwrap();
+                }
+            }
+        }
+    }
+
+    fn marker_path(root: &Path) -> PathBuf {
+        root.join(INIT_MARKER_PATH)
     }
 
     fn non_git_tree(root: &Path) -> BTreeMap<PathBuf, TreeEntry> {

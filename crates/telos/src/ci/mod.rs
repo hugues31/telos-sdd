@@ -13,18 +13,25 @@ pub enum CiProvider {
     Github,
 }
 
-/// Validates every requested CI integration before init writes anything.
-pub fn preflight(root: &Path, provider: Option<CiProvider>) -> Result<(), TelosError> {
+/// Every requested CI integration, fully planned before init writes anything.
+pub enum InstallPlan {
+    None,
+    Github(github::InstallPlan),
+}
+
+/// Reads and validates every requested CI integration before init writes
+/// anything.
+pub fn preflight(root: &Path, provider: Option<CiProvider>) -> Result<InstallPlan, TelosError> {
     match provider {
-        Some(CiProvider::Github) => github::preflight(root),
-        None => Ok(()),
+        Some(CiProvider::Github) => github::preflight(root).map(InstallPlan::Github),
+        None => Ok(InstallPlan::None),
     }
 }
 
 /// Installs every requested CI integration after Telos has been sealed.
-pub fn render(root: &Path, provider: Option<CiProvider>) -> Result<(), TelosError> {
-    match provider {
-        Some(CiProvider::Github) => github::render(root),
-        None => Ok(()),
+pub fn render(plan: &InstallPlan) -> Result<(), TelosError> {
+    match plan {
+        InstallPlan::None => Ok(()),
+        InstallPlan::Github(plan) => plan.render(),
     }
 }

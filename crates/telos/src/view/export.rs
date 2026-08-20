@@ -72,7 +72,7 @@ where
         refuse_existing(destination)?;
         before_publish()
             .map_err(|error| io_error("prepare publication for", destination, error))?;
-        publish_no_replace(&staging, destination)?;
+        publish_no_replace(&staging, destination, existing_destination)?;
         Ok(rendered.into_iter().map(|(path, _)| path).collect())
     })();
 
@@ -148,7 +148,11 @@ fn existing_destination(destination: &Path) -> TelosError {
 /// Platforms without an equivalent primitive fail closed rather than falling
 /// back to a replacement-capable rename.
 #[cfg(target_os = "linux")]
-fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosError> {
+pub(crate) fn publish_no_replace(
+    staging: &Path,
+    destination: &Path,
+    existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -189,7 +193,7 @@ fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosErr
 
     let error = io::Error::last_os_error();
     if error.kind() == io::ErrorKind::AlreadyExists {
-        return Err(existing_destination(destination));
+        return Err(existing(destination));
     }
     Err(io_error("publish", destination, error))
 }
@@ -197,7 +201,11 @@ fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosErr
 /// Darwin's `renamex_np(RENAME_EXCL)` has the same no-replacement guarantee
 /// as Linux's `renameat2(RENAME_NOREPLACE)`.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosError> {
+pub(crate) fn publish_no_replace(
+    staging: &Path,
+    destination: &Path,
+    existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -230,7 +238,7 @@ fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosErr
 
     let error = io::Error::last_os_error();
     if error.kind() == io::ErrorKind::AlreadyExists {
-        return Err(existing_destination(destination));
+        return Err(existing(destination));
     }
     Err(io_error("publish", destination, error))
 }
@@ -238,7 +246,11 @@ fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosErr
 /// Windows' `MoveFileW` has no replacement flag: it fails when the target
 /// exists, so the staging directory cannot overwrite a concurrent owner.
 #[cfg(windows)]
-fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosError> {
+pub(crate) fn publish_no_replace(
+    staging: &Path,
+    destination: &Path,
+    existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, GetLastError};
     use windows_sys::Win32::Storage::FileSystem::MoveFileW;
 
@@ -256,7 +268,7 @@ fn publish_no_replace(staging: &Path, destination: &Path) -> Result<(), TelosErr
     // value identifies that call's failure.
     let error = unsafe { GetLastError() };
     if error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS {
-        return Err(existing_destination(destination));
+        return Err(existing(destination));
     }
     Err(io_error(
         "publish",
@@ -289,7 +301,11 @@ fn nul_terminated_wide(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios", windows)))]
-fn publish_no_replace(_staging: &Path, destination: &Path) -> Result<(), TelosError> {
+pub(crate) fn publish_no_replace(
+    _staging: &Path,
+    destination: &Path,
+    _existing: fn(&Path) -> TelosError,
+) -> Result<(), TelosError> {
     Err(TelosError::new(
         ErrorCode::TelosInternal,
         format!(

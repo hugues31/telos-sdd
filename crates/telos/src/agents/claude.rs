@@ -1,23 +1,25 @@
 use std::path::Path;
 
 use super::assets::SKILLS;
-use super::{merge_command_hook, read_optional_object, write_json, write_text};
+use super::{PlannedWrite, merge_command_hook, planned_json, planned_text, read_optional_object};
 use telos_core::error::TelosError;
 
-pub fn render(root: &Path) -> Result<(), TelosError> {
+pub fn plan(root: &Path) -> Result<Vec<PlannedWrite>, TelosError> {
+    let mut writes = Vec::new();
     for (name, content) in SKILLS {
-        write_text(
-            &root.join(format!(".claude/skills/{name}/SKILL.md")),
-            content,
-        )?;
+        writes.push(planned_text(
+            root,
+            &format!(".claude/skills/{name}/SKILL.md"),
+            content.to_string(),
+        )?);
     }
 
-    let path = root.join(".claude/settings.json");
-    let mut settings = read_optional_object(&path)?;
+    let mut settings = read_optional_object(&root.join(".claude/settings.json"))?;
     merge_command_hook(
         &mut settings,
         super::matcher(super::AgentHost::Claude),
         super::guard_command(super::AgentHost::Claude),
     )?;
-    write_json(&path, &settings)
+    writes.push(planned_json(root, ".claude/settings.json", &settings)?);
+    Ok(writes)
 }

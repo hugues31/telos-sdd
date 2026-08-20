@@ -55,8 +55,8 @@ pub fn run(ctx: &Ctx, hosts: &[AgentHost], ci: Option<CiProvider>) -> CmdResult 
     // Host JSON is the only user-owned input init has to merge. Parse every
     // requested file before the first project write so malformed config can
     // never leave a partial Telos tree behind.
-    agents::preflight(&root, hosts)?;
-    ci::preflight(&root, ci)?;
+    let agent_plan = agents::preflight(&root, hosts)?;
+    let ci_plan = ci::preflight(&root, ci)?;
 
     for subdir in SUBDIRS {
         let path = telos_dir.join(subdir);
@@ -93,8 +93,8 @@ pub fn run(ctx: &Ctx, hosts: &[AgentHost], ci: Option<CiProvider>) -> CmdResult 
     let model = ws.load_model().map_err(first_error)?;
     let lock = seal(&ws, &model, &git, None)?;
     lock.write(&ws.lock_path())?;
-    agents::render(&root, hosts)?;
-    ci::render(&root, ci)?;
+    agents::render(&agent_plan)?;
+    ci::render(&ci_plan)?;
 
     Ok(Outcome {
         result: json!({ "root": "telos", "sealed": true }),

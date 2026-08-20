@@ -2,8 +2,8 @@ use std::path::Path;
 
 use super::assets::SKILLS;
 use super::{
-    merge_command_hook, merge_owned_block, read_optional_object, read_optional_text, write_json,
-    write_text,
+    PlannedWrite, merge_command_hook, merge_owned_block, planned_json, planned_text,
+    read_optional_object, read_optional_text,
 };
 use telos_core::error::TelosError;
 
@@ -40,20 +40,23 @@ prefix_rule(
 )
 # telos-sdd:end"#;
 
-pub fn render(root: &Path) -> Result<(), TelosError> {
+pub fn plan(root: &Path) -> Result<Vec<PlannedWrite>, TelosError> {
+    let mut writes = Vec::new();
     for (name, content) in SKILLS {
-        write_text(
-            &root.join(format!(".agents/skills/{name}/SKILL.md")),
-            content,
-        )?;
+        writes.push(planned_text(
+            root,
+            &format!(".agents/skills/{name}/SKILL.md"),
+            content.to_string(),
+        )?);
     }
 
     let agents_path = root.join("AGENTS.md");
     let agents = read_optional_text(&agents_path)?;
-    write_text(
-        &agents_path,
-        &merge_owned_block(&agents, START, END, AGENTS_BLOCK),
-    )?;
+    writes.push(planned_text(
+        root,
+        "AGENTS.md",
+        merge_owned_block(&agents, START, END, AGENTS_BLOCK),
+    )?);
 
     let hooks_path = root.join(".codex/hooks.json");
     let mut hooks = read_optional_object(&hooks_path)?;
@@ -62,10 +65,11 @@ pub fn render(root: &Path) -> Result<(), TelosError> {
         super::matcher(super::AgentHost::Codex),
         super::guard_command(super::AgentHost::Codex),
     )?;
-    write_json(&hooks_path, &hooks)?;
+    writes.push(planned_json(root, ".codex/hooks.json", &hooks)?);
 
     let rules_path = root.join(".codex/rules/telos.rules");
     let rules = read_optional_text(&rules_path)?;
     let merged = merge_owned_block(&rules, "# telos-sdd:start", "# telos-sdd:end", RULES_BLOCK);
-    write_text(&rules_path, &merged)
+    writes.push(planned_text(root, ".codex/rules/telos.rules", merged)?);
+    Ok(writes)
 }

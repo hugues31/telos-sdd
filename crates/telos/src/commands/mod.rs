@@ -25,7 +25,7 @@ use telos_core::graph::NodeRef;
 use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
 use telos_core::lock::Lock;
 use telos_core::model::{Change, TelosModel};
-use telos_core::state::{ProjectStateKind, StateReport, compute_state};
+use telos_core::state::{DRIFT_HINT, ProjectStateKind, StateReport, compute_state};
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
 
@@ -68,6 +68,11 @@ fn require_lock(ws: &Workspace) -> Result<Lock, TelosError> {
 pub(crate) struct Project {
     pub ws: Workspace,
     pub lock: Lock,
+    /// The repository the workspace lives in, kept rather than dropped
+    /// because `change reconcile` (T10) needs it to re-hash the tree it is
+    /// about to seal -- and re-discovering it there would be a second,
+    /// independent answer to "which repository is this".
+    pub git: GitRepo,
     /// Every open change, best-effort per D15 -- an unparseable change file
     /// is reported here, never an error. Kept alongside the state it was
     /// computed from because it carries what the state does not: each
@@ -93,6 +98,7 @@ pub(crate) fn project(ctx: &Ctx) -> Result<Project, TelosError> {
     Ok(Project {
         ws,
         lock,
+        git,
         changes,
         state,
     })
@@ -132,11 +138,6 @@ pub(crate) fn allocator(ws: &Workspace, lock: &Lock) -> Result<Alloc, TelosError
 
     Ok(Alloc::new(read_counters(ws)?, floor))
 }
-
-/// The hint on every `TELOS_DRIFT_DETECTED`. Frozen by
-/// `docs/contracts.md` -- an M3 skill matches on this string -- so it is
-/// written once, next to the single gate that raises the code.
-const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
 
 /// D17's gate: refuses to go on while drift nobody claimed is on disk.
 ///

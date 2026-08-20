@@ -5,7 +5,7 @@ globs = ["src/**/*.rs"]
 globs = ["tests/**/*.rs"]
 
 [test]
-cmd = "cargo test {filter}"
+cmd = ""
 
 [policy]
 tdd = "strict"

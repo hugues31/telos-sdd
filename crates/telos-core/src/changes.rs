@@ -239,12 +239,14 @@ fn unknown_change(ws: &Workspace, id: ChangeId) -> TelosError {
 /// message is appended on its own line, so a human reading stderr still
 /// sees everything the parse found. Duplicated rather than shared for the
 /// same reason as [`unknown_change`]: `telos-core` cannot depend on the
-/// `telos` binary crate that owns the original.
-fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
+/// `telos` binary crate that owns the original. Shared inside the crate with
+/// [`crate::reconcile`], which collapses the overlay's diagnostics the same
+/// way.
+pub(crate) fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
     let mut iter = diagnostics.into_iter();
     let first = iter
         .next()
-        .expect("parse_change_file reports at least one diagnostic on `Err`");
+        .expect("a diagnostics `Err` always carries at least one diagnostic");
     let mut error: TelosError = first.into();
     for diagnostic in iter {
         let extra: TelosError = diagnostic.into();

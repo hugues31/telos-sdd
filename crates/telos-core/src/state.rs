@@ -21,6 +21,15 @@ use crate::lock::Lock;
 use crate::model::{Binding, IntentStatus, TelosModel};
 use crate::workspace::Workspace;
 
+/// The hint carried by every `TELOS_DRIFT_DETECTED`, frozen by
+/// `docs/contracts.md` -- an M3 skill matches on this string.
+///
+/// It lives next to the module that *computes* drift so that the two places
+/// that raise the code -- the CLI's D17 gate on the staging commands, and
+/// [`crate::reconcile::reconcile_change`]'s own first gate -- can never
+/// drift apart from one another.
+pub const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
+
 /// The project's overall state, per spec §6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

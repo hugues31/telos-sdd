@@ -85,11 +85,11 @@ pub fn add(ctx: &Ctx, kind: EntityKind, change: &str, payload: &str) -> CmdResul
         EntityKind::Notion => (StagedOp::AddNotion(notion_from_json(&payload)?), Vec::new()),
         EntityKind::Intent => {
             let notions = notions_of(&staging.base);
-            let (intent, ids) = intent_from_json(&payload, &notions, &mut staging.alloc)?;
+            let (intent, ids) = intent_from_json(&payload, &notions, staging.alloc()?)?;
             (StagedOp::AddIntent(intent), ids)
         }
         EntityKind::Constraint => (
-            StagedOp::AddConstraint(constraint_from_json(&payload, &mut staging.alloc)?),
+            StagedOp::AddConstraint(constraint_from_json(&payload, staging.alloc()?)?),
             Vec::new(),
         ),
     };
@@ -119,7 +119,7 @@ pub fn edit(ctx: &Ctx, kind: EntityKind, key: &str, change: &str, payload: &str)
             let id = parse_id::<IntentId>(key, "an intent id")?;
             let base = staging.intent(id)?.clone();
             let notions = notions_of(&staging.base);
-            let (intent, ids) = patch_intent(&base, &payload, &notions, &mut staging.alloc)?;
+            let (intent, ids) = patch_intent(&base, &payload, &notions, staging.alloc()?)?;
             (StagedOp::EditIntent(intent), ids)
         }
         EntityKind::Constraint => {
@@ -157,14 +157,16 @@ pub fn remove(ctx: &Ctx, kind: EntityKind, key: &str, change: &str) -> CmdResult
 // --- the shared flow --------------------------------------------------------
 
 /// Everything the three verbs share: the project, the change being staged
-/// into, the overlay that change already describes, and the allocator.
+/// into, the overlay that change already describes, and -- for the ops that
+/// need one -- the allocator.
 struct Staging {
     project: Project,
     change: Change,
     /// The sealed spec with `change`'s ops already applied -- what a new op
     /// is built and validated against.
     base: Vec<(RepoPath, TelFile)>,
-    alloc: Alloc,
+    /// Built on first use by [`Staging::alloc`], never eagerly -- see there.
+    alloc: Option<Alloc>,
 }
 
 impl Staging {
@@ -181,14 +183,31 @@ impl Staging {
         let change = read_change(&project.ws, id)?;
         let base = parse_base(&project.ws).map_err(diagnostics_to_error)?;
         let base = apply_ops(base, &change.ops)?;
-        let alloc = allocator(&project.ws, &project.lock)?;
 
         Ok(Staging {
             project,
             change,
             base,
-            alloc,
+            alloc: None,
         })
+    }
+
+    /// The id allocator, built on the first call and reused after.
+    ///
+    /// Lazy because [`allocator`] is a *gate*, not just a computation: it
+    /// calls `load_model` on the sealed tree, so it refuses whenever the
+    /// sealed spec does not resolve on its own -- which is stricter than
+    /// anything staging otherwise requires (the overlay only needs the base
+    /// to *parse*, and only the post-state to resolve). Only four of the
+    /// nine verb/kind combinations mint an id -- `add intent`,
+    /// `add constraint`, and the `edit intent` that grows a scenario --
+    /// so making the other five pay that gate would refuse, for instance,
+    /// the `remove` that was about to close the very hole the model has.
+    fn alloc(&mut self) -> Result<&mut Alloc, TelosError> {
+        if self.alloc.is_none() {
+            self.alloc = Some(allocator(&self.project.ws, &self.project.lock)?);
+        }
+        Ok(self.alloc.as_mut().expect("just built above"))
     }
 
     fn notion(&self, name: &NotionName) -> Result<&Notion, TelosError> {
@@ -239,7 +258,13 @@ impl Staging {
         validate_ops(&self.project.ws, &self.change.ops).map_err(diagnostics_to_error)?;
 
         write_change(&self.project.ws, &self.change)?;
-        write_counters(&self.project.ws, &self.alloc.counters())?;
+        // Only an op that minted an id has a counter to persist; the others
+        // never built an allocator, and re-persisting an unchanged
+        // `counters.toml` would be a write for nothing. Nothing is lost by
+        // skipping it: the next allocation rescans the floors anyway (D4).
+        if let Some(alloc) = &self.alloc {
+            write_counters(&self.project.ws, &alloc.counters())?;
+        }
 
         let id = self.change.id;
         let mut result = json!({ "change": id, "entity": entity, "id": key });

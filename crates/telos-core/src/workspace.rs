@@ -164,7 +164,12 @@ impl Workspace {
 
     /// Converts a repo-relative `'/'`-separated path into an absolute,
     /// OS-native path under `repo_root`.
-    fn abs_path(&self, repo_path: &RepoPath) -> PathBuf {
+    ///
+    /// Public because [`crate::reconcile`] writes the spec files a change's
+    /// ops name, and an op names its target as a [`RepoPath`] -- resolving
+    /// it anywhere else would be a second, independently-maintained answer
+    /// to "where does this path live on this OS".
+    pub fn abs_path(&self, repo_path: &RepoPath) -> PathBuf {
         let mut path = self.repo_root.clone();
         for component in repo_path.as_str().split('/') {
             path.push(component);

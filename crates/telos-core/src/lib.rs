@@ -14,6 +14,7 @@ pub mod lock;
 pub mod model;
 pub mod overlay;
 pub mod payload;
+pub mod reconcile;
 pub mod semantic;
 pub mod span;
 pub mod state;

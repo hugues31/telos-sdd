@@ -31,14 +31,27 @@ pub fn repo() -> TempDir {
 /// project.
 ///
 /// The seal goes through `telos_core` directly (discover, load, `seal`,
-/// write) rather than through a CLI command, because in M1 no command can
-/// seal an existing workspace -- only `init` seals, and `init` refuses a
-/// project that already has a `telos/telos.toml`. This helper disappears in
-/// M2, when `telos reconcile` can seal a workspace from the command line and
-/// the fixture can be built the way a user would build it.
+/// write) rather than through a CLI command, because no command can seal an
+/// existing workspace yet -- only `init` seals, and `init` refuses a project
+/// that already has a `telos/telos.toml`. This debt is paid in T11, when
+/// `telos change reconcile --full` can seal a preexisting spec tree from the
+/// command line (D14) and the fixture is built the way a user would build it.
 pub fn with_fixture() -> TempDir {
+    with_fixture_mut(|_| {})
+}
+
+/// [`with_fixture`], with `mutate` given the copied tree *before* it is
+/// sealed.
+///
+/// The order is the point: whatever `mutate` writes is part of what the seal
+/// records, so the fixture it hands back is coherent rather than drifted.
+/// That is what lets a test change `telos.toml`'s `[test] cmd` -- the corpus
+/// ships it empty (D13), so a reconcile there runs no test at all -- and
+/// still start from a `coherent` project.
+pub fn with_fixture_mut(mutate: impl FnOnce(&Path)) -> TempDir {
     let tmp = repo();
     copy_dir(&corpus_root(), tmp.path());
+    mutate(tmp.path());
 
     let ws = Workspace::discover(tmp.path()).expect("the corpus is an initialized workspace");
     let model = ws

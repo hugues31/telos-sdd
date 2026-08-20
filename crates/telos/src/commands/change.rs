@@ -1,7 +1,6 @@
-//! `telos change <open|list|abandon|diff|approve>`: the lifecycle of a
-//! staged transaction, minus `reconcile` (T10 -- absent from the enum below
-//! rather than stubbed, so `telos change reconcile` is a clap usage error
-//! today, not a command that answers with something meaningless).
+//! `telos change <open|list|abandon|diff|approve|reconcile>`: the whole
+//! lifecycle of a staged transaction, from the empty change to the seal that
+//! closes it.
 //!
 //! Two rules shape every function here:
 //!
@@ -24,6 +23,7 @@ use telos_core::error::{ErrorCode, TelosError};
 use telos_core::ids::ChangeId;
 use telos_core::model::{Change, ChangeStatus, StagedOp};
 use telos_core::overlay::{op_before_after, parse_base};
+use telos_core::reconcile::reconcile_change;
 use telos_core::workspace::Workspace;
 
 use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_no_unclaimed_drift};
@@ -55,6 +55,11 @@ pub enum ChangeCommand {
         /// The change to approve (`CHG-0001`).
         id: String,
     },
+    /// Apply an approved change: write its spec files, reseal, close it.
+    Reconcile {
+        /// The change to reconcile (`CHG-0001`).
+        id: String,
+    },
 }
 
 pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
@@ -64,6 +69,7 @@ pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
         ChangeCommand::Abandon { id } => abandon(ctx, id),
         ChangeCommand::Diff { id } => diff(ctx, id),
         ChangeCommand::Approve { id } => approve(ctx, id),
+        ChangeCommand::Reconcile { id } => reconcile(ctx, id),
     }
 }
 
@@ -310,6 +316,50 @@ fn approve(ctx: &Ctx, id: &str) -> CmdResult {
         result: json!({ "id": change.id, "digest": digest, "status": ChangeStatus::Approved.as_str() }),
         human: format!("{id}: approved, digest {digest}"),
         next_actions: vec![format!("telos change reconcile {id}")],
+    })
+}
+
+// --- change reconcile --------------------------------------------------------
+
+/// Applies an approved change: [`reconcile_change`] runs every gate and,
+/// only if all of them pass, writes the spec files, the new seal, and the
+/// change file's deletion (D6).
+///
+/// Deliberately *not* wrapped in [`require_no_unclaimed_drift`], unlike
+/// `open` and `approve`. The drift gate is the engine's own first gate here
+/// (D5): it admits the drift of the paths this very change claims -- which
+/// it is about to overwrite -- and names the offending paths when it
+/// refuses, which the shared CLI gate cannot do. Running both would only
+/// mean the same verdict reported twice, the less informative one first.
+///
+/// `--full` (D12) belongs to T11 and is absent rather than stubbed, so
+/// `result.full` is `false` today by construction, not by default.
+fn reconcile(ctx: &Ctx, id: &str) -> CmdResult {
+    let id = parse_change_id(id)?;
+    let project = project(ctx)?;
+    let change = read_change(&project.ws, id)?;
+
+    let outcome = reconcile_change(
+        &project.ws,
+        &project.git,
+        &project.lock,
+        &change,
+        &project.changes,
+    )?;
+
+    Ok(Outcome {
+        result: json!({
+            "id": id,
+            "full": false,
+            "ops_applied": outcome.ops_applied,
+            "checks_run": outcome.checks_run,
+            "tests_run": outcome.tests_run,
+        }),
+        human: format!(
+            "reconciled {id}: {} op(s) applied, {} check(s), {} test(s)",
+            outcome.ops_applied, outcome.checks_run, outcome.tests_run
+        ),
+        next_actions: vec!["telos status".to_string()],
     })
 }
 

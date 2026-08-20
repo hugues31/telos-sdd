@@ -133,61 +133,78 @@ pub fn apply_ops(
 /// Applies one op in place. On `Err` the vector is left in whatever state
 /// the failing op reached, which no caller can observe: [`apply_ops`] owns
 /// it and drops it.
+///
+/// The dispatch is over the variants themselves rather than over
+/// [`StagedOp::verb`]'s word, so the post-state an `add`/`edit` writes comes
+/// out of the match arm that knows it exists -- no `expect` reconstructing
+/// what the verb already implied -- and a new variant is a compile error
+/// here rather than a silent fall into the `remove` arm.
 fn apply_one(base: &mut Vec<(RepoPath, TelFile)>, op: &StagedOp) -> Result<(), TelosError> {
-    if let StagedOp::Accept { .. } = op {
-        return Ok(());
-    }
+    match op {
+        // Inert: an `accept` seals the current bytes of a path the model
+        // holds no entity for -- a reconcile-time concern, not an overlay
+        // one.
+        StagedOp::Accept { .. } => Ok(()),
 
-    let path = op.target_path();
-    let slot = base.iter().position(|(p, _)| *p == path);
+        StagedOp::AddNotion(n) => add(base, op, TelFile::Notion(n.clone())),
+        StagedOp::AddIntent(i) => add(base, op, TelFile::Intent(i.clone())),
+        StagedOp::AddConstraint(c) => add(base, op, TelFile::Constraint(c.clone())),
 
-    match op.verb() {
-        "add" => {
-            if slot.is_some() {
-                return Err(TelosError::new(
-                    ErrorCode::TelosIntegrityViolation,
-                    format!("{} already exists", label(op)),
-                ));
-            }
-            base.push((path, post_state(op).expect("an `add` op carries an entity")));
-            base.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
-            Ok(())
-        }
-        "edit" => {
-            let Some(slot) = slot else {
-                return Err(unknown_entity(base, op.entity(), &op.key()));
-            };
-            base[slot].1 = post_state(op).expect("an `edit` op carries an entity");
-            Ok(())
-        }
-        _ => {
-            let Some(slot) = slot else {
-                return Err(unknown_entity(base, op.entity(), &op.key()));
-            };
-            let (_, removed) = base.remove(slot);
-            match first_referrer(base, &removed) {
-                Some(referrer) => Err(TelosError::new(
-                    ErrorCode::TelosIntegrityViolation,
-                    format!("cannot remove {}: {referrer}", label(op)),
-                )),
-                None => Ok(()),
-            }
+        StagedOp::EditNotion(n) => edit(base, op, TelFile::Notion(n.clone())),
+        StagedOp::EditIntent(i) => edit(base, op, TelFile::Intent(i.clone())),
+        StagedOp::EditConstraint(c) => edit(base, op, TelFile::Constraint(c.clone())),
+
+        StagedOp::RemoveNotion(_) | StagedOp::RemoveIntent(_) | StagedOp::RemoveConstraint(_) => {
+            remove(base, op)
         }
     }
 }
 
-/// The file an `add`/`edit` op writes; `None` for the ops that write none.
-fn post_state(op: &StagedOp) -> Option<TelFile> {
-    match op {
-        StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => Some(TelFile::Notion(n.clone())),
-        StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => Some(TelFile::Intent(i.clone())),
-        StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => {
-            Some(TelFile::Constraint(c.clone()))
+/// Inserts `file` at `op`'s target path, refusing if the base already holds
+/// something there. The base is kept sorted by path, as [`parse_base`]
+/// hands it over.
+fn add(
+    base: &mut Vec<(RepoPath, TelFile)>,
+    op: &StagedOp,
+    file: TelFile,
+) -> Result<(), TelosError> {
+    let path = op.target_path();
+    if base.iter().any(|(p, _)| *p == path) {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            format!("{} already exists", label(op)),
+        ));
+    }
+    base.push((path, file));
+    base.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+    Ok(())
+}
+
+/// Replaces what the base holds at `op`'s target path, refusing if it holds
+/// nothing there.
+fn edit(base: &mut [(RepoPath, TelFile)], op: &StagedOp, file: TelFile) -> Result<(), TelosError> {
+    match base.iter().position(|(p, _)| *p == op.target_path()) {
+        Some(slot) => {
+            base[slot].1 = file;
+            Ok(())
         }
-        StagedOp::RemoveNotion(_)
-        | StagedOp::RemoveIntent(_)
-        | StagedOp::RemoveConstraint(_)
-        | StagedOp::Accept { .. } => None,
+        None => Err(unknown_entity(base, op.entity(), &op.key())),
+    }
+}
+
+/// Drops what the base holds at `op`'s target path, then enforces rule 2 of
+/// §3.3 against the state the removal leaves behind.
+fn remove(base: &mut Vec<(RepoPath, TelFile)>, op: &StagedOp) -> Result<(), TelosError> {
+    let Some(slot) = base.iter().position(|(p, _)| *p == op.target_path()) else {
+        return Err(unknown_entity(base, op.entity(), &op.key()));
+    };
+    let (_, removed) = base.remove(slot);
+    match first_referrer(base, &removed) {
+        Some(referrer) => Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            format!("cannot remove {}: {referrer}", label(op)),
+        )),
+        None => Ok(()),
     }
 }
 

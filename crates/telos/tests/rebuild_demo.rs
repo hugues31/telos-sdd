@@ -19,179 +19,16 @@ const INT_0017: &str = "INT-0017";
 const INT_0042: &str = "INT-0042";
 const SCN_0091: &str = "SCN-0091";
 const SCN_0107: &str = "SCN-0107";
+const CARGO_LOCK: &str = "Cargo.lock";
+const CARGO_MANIFEST: &str = "Cargo.toml";
 const CODE: &str = "src/lib.rs";
 const ISSUED_TEST: &str = "tests/invoice_issued.rs";
 const ISSUED_FN: &str = "scn_0091_new_invoice_is_open";
 const PAYMENT_TEST: &str = "tests/payment_received.rs";
 const PAYMENT_FN: &str = "scn_0107_full_payment_settles_invoice";
-const ARCHITECTURE_TEST: &str = "architecture/hexagonal.rs";
-
-const ISSUED_TEST_SOURCE: &str = r#"use billing_rebuild::{Invoice, InvoiceState};
-
-#[test]
-fn scn_0091_new_invoice_is_open() {
-    let invoice = Invoice::issued_to("ACME", 12_000);
-    assert_eq!(invoice.state(), InvoiceState::Open);
-}
-"#;
-
-const PAYMENT_TEST_SOURCE: &str = r#"use billing_rebuild::{Invoice, InvoiceState};
-
-#[test]
-fn scn_0107_full_payment_settles_invoice() {
-    let mut invoice = Invoice::issued_to("ACME", 12_000);
-    invoice.receive_payment(12_000);
-    assert_eq!(invoice.state(), InvoiceState::Settled);
-}
-"#;
-
-const FIRST_IMPLEMENTATION: &str = r#"#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InvoiceState {
-    Open,
-    Settled,
-}
-
-pub mod adapters_v2 {
-    pub struct LedgerAdapterV2;
-}
-
-// Documentation only: `use crate::adapters::LedgerAdapter;` is forbidden.
-const FORBIDDEN_IMPORT_EXAMPLE: &str = "use crate::adapters::LedgerAdapter;";
-
-pub struct Invoice {
-    customer: String,
-    balance_cents: u64,
-    state: InvoiceState,
-}
-
-impl Invoice {
-    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
-        Self {
-            customer: customer.to_owned(),
-            balance_cents,
-            state: InvoiceState::Open,
-        }
-    }
-
-    pub fn state(&self) -> InvoiceState {
-        self.state
-    }
-
-    pub fn customer(&self) -> &str {
-        &self.customer
-    }
-
-    pub fn balance_cents(&self) -> u64 {
-        self.balance_cents
-    }
-
-    pub fn harmless_adapter_references(&self) -> (&'static str, &'static str) {
-        (
-            FORBIDDEN_IMPORT_EXAMPLE,
-            std::any::type_name::<adapters_v2::LedgerAdapterV2>(),
-        )
-    }
-}
-"#;
-
-const FINAL_IMPLEMENTATION: &str = r#"#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InvoiceState {
-    Open,
-    Settled,
-}
-
-pub struct Invoice {
-    customer: String,
-    balance_cents: u64,
-    state: InvoiceState,
-}
-
-impl Invoice {
-    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
-        Self {
-            customer: customer.to_owned(),
-            balance_cents,
-            state: InvoiceState::Open,
-        }
-    }
-
-    pub fn receive_payment(&mut self, amount_cents: u64) {
-        if amount_cents >= self.balance_cents {
-            self.balance_cents = 0;
-            self.state = InvoiceState::Settled;
-        }
-    }
-
-    pub fn state(&self) -> InvoiceState {
-        self.state
-    }
-
-    pub fn customer(&self) -> &str {
-        &self.customer
-    }
-
-    pub fn balance_cents(&self) -> u64 {
-        self.balance_cents
-    }
-}
-"#;
-
-const CONSTRAINT_VIOLATING_IMPLEMENTATION: &str = r#"pub mod adapters {
-    pub struct LedgerAdapter;
-    pub struct MailAdapter;
-}
-
-use crate :: adapters::LedgerAdapter;
-use crate::{adapters::MailAdapter};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InvoiceState {
-    Open,
-    Settled,
-}
-
-pub struct Invoice {
-    customer: String,
-    balance_cents: u64,
-    state: InvoiceState,
-}
-
-impl Invoice {
-    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
-        Self {
-            customer: customer.to_owned(),
-            balance_cents,
-            state: InvoiceState::Open,
-        }
-    }
-
-    pub fn receive_payment(&mut self, amount_cents: u64) {
-        if amount_cents >= self.balance_cents {
-            self.balance_cents = 0;
-            self.state = InvoiceState::Settled;
-        }
-    }
-
-    pub fn state(&self) -> InvoiceState {
-        self.state
-    }
-
-    pub fn customer(&self) -> &str {
-        &self.customer
-    }
-
-    pub fn balance_cents(&self) -> u64 {
-        self.balance_cents
-    }
-
-    pub fn adapter_type_names(&self) -> (&'static str, &'static str) {
-        (
-            std::any::type_name::<LedgerAdapter>(),
-            std::any::type_name::<MailAdapter>(),
-        )
-    }
-}
-"#;
+const CONSTRAINT: &str = "CON-0003";
+const CONSTRAINT_CHECK: &str =
+    "cargo test --test invoice_issued domain_does_not_import_adapter_modules -- --exact";
 
 #[derive(Debug, PartialEq)]
 struct Observations {
@@ -228,6 +65,11 @@ fn documented_heredoc(root: &Path, marker: &str, target: &str) -> String {
         .and_then(|body| body.strip_suffix("TELOS_EOF\n"))
         .unwrap_or_else(|| panic!("README `{marker}` is not an executable heredoc for `{target}`"))
         .to_owned()
+}
+
+fn documented_json(root: &Path, marker: &str) -> Value {
+    serde_json::from_str(&documented_block(root, marker, "json"))
+        .unwrap_or_else(|error| panic!("README `{marker}` is not valid JSON: {error}"))
 }
 
 fn copy_dir(src: &Path, dst: &Path) {
@@ -320,12 +162,16 @@ struct Batch<'a> {
     scenario: &'a str,
     test_path: &'a str,
     test_name: &'a str,
-    test_source: &'a str,
-    implementation: &'a str,
+    test_marker: &'a str,
+    implementation_marker: &'a str,
     expected_green: u64,
 }
 
-fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, Value, Value) {
+fn implement_batch(
+    root: &Path,
+    target_dir: &Path,
+    batch: Batch<'_>,
+) -> (Value, Value, Value, Value) {
     let opened = result(
         root,
         target_dir,
@@ -349,11 +195,7 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
             &change,
             "--json",
         ],
-        // `edit` is a patch API, while the staged op it emits is always the
-        // complete post-state. An empty patch is therefore the only honest
-        // way to claim the existing canonical bytes without reordering a
-        // scenario field map during JSON decoding.
-        &json!({}),
+        &documented_json(root, "intent-activation"),
     );
     assert_eq!(
         staged["claims"],
@@ -361,32 +203,115 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
     );
     assert_eq!(staged["scenario_ids"], json!([]));
 
+    if batch.intent == INT_0017 {
+        let staged_constraint = result_stdin(
+            root,
+            target_dir,
+            &[
+                "edit",
+                "constraint",
+                CONSTRAINT,
+                "--change",
+                &change,
+                "--json",
+            ],
+            &documented_json(root, "constraint-check-patch"),
+        );
+        assert_eq!(
+            staged_constraint["claims"],
+            json!([
+                format!("telos/constraints/{CONSTRAINT}.tel"),
+                format!("telos/intents/{}.tel", batch.intent)
+            ])
+        );
+        let staged_config = result_stdin(
+            root,
+            target_dir,
+            &["config", "--change", &change, "--json"],
+            &documented_json(root, "runner-config"),
+        );
+        assert_eq!(staged_config["change"], json!(change));
+        assert_eq!(staged_config["path"], json!("telos/telos.toml"));
+    }
+
     let diff = result(root, target_dir, &["change", "diff", &change, "--json"]);
     assert!(
         is_digest(&diff["digest"]),
         "non-empty operation digest: {diff:#}"
     );
-    assert_eq!(diff["ops"].as_array().unwrap().len(), 1);
-    assert_eq!(diff["ops"][0]["op"], json!("edit"));
-    assert_eq!(diff["ops"][0]["entity"], json!("intent"));
-    assert_eq!(diff["ops"][0]["key"], json!(batch.intent));
-    assert_eq!(
-        diff["ops"][0]["before"], diff["ops"][0]["after"],
-        "the ceremonial claim must be byte-equivalent"
+    let ops = diff["ops"].as_array().expect("diff ops");
+    assert_eq!(ops.len(), if batch.intent == INT_0017 { 3 } else { 1 });
+    let intent_op = ops
+        .iter()
+        .find(|op| op["entity"] == "intent" && op["key"] == batch.intent)
+        .expect("intent activation op");
+    assert_eq!(intent_op["op"], json!("edit"));
+    let before = intent_op["before"].as_str().expect("intent before");
+    let after = intent_op["after"].as_str().expect("intent after");
+    assert!(before.contains("  status draft\n"), "{before}");
+    assert!(!before.contains("  status active\n"), "{before}");
+    assert!(after.contains("  status active\n"), "{after}");
+    assert!(!after.contains("  status draft\n"), "{after}");
+    assert_ne!(
+        before, after,
+        "activation must be a real draft -> active delta"
     );
+
+    if batch.intent == INT_0017 {
+        let constraint_op = ops
+            .iter()
+            .find(|op| op["entity"] == "constraint" && op["key"] == CONSTRAINT)
+            .expect("constraint check op");
+        assert_eq!(constraint_op["op"], json!("edit"));
+        let before = constraint_op["before"].as_str().expect("constraint before");
+        let after = constraint_op["after"].as_str().expect("constraint after");
+        assert!(!before.contains("  check \""), "{before}");
+        assert!(
+            after.contains(&format!("  check \"{CONSTRAINT_CHECK}\"\n")),
+            "{after}"
+        );
+        assert_ne!(before, after, "the machine check must be staged");
+
+        let config_op = ops
+            .iter()
+            .find(|op| op["entity"] == "config")
+            .expect("test runner config op");
+        assert_eq!(config_op["op"], json!("edit"));
+        let before = config_op["before"].as_str().expect("config before");
+        let after = config_op["after"].as_str().expect("config after");
+        assert!(before.contains("cmd = \"\"\n"), "{before}");
+        assert!(after.contains("cmd = \"cargo test {filter}\"\n"), "{after}");
+    }
 
     let approved = result(root, target_dir, &["change", "approve", &change, "--json"]);
     assert_eq!(approved["digest"], diff["digest"]);
 
+    let progress_before = result(root, target_dir, &["rebuild", "status", "--json"]);
+    assert_eq!(
+        progress_before["scenarios_green"],
+        json!(batch.expected_green - 1)
+    );
+    assert_eq!(progress_before["scenarios_total"], json!(2));
+
     if batch.intent == INT_0017 {
         fs::write(
-            root.join("Cargo.toml"),
+            root.join(CARGO_MANIFEST),
             documented_heredoc(root, "application-manifest", "Cargo.toml"),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join(CODE),
+            documented_heredoc(root, "red-source", CODE),
         )
         .unwrap();
     }
     fs::create_dir_all(root.join("tests")).unwrap();
-    fs::write(root.join(batch.test_path), batch.test_source).unwrap();
+    fs::write(
+        root.join(batch.test_path),
+        documented_heredoc(root, batch.test_marker, batch.test_path),
+    )
+    .unwrap();
     let test_bytes = fs::read(root.join(batch.test_path)).unwrap();
 
     let red = result(root, target_dir, &["test", batch.scenario, "--json"]);
@@ -395,13 +320,26 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
         red["test"],
         json!(format!("{}::{}", batch.test_path, batch.test_name))
     );
+    if batch.intent == INT_0017 {
+        assert!(root.join(CARGO_LOCK).exists(), "Cargo generated its lock");
+    }
 
-    fs::create_dir_all(root.join("src")).unwrap();
-    fs::write(root.join(CODE), batch.implementation).unwrap();
-    let bound = result(root, target_dir, &["bind", CODE, batch.intent, "--json"]);
-    assert_eq!(bound["change"], json!(change));
-    assert_eq!(bound["path"], json!(CODE));
-    assert_eq!(bound["intent"], json!(batch.intent));
+    fs::write(
+        root.join(CODE),
+        documented_heredoc(root, batch.implementation_marker, CODE),
+    )
+    .unwrap();
+    let paths = if batch.intent == INT_0017 {
+        vec![CARGO_LOCK, CARGO_MANIFEST, CODE]
+    } else {
+        vec![CODE]
+    };
+    for path in paths {
+        let bound = result(root, target_dir, &["bind", path, batch.intent, "--json"]);
+        assert_eq!(bound["change"], json!(change));
+        assert_eq!(bound["path"], json!(path));
+        assert_eq!(bound["intent"], json!(batch.intent));
+    }
     assert_eq!(
         fs::read(root.join(batch.test_path)).unwrap(),
         test_bytes,
@@ -422,12 +360,16 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
             constraint_error,
             json!({
                 "code": "TELOS_CONSTRAINT_FAILED",
-                "message": "CON-0003 check failed: `cargo test --test architecture`",
+                "message": format!("{CONSTRAINT} check failed: `{CONSTRAINT_CHECK}`"),
                 "hint": "Run the constraint's `check` command directly to see its output."
             })
         );
         assert!(root.join(format!("telos/changes/{change}.tel")).exists());
-        fs::write(root.join(CODE), FINAL_IMPLEMENTATION).unwrap();
+        fs::write(
+            root.join(CODE),
+            documented_heredoc(root, "final-implementation", CODE),
+        )
+        .unwrap();
     }
 
     let reconciled = result(
@@ -436,7 +378,10 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
         &["change", "reconcile", &change, "--json"],
     );
     assert_eq!(reconciled["id"], json!(change));
-    assert_eq!(reconciled["ops_applied"], json!(1));
+    assert_eq!(
+        reconciled["ops_applied"],
+        json!(if batch.intent == INT_0017 { 3 } else { 1 })
+    );
     assert_eq!(reconciled["tests_run"], json!(1));
     assert_eq!(reconciled["checks_run"], json!(1));
     assert!(!root.join(format!("telos/changes/{change}.tel")).exists());
@@ -445,7 +390,7 @@ fn implement_batch(root: &Path, target_dir: &Path, batch: Batch<'_>) -> (Value, 
     assert_eq!(progress["scenarios_green"], json!(batch.expected_green));
     assert_eq!(progress["scenarios_total"], json!(2));
 
-    (red, green, progress)
+    (progress_before, red, green, progress)
 }
 
 fn assert_initial_plan(plan: &Value) {
@@ -482,6 +427,12 @@ fn assert_initial_plan(plan: &Value) {
 
     assert_eq!(steps[0]["context"]["id"], json!(INT_0017));
     assert_eq!(steps[0]["context"]["change"], Value::Null);
+    assert!(
+        steps[0]["context"]["canonical"]
+            .as_str()
+            .expect("canonical first intent")
+            .contains("  status draft\n")
+    );
     assert_eq!(
         steps[0]["context"]["scenarios"],
         json!([{
@@ -529,6 +480,12 @@ fn assert_initial_plan(plan: &Value) {
 
     assert_eq!(steps[1]["context"]["id"], json!(INT_0042));
     assert_eq!(steps[1]["context"]["change"], Value::Null);
+    assert!(
+        steps[1]["context"]["canonical"]
+            .as_str()
+            .expect("canonical second intent")
+            .contains("  status draft\n")
+    );
     assert_eq!(
         steps[1]["context"]["scenarios"],
         json!([{
@@ -606,8 +563,10 @@ fn reconstruct(target_dir: &Path) -> Observations {
     let root = tmp.path();
 
     assert!(!root.join("Cargo.toml").exists());
+    assert!(!root.join("Cargo.lock").exists());
     assert!(!root.join("src").exists());
     assert!(!root.join("tests").exists());
+    assert!(!root.join("architecture").exists());
     assert!(!root.join("telos/telos.lock").exists());
     assert_eq!(
         fs::read_to_string(root.join("telos/bindings.tel")).unwrap(),
@@ -616,37 +575,20 @@ fn reconstruct(target_dir: &Path) -> Observations {
 
     let plan = result(root, target_dir, &["rebuild", "plan", "--json"]);
     assert_initial_plan(&plan);
-    let initial_status = result(root, target_dir, &["rebuild", "status", "--json"]);
-    assert_eq!(initial_status["scenarios_green"], json!(0));
-    assert_eq!(initial_status["scenarios_total"], json!(2));
-    assert_eq!(initial_status["scenarios"][0]["tests"], json!([]));
-    assert_eq!(initial_status["scenarios"][1]["tests"], json!([]));
-
-    // Cargo can execute the configured future runner before application source
-    // or scenario tests exist. This generated checker manifest is not part of
-    // the public demo and is replaced by the implementer before the red.
-    fs::create_dir_all(root.join("architecture")).unwrap();
-    fs::write(
-        root.join(ARCHITECTURE_TEST),
-        documented_heredoc(root, "architecture-check", ARCHITECTURE_TEST),
-    )
-    .unwrap();
-    fs::write(
-        root.join("Cargo.toml"),
-        documented_heredoc(root, "bootstrap-manifest", "Cargo.toml"),
-    )
-    .unwrap();
     let bootstrapped = result(
         root,
         target_dir,
         &["change", "reconcile", "--full", "--json"],
     );
     assert_eq!(bootstrapped["ops_applied"], json!(0));
-    assert_eq!(bootstrapped["checks_run"], json!(1));
-    assert_eq!(bootstrapped["tests_run"], json!(1));
+    assert_eq!(bootstrapped["checks_run"], json!(0));
+    assert_eq!(bootstrapped["tests_run"], json!(0));
     assert!(root.join("telos/telos.lock").exists());
+    assert!(!root.join(CARGO_MANIFEST).exists());
+    assert!(!root.join(CARGO_LOCK).exists());
     assert!(!root.join("src").exists());
     assert!(!root.join("tests").exists());
+    assert!(!root.join("architecture").exists());
     let status = result(root, target_dir, &["status", "--json"]);
     assert_eq!(status["state"], json!("coherent"));
     assert_eq!(status["coverage"]["scenarios_proved"], json!(0));
@@ -659,13 +601,18 @@ fn reconstruct(target_dir: &Path) -> Observations {
             scenario: SCN_0091,
             test_path: ISSUED_TEST,
             test_name: ISSUED_FN,
-            test_source: ISSUED_TEST_SOURCE,
-            implementation: FIRST_IMPLEMENTATION,
+            test_marker: "invoice-issued-test",
+            implementation_marker: "first-implementation",
             expected_green: 1,
         },
     );
-    assert_eq!(first.2["scenarios"][0]["green"], json!(true));
-    assert_eq!(first.2["scenarios"][1]["green"], json!(false));
+    let initial_status = first.0.clone();
+    assert_eq!(initial_status["scenarios_green"], json!(0));
+    assert_eq!(initial_status["scenarios_total"], json!(2));
+    assert_eq!(initial_status["scenarios"][0]["tests"], json!([]));
+    assert_eq!(initial_status["scenarios"][1]["tests"], json!([]));
+    assert_eq!(first.3["scenarios"][0]["green"], json!(true));
+    assert_eq!(first.3["scenarios"][1]["green"], json!(false));
 
     let second = implement_batch(
         root,
@@ -675,8 +622,8 @@ fn reconstruct(target_dir: &Path) -> Observations {
             scenario: SCN_0107,
             test_path: PAYMENT_TEST,
             test_name: PAYMENT_FN,
-            test_source: PAYMENT_TEST_SOURCE,
-            implementation: CONSTRAINT_VIOLATING_IMPLEMENTATION,
+            test_marker: "payment-received-test",
+            implementation_marker: "constraint-violating-implementation",
             expected_green: 2,
         },
     );
@@ -696,15 +643,39 @@ fn reconstruct(target_dir: &Path) -> Observations {
             .iter()
             .all(|row| row["green"] == json!(true))
     );
+    assert_eq!(
+        fs::read_to_string(root.join(format!("telos/constraints/{CONSTRAINT}.tel"))).unwrap(),
+        format!(
+            "constraint {CONSTRAINT} architecture \"Hexagonal boundaries\" {{\n  \
+             rule  \"Domain code must not import adapter modules.\"\n  \
+             scope global\n  \
+             check \"{CONSTRAINT_CHECK}\"\n\
+             }}\n"
+        )
+    );
 
     let bindings = fs::read_to_string(root.join("telos/bindings.tel")).unwrap();
     assert_eq!(
         bindings,
-        "implements \"src/lib.rs\" -> INT-0017\n\
+        "implements \"Cargo.lock\" -> INT-0017\n\
+         implements \"Cargo.toml\" -> INT-0017\n\
+         implements \"src/lib.rs\" -> INT-0017\n\
          implements \"src/lib.rs\" -> INT-0042\n\
          proves     \"tests/invoice_issued.rs::scn_0091_new_invoice_is_open\" -> SCN-0091\n\
          proves     \"tests/payment_received.rs::scn_0107_full_payment_settles_invoice\" -> SCN-0107\n"
     );
+    let lock = fs::read_to_string(root.join("telos/telos.lock")).unwrap();
+    for path in [
+        CARGO_LOCK,
+        CARGO_MANIFEST,
+        CODE,
+        ISSUED_TEST,
+        PAYMENT_TEST,
+        "telos/constraints/CON-0003.tel",
+        "telos/telos.toml",
+    ] {
+        assert!(lock.contains(path), "`{path}` is not sealed:\n{lock}");
+    }
     assert!(
         fs::read_dir(root.join("telos/changes"))
             .unwrap()
@@ -715,7 +686,6 @@ fn reconstruct(target_dir: &Path) -> Observations {
         "Cargo.lock".to_owned(),
         "Cargo.toml".to_owned(),
         "README.md".to_owned(),
-        ARCHITECTURE_TEST.to_owned(),
         CODE.to_owned(),
         ISSUED_TEST.to_owned(),
         PAYMENT_TEST.to_owned(),
@@ -736,9 +706,9 @@ fn reconstruct(target_dir: &Path) -> Observations {
     Observations {
         plan,
         initial_status,
-        red_runs: vec![first.0, second.0],
-        green_runs: vec![first.1, second.1],
-        progress: vec![first.2, second.2],
+        red_runs: vec![first.1, second.1],
+        green_runs: vec![first.2, second.2],
+        progress: vec![first.3, second.3],
         final_status,
     }
 }

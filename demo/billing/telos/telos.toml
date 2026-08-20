@@ -1,11 +1,11 @@
 [code]
-globs = ["src/**/*.rs"]
+globs = ["Cargo.toml", "Cargo.lock", "src/**/*.rs"]
 
 [tests]
 globs = ["tests/**/*.rs"]
 
 [test]
-cmd = "cargo test {filter}"
+cmd = ""
 
 [policy]
 tdd = "strict"

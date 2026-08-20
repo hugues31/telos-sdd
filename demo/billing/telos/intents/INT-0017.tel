@@ -1,5 +1,5 @@
 intent INT-0017 "Issuing an invoice opens it" {
-  status active
+  status draft
   telos  "An invoice must start its life open and unpaid."
   statement event-driven {
     when   InvoiceIssued on Invoice

@@ -1,5 +1,5 @@
 intent INT-0042 "Invoice payment marks it settled" {
-  status active
+  status draft
   telos  "Customers must see immediately that their debt is cleared."
   statement event-driven {
     when   PaymentReceived on Invoice

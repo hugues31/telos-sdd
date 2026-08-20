@@ -1,35 +1,120 @@
 # Billing reconstruction demo
 
 This directory is intentionally a spec-only Telos project. It ships no
-`Cargo.toml`, application source, test, `telos.lock`, generated site, build
-artifact, or hidden solution. Telos produces the ordered, bounded work plan
-and verifies the result; an external `telos-implementer` agent writes the
-application. The `telos` CLI itself makes no LLM call and does not generate
-application code.
+`Cargo.toml`, lock, application source, test, generated checker, site, build
+artifact, or hidden solution. Both intents start as `draft`, and the initial
+architecture constraint is declarative. Telos supplies the ordered bounded
+plan and verifies the result; an external `telos-implementer` writes the
+application without ever writing below `telos/`.
 
-Inspect the prerequisite-first plan and its context packs from this directory:
+Inspect the prerequisite-first plan:
 
 ```console
 telos rebuild plan --json
-telos rebuild status --json
 ```
 
-Before implementation, generate the architecture check outside the configured
-scenario-test glob. It recursively inspects Rust source without `grep` or a
-platform-specific shell command:
+Bootstrap the untouched Telos-only tree. With no active behavioral obligation
+and no machine constraint yet, this honest first seal runs zero tests and zero
+checks and leaves progress at `0/2`:
 
 ```console
-mkdir -p architecture
+telos change reconcile --full --json
+telos status --json
 ```
 
-<!-- architecture-check:start -->
+## Batch 1: activate invoice issuance
+
+Open the first batch and stage the real `draft` to `active` transition:
+
+<!-- intent-activation:start -->
+```json
+{"status":"active"}
+```
+<!-- intent-activation:end -->
+
+The same batch makes the declarative architecture constraint executable:
+
+<!-- constraint-check-patch:start -->
+```json
+{"check":"cargo test --test invoice_issued domain_does_not_import_adapter_modules -- --exact"}
+```
+<!-- constraint-check-patch:end -->
+
+The initial runner is empty so bootstrap cannot launch a process. Stage its
+complete public configuration in this first batch; this post-state becomes the
+effective runner for the red/green work and is sealed by reconcile:
+
+<!-- runner-config:start -->
+```json
+{"code":{"globs":["Cargo.toml","Cargo.lock","src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"strict"},"agents":{"hosts":[]}}
+```
+<!-- runner-config:end -->
+
+```console
+telos change open "rebuild INT-0017" --json
+printf '%s\n' '{"status":"active"}' | telos edit intent INT-0017 --change CHG-0001 --json
+printf '%s\n' '{"check":"cargo test --test invoice_issued domain_does_not_import_adapter_modules -- --exact"}' | telos edit constraint CON-0003 --change CHG-0001 --json
+printf '%s\n' '{"code":{"globs":["Cargo.toml","Cargo.lock","src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"strict"},"agents":{"hosts":[]}}' | telos config --change CHG-0001 --json
+telos change diff CHG-0001 --json
+telos change approve CHG-0001 --json
+telos rebuild status --json
+mkdir -p src tests
+```
+
+The staged runner makes progress measurable without a proof target or process
+invocation yet, so this first status is `0/2`.
+
+The external implementer creates every runner input only after approval. Cargo
+and source inputs are in `[code].globs`; the first batch binds and seals all
+three. The exact `syn` dependency makes the architecture proof portable.
+
+<!-- application-manifest:start -->
 ```sh
-cat > architecture/hexagonal.rs <<'TELOS_EOF'
+cat > Cargo.toml <<'TELOS_EOF'
+[package]
+name = "billing-rebuild"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+syn = { version = "=3.0.3", features = ["full", "visit"] }
+TELOS_EOF
+```
+<!-- application-manifest:end -->
+
+The deliberately incomplete source gives the first unchanged proof test its
+real red witness:
+
+<!-- red-source:start -->
+```sh
+cat > src/lib.rs <<'TELOS_EOF'
+// The scenario test must fail before the first implementation exists.
+TELOS_EOF
+```
+<!-- red-source:end -->
+
+The architecture proof shares the covered `SCN-0091` test target. It parses
+Rust syntax, so comments, strings, and `adapters_v2` are harmless while real
+`adapters` imports are rejected.
+
+<!-- invoice-issued-test:start -->
+```sh
+cat > tests/invoice_issued.rs <<'TELOS_EOF'
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use billing_rebuild::{Invoice, InvoiceState};
 use syn::visit::Visit;
 use syn::{ItemUse, UseTree};
+
+#[test]
+fn scn_0091_new_invoice_is_open() {
+    let invoice = Invoice::issued_to("ACME", 12_000);
+    assert_eq!(invoice.state(), InvoiceState::Open);
+}
 
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -114,111 +199,243 @@ fn domain_does_not_import_adapter_modules() {
 }
 TELOS_EOF
 ```
-<!-- architecture-check:end -->
-
-Create `Cargo.toml` with these exact bootstrap bytes. The inactive future
-application target lets Cargo run the architecture check before application
-source exists:
-
-<!-- bootstrap-manifest:start -->
-```sh
-cat > Cargo.toml <<'TELOS_EOF'
-[package]
-name = "billing-rebuild"
-version = "0.1.0"
-edition = "2024"
-
-[features]
-application = []
-
-[[bin]]
-name = "application"
-path = "src/main.rs"
-required-features = ["application"]
-
-[[test]]
-name = "architecture"
-path = "architecture/hexagonal.rs"
-
-[dev-dependencies]
-syn = { version = "=3.0.3", features = ["full", "visit"] }
-TELOS_EOF
-```
-<!-- bootstrap-manifest:end -->
-
-Now perform the one-time bootstrap seal. At this point there is still no
-application source, scenario test, or binding; the architecture constraint is
-the only Cargo test target:
-
-```console
-telos change reconcile --full --json
-telos status --json
-```
-
-The external implementer then handles each planned intent in order using the
-ordinary protocol. It opens a batch and pipes `{}` to the public patch API.
-That empty patch makes `edit intent` stage the complete existing post-state,
-byte-identical to the base; `change diff` displays the complete equal
-`before`/`after` bytes and a non-empty digest before approval:
-
-```console
-telos change open "rebuild INT-0017" --json
-printf '%s\n' '{}' | telos edit intent INT-0017 --change CHG-0001 --json
-telos change diff CHG-0001 --json
-telos change approve CHG-0001 --json
-```
-
-Before writing the first scenario test, replace the bootstrap manifest with
-the application manifest used for both batches:
-
-<!-- application-manifest:start -->
-```sh
-cat > Cargo.toml <<'TELOS_EOF'
-[package]
-name = "billing-rebuild"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-path = "src/lib.rs"
-
-[[test]]
-name = "architecture"
-path = "architecture/hexagonal.rs"
-
-[dev-dependencies]
-syn = { version = "=3.0.3", features = ["full", "visit"] }
-TELOS_EOF
-```
-<!-- application-manifest:end -->
-
-It writes the smallest discoverable behavioral test containing the literal
-`scn_0091` token, records the real failure, writes only the needed application
-code, binds that code, reruns the unchanged test to green, and reconciles:
+<!-- invoice-issued-test:end -->
 
 ```console
 telos test SCN-0091 --json
+```
+
+Now write only the first scenario's implementation. Its inert comment/string
+and real `adapters_v2` reference demonstrate the syntax check's negative
+space.
+
+<!-- first-implementation:start -->
+```sh
+cat > src/lib.rs <<'TELOS_EOF'
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceState {
+    Open,
+    Settled,
+}
+
+pub mod adapters_v2 {
+    pub struct LedgerAdapterV2;
+}
+
+// Documentation only: `use crate::adapters::LedgerAdapter;` is forbidden.
+const FORBIDDEN_IMPORT_EXAMPLE: &str = "use crate::adapters::LedgerAdapter;";
+
+pub struct Invoice {
+    customer: String,
+    balance_cents: u64,
+    state: InvoiceState,
+}
+
+impl Invoice {
+    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
+        Self {
+            customer: customer.to_owned(),
+            balance_cents,
+            state: InvoiceState::Open,
+        }
+    }
+
+    pub fn state(&self) -> InvoiceState {
+        self.state
+    }
+
+    pub fn customer(&self) -> &str {
+        &self.customer
+    }
+
+    pub fn balance_cents(&self) -> u64 {
+        self.balance_cents
+    }
+
+    pub fn harmless_adapter_references(&self) -> (&'static str, &'static str) {
+        (
+            FORBIDDEN_IMPORT_EXAMPLE,
+            std::any::type_name::<adapters_v2::LedgerAdapterV2>(),
+        )
+    }
+}
+TELOS_EOF
+```
+<!-- first-implementation:end -->
+
+The red test bytes stay unchanged. Its green run creates the canonical
+`proves` binding; the explicit binds cover every Cargo/source input:
+
+```console
+telos bind Cargo.lock INT-0017 --json
+telos bind Cargo.toml INT-0017 --json
 telos bind src/lib.rs INT-0017 --json
 telos test SCN-0091 --json
 telos change reconcile CHG-0001 --json
 telos rebuild status --json
 ```
 
-Repeat the same batch for `INT-0042` / `SCN-0107`. Progress is measured by
-executing the current proof targets and advances from `0/2` to `1/2`, then
-`2/2`; bindings alone never count as green. Every reconcile also runs
-`cargo test --test architecture`, so a domain import from `adapters` fails as
-`TELOS_CONSTRAINT_FAILED` even when the behavioral scenario itself is green.
-
-Verify and inspect the reconstructed project with the public commands:
+## Batch 2: activate settlement
 
 ```console
-telos check --sealed --json
+telos change open "rebuild INT-0042" --json
+printf '%s\n' '{"status":"active"}' | telos edit intent INT-0042 --change CHG-0002 --json
+telos change diff CHG-0002 --json
+telos change approve CHG-0002 --json
+```
+
+<!-- payment-received-test:start -->
+```sh
+cat > tests/payment_received.rs <<'TELOS_EOF'
+use billing_rebuild::{Invoice, InvoiceState};
+
+#[test]
+fn scn_0107_full_payment_settles_invoice() {
+    let mut invoice = Invoice::issued_to("ACME", 12_000);
+    invoice.receive_payment(12_000);
+    assert_eq!(invoice.state(), InvoiceState::Settled);
+}
+TELOS_EOF
+```
+<!-- payment-received-test:end -->
+
+```console
+telos test SCN-0107 --json
+```
+
+The behavioral test can turn green while the architecture constraint remains
+capable of rejecting a compiling violation. Both whitespace-separated and
+grouped adapter imports are deliberate negative evidence:
+
+<!-- constraint-violating-implementation:start -->
+```sh
+cat > src/lib.rs <<'TELOS_EOF'
+pub mod adapters {
+    pub struct LedgerAdapter;
+    pub struct MailAdapter;
+}
+
+use crate :: adapters::LedgerAdapter;
+use crate::{adapters::MailAdapter};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceState {
+    Open,
+    Settled,
+}
+
+pub struct Invoice {
+    customer: String,
+    balance_cents: u64,
+    state: InvoiceState,
+}
+
+impl Invoice {
+    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
+        Self {
+            customer: customer.to_owned(),
+            balance_cents,
+            state: InvoiceState::Open,
+        }
+    }
+
+    pub fn receive_payment(&mut self, amount_cents: u64) {
+        if amount_cents >= self.balance_cents {
+            self.balance_cents = 0;
+            self.state = InvoiceState::Settled;
+        }
+    }
+
+    pub fn state(&self) -> InvoiceState {
+        self.state
+    }
+
+    pub fn customer(&self) -> &str {
+        &self.customer
+    }
+
+    pub fn balance_cents(&self) -> u64 {
+        self.balance_cents
+    }
+
+    pub fn adapter_type_names(&self) -> (&'static str, &'static str) {
+        (
+            std::any::type_name::<LedgerAdapter>(),
+            std::any::type_name::<MailAdapter>(),
+        )
+    }
+}
+TELOS_EOF
+```
+<!-- constraint-violating-implementation:end -->
+
+```console
+telos bind src/lib.rs INT-0042 --json
+telos test SCN-0107 --json
+telos change reconcile CHG-0002 --json
+```
+
+That reconcile must return exactly `TELOS_CONSTRAINT_FAILED`. Repair only the
+implementation, leaving the green scenario test untouched:
+
+<!-- final-implementation:start -->
+```sh
+cat > src/lib.rs <<'TELOS_EOF'
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceState {
+    Open,
+    Settled,
+}
+
+pub struct Invoice {
+    customer: String,
+    balance_cents: u64,
+    state: InvoiceState,
+}
+
+impl Invoice {
+    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
+        Self {
+            customer: customer.to_owned(),
+            balance_cents,
+            state: InvoiceState::Open,
+        }
+    }
+
+    pub fn receive_payment(&mut self, amount_cents: u64) {
+        if amount_cents >= self.balance_cents {
+            self.balance_cents = 0;
+            self.state = InvoiceState::Settled;
+        }
+    }
+
+    pub fn state(&self) -> InvoiceState {
+        self.state
+    }
+
+    pub fn customer(&self) -> &str {
+        &self.customer
+    }
+
+    pub fn balance_cents(&self) -> u64 {
+        self.balance_cents
+    }
+}
+TELOS_EOF
+```
+<!-- final-implementation:end -->
+
+```console
+telos change reconcile CHG-0002 --json
 telos rebuild status --json
+telos check --sealed --json
 telos view --port 3000
 telos view --export site
 ```
 
-The repository acceptance test `cargo test -p telos --test rebuild_demo`
-performs this complete sequence twice in fresh git repositories and compares
-the observable plan, red/green runs, and progress results.
+Progress is now `2/2`, both changes are closed, every constraint passes, and
+the complete Cargo/source/test proof surface is sealed. The repository
+acceptance test `cargo test -p telos --test rebuild_demo` consumes every
+payload and heredoc above, performs the sequence twice in fresh git
+repositories through the public CLI, and compares the observable plan,
+red/green runs, progress, and final status.

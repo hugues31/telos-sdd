@@ -279,7 +279,7 @@ fn seed_draft_intent(dir: &std::path::Path) -> String {
     id
 }
 
-fn assert_unknown_context(dir: &std::path::Path, target: &str, kind: &str) {
+fn assert_unknown_context(dir: &std::path::Path, target: &str, kind: &str, hint: &str) {
     let out = telos(dir, &["context", target, "--json"]).output().unwrap();
     assert!(
         !out.status.success(),
@@ -294,6 +294,7 @@ fn assert_unknown_context(dir: &std::path::Path, target: &str, kind: &str) {
         envelope["error"]["message"],
         json!(format!("unknown {kind} `{target}`"))
     );
+    assert_eq!(envelope["error"]["hint"], json!(hint));
 }
 
 #[test]
@@ -406,7 +407,7 @@ fn context_rejects_an_intent_removed_after_an_edit_in_its_owning_change() {
     .unwrap();
     assert!(out.status.success(), "removing the draft failed: {out:?}");
 
-    assert_unknown_context(tmp.path(), &intent, "intent");
+    assert_unknown_context(tmp.path(), &intent, "intent", "closest is INT-0042");
 }
 
 #[test]
@@ -427,7 +428,7 @@ fn context_rejects_a_scenario_removed_from_an_edited_intent() {
         "removing the scenario failed: {out:?}"
     );
 
-    assert_unknown_context(tmp.path(), "SCN-0091", "scenario");
+    assert_unknown_context(tmp.path(), "SCN-0091", "scenario", "closest is SCN-0107");
 }
 
 #[test]

@@ -185,20 +185,30 @@ fn staged_intents(change: &Change) -> std::collections::BTreeMap<IntentId, Inten
 fn known_intent_ids(project: &Project, disk: &TelosModel) -> BTreeSet<IntentId> {
     let mut known: BTreeSet<IntentId> = disk.intents.keys().copied().collect();
     for change in &project.parsed {
-        known.extend(staged_intents(change).keys().copied());
+        let staged = staged_intents(change);
+        let touched = touched_intent_ids(change);
+        known.retain(|id| !touched.contains(id));
+        known.extend(staged.keys().copied());
     }
     known
 }
 
 /// Every scenario id the disk model or any open change's overlay declares.
 fn known_scenario_ids(project: &Project, disk: &TelosModel) -> BTreeSet<ScenarioId> {
-    let mut known: BTreeSet<ScenarioId> = disk.scenario_owner.keys().copied().collect();
+    let mut known: std::collections::BTreeMap<ScenarioId, IntentId> = disk
+        .scenario_owner
+        .iter()
+        .map(|(scenario, intent)| (*scenario, *intent))
+        .collect();
     for change in &project.parsed {
-        for intent in staged_intents(change).values() {
-            known.extend(intent.scenarios.iter().map(|s| s.id));
+        let staged = staged_intents(change);
+        let touched = touched_intent_ids(change);
+        known.retain(|_, owner| !touched.contains(owner));
+        for intent in staged.values() {
+            known.extend(intent.scenarios.iter().map(|s| (s.id, intent.id)));
         }
     }
-    known
+    known.into_keys().collect()
 }
 
 fn unknown_intent(project: &Project, disk: &TelosModel, id: IntentId) -> TelosError {
@@ -222,13 +232,25 @@ fn unknown_scenario(project: &Project, disk: &TelosModel, id: ScenarioId) -> Tel
 /// replaces it, so resolution must select this change before it falls back to
 /// the sealed model.
 fn change_touching_intent(changes: &[Change], intent: IntentId) -> Option<&Change> {
-    changes.iter().find(|change| {
-        change.ops.iter().any(|op| match op {
-            StagedOp::AddIntent(staged) | StagedOp::EditIntent(staged) => staged.id == intent,
-            StagedOp::RemoveIntent(id) => *id == intent,
-            _ => false,
+    changes
+        .iter()
+        .find(|change| touched_intent_ids(change).contains(&intent))
+}
+
+/// Every intent a change's final overlay may replace or remove. Removing
+/// these ids from the sealed suggestion candidates before adding the final
+/// staged intents is what prevents an already-removed id from suggesting
+/// itself back to the caller.
+fn touched_intent_ids(change: &Change) -> BTreeSet<IntentId> {
+    change
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            StagedOp::AddIntent(intent) | StagedOp::EditIntent(intent) => Some(intent.id),
+            StagedOp::RemoveIntent(intent) => Some(*intent),
+            _ => None,
         })
-    })
+        .collect()
 }
 
 /// The change's post model: its ops replayed idempotently over the sealed

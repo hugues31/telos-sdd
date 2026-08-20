@@ -7,6 +7,12 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
+use telos_core::changes::{read_change, scan_changes};
+use telos_core::git::GitRepo;
+use telos_core::ids::ChangeId;
+use telos_core::lock::Lock;
+use telos_core::state::compute_state;
+use telos_core::workspace::Workspace;
 
 use super::AgentHost;
 
@@ -21,6 +27,15 @@ pub enum Decision {
 pub struct GuardDecision {
     pub decision: Decision,
     pub reason: String,
+    pub context: Option<DecisionContext>,
+}
+
+/// Current repository facts presented with a human decision. This is kept
+/// separate from the decision reason so the Codex adapter can use only its
+/// supported model-visible hook fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionContext {
+    text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,9 +45,10 @@ struct SimpleCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HumanAction {
-    name: &'static str,
-    native_rule_covered: bool,
+enum HumanAction {
+    Approve(ChangeId),
+    Adopt,
+    Revert,
 }
 
 /// Reads one official hook event from stdin and prints the host's structured
@@ -59,25 +75,35 @@ pub fn run(host: AgentHost) -> ExitCode {
         None => GuardDecision {
             decision: Decision::Deny,
             reason: "Telos guard could not parse the hook input; retry with valid JSON".into(),
+            context: None,
         },
     };
 
+    println!("{}", hook_output(host, outcome));
+    ExitCode::SUCCESS
+}
+
+fn hook_output(host: AgentHost, outcome: GuardDecision) -> Value {
     let permission = match outcome.decision {
         Decision::Allow => "allow",
         Decision::Deny => "deny",
         Decision::Ask => "ask",
     };
-    println!(
-        "{}",
-        json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": permission,
-                "permissionDecisionReason": outcome.reason,
-            }
-        })
-    );
-    ExitCode::SUCCESS
+    let mut output = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": permission,
+            "permissionDecisionReason": outcome.reason,
+        }
+    });
+
+    if host == AgentHost::Codex
+        && let Some(context) = outcome.context
+    {
+        output["systemMessage"] = json!(context.text);
+        output["hookSpecificOutput"]["additionalContext"] = json!(context.text);
+    }
+    output
 }
 
 /// Applies the same normalized policy for both hosts. Codex deliberately
@@ -130,35 +156,40 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
             return deny_manual_write();
         }
 
-        if let Some(action) = human_action(&commands) {
+        let action = match human_action(&commands) {
+            Ok(action) => action,
+            Err(()) => return deny_unbound_action(),
+        };
+        if let Some(action) = action {
+            let Ok(context) = decision_context(action, &cwd) else {
+                return deny_unbound_action();
+            };
             if host == AgentHost::Claude {
-                let context = input
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.trim().is_empty());
-                let mut reason = format!(
-                    "Human approval required for `{}`; review the current Telos diff and digest",
-                    action.name
-                );
-                if let Some(context) = context {
-                    reason.push_str(": ");
-                    reason.push_str(context);
-                }
                 return GuardDecision {
                     decision: Decision::Ask,
-                    reason,
+                    reason: format!(
+                        "Human approval required for `{}`: {}",
+                        action.name(),
+                        context.text
+                    ),
+                    context: Some(context),
                 };
             }
-            if !action.native_rule_covered {
+            if commands.iter().any(|command| !command.native_rule_covered) {
                 return GuardDecision {
                     decision: Decision::Deny,
                     reason: format!(
                         "Codex native rules cannot prompt for this wrapped or noncanonical action; retry direct canonical command `{}`",
-                        action.name
+                        action.name()
                     ),
+                    context: None,
                 };
             }
-            return allow("Codex native rules own the human approval prompt");
+            return GuardDecision {
+                decision: Decision::Allow,
+                reason: "Codex native rules own the human approval prompt".into(),
+                context: Some(context),
+            };
         }
 
         return allow("Command does not directly mutate the repository telos/ tree");
@@ -842,41 +873,108 @@ fn is_read_only_git_subcommand(subcommand: &str) -> bool {
     )
 }
 
-fn human_action(commands: &[SimpleCommand]) -> Option<HumanAction> {
-    commands.iter().find_map(|command| {
-        let words: Vec<&str> = command
+impl HumanAction {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Approve(_) => "telos change approve",
+            Self::Adopt => "telos adopt",
+            Self::Revert => "telos revert",
+        }
+    }
+}
+
+/// Recognizes the direct command forms the generated Codex native rules can
+/// prompt for. Every other attempted human action is denied: presenting a
+/// prompt without a bound current repository context would be unsafe.
+fn human_action(commands: &[SimpleCommand]) -> Result<Option<HumanAction>, ()> {
+    let Some(command) = commands.first() else {
+        return Ok(None);
+    };
+    if commands.len() != 1 {
+        return if commands.iter().any(is_human_action_attempt) {
+            Err(())
+        } else {
+            Ok(None)
+        };
+    }
+    if !command.native_rule_covered {
+        return if is_human_action_attempt(command) {
+            Err(())
+        } else {
+            Ok(None)
+        };
+    }
+
+    match command.argv.as_slice() {
+        [program, change, approve, id]
+            if program == "telos" && change == "change" && approve == "approve" =>
+        {
+            id.parse::<ChangeId>()
+                .map(HumanAction::Approve)
+                .map(Some)
+                .map_err(|_| ())
+        }
+        [program, action] if program == "telos" && action == "adopt" => {
+            Ok(Some(HumanAction::Adopt))
+        }
+        [program, action] if program == "telos" && action == "revert" => {
+            Ok(Some(HumanAction::Revert))
+        }
+        _ if is_human_action_attempt(command) => Err(()),
+        _ => Ok(None),
+    }
+}
+
+fn is_human_action_attempt(command: &SimpleCommand) -> bool {
+    command
+        .argv
+        .first()
+        .is_some_and(|program| program == "telos")
+        && (command.argv.windows(2).any(
+            |words| matches!(words, [first, second] if first == "change" && second == "approve"),
+        ) || command
             .argv
             .iter()
-            .filter(|word| word.as_str() != "--json")
-            .map(|word| program_name(word))
-            .collect();
-        let name = match words.as_slice() {
-            ["telos", "change", "approve", ..] => "telos change approve",
-            ["telos", "adopt", ..] => "telos adopt",
-            ["telos", "revert", ..] => "telos revert",
-            _ => return None,
-        };
-        let literal_prefix_covered = match name {
-            "telos change approve" => {
-                command
-                    .argv
-                    .starts_with(&["telos".into(), "change".into(), "approve".into()])
-            }
-            "telos adopt" => command.argv.starts_with(&["telos".into(), "adopt".into()]),
-            "telos revert" => command.argv.starts_with(&["telos".into(), "revert".into()]),
-            _ => false,
-        };
-        Some(HumanAction {
-            name,
-            native_rule_covered: command.native_rule_covered && literal_prefix_covered,
-        })
-    })
+            .skip(1)
+            .any(|word| matches!(word.as_str(), "adopt" | "revert")))
+}
+
+fn decision_context(action: HumanAction, cwd: &Path) -> Result<DecisionContext, ()> {
+    let workspace = Workspace::discover(cwd).map_err(|_| ())?;
+    let text = match action {
+        HumanAction::Approve(id) => {
+            let change = read_change(&workspace, id).map_err(|_| ())?;
+            format!("change {id} digest {}", change.ops_digest())
+        }
+        HumanAction::Adopt | HumanAction::Revert => {
+            let lock = Lock::read(&workspace.lock_path())
+                .map_err(|_| ())?
+                .ok_or(())?;
+            let git = GitRepo::discover(cwd).map_err(|_| ())?;
+            let changes = scan_changes(&workspace).map_err(|_| ())?;
+            let state = compute_state(&workspace, &lock, &git, &changes.infos).map_err(|_| ())?;
+            let paths = state
+                .drift
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{} drift paths [{}]; sealed spec digest {}",
+                action.name(),
+                paths,
+                lock.spec_digest
+            )
+        }
+    };
+    Ok(DecisionContext { text })
 }
 
 fn deny_manual_write() -> GuardDecision {
     GuardDecision {
         decision: Decision::Deny,
         reason: "Direct writes under repository telos/ are forbidden; use the Telos CLI".into(),
+        context: None,
     }
 }
 
@@ -885,6 +983,7 @@ fn deny_ambiguous_shell() -> GuardDecision {
         decision: Decision::Deny,
         reason: "Shell syntax is not proven safe by the Telos guard; use a direct, simple command"
             .into(),
+        context: None,
     }
 }
 
@@ -893,6 +992,15 @@ fn deny_opaque_inline_eval() -> GuardDecision {
         decision: Decision::Deny,
         reason: "Inline interpreter evaluation is not analyzable by the Telos guard; run a reviewed script file instead"
             .into(),
+        context: None,
+    }
+}
+
+fn deny_unbound_action() -> GuardDecision {
+    GuardDecision {
+        decision: Decision::Deny,
+        reason: "Telos guard could not resolve current decision context; retry a direct canonical Telos command from an initialized repository".into(),
+        context: None,
     }
 }
 
@@ -900,5 +1008,6 @@ fn allow(reason: &str) -> GuardDecision {
     GuardDecision {
         decision: Decision::Allow,
         reason: reason.into(),
+        context: None,
     }
 }

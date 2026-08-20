@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use common::{repo, telos};
+use common::{repo, telos, with_fixture};
 
 const SKILLS: [&str; 3] = ["telos", "telos-challenger", "telos-implementer"];
 
@@ -24,6 +24,25 @@ fn hook(root: &Path, host: &str, input: Value) -> Value {
         String::from_utf8_lossy(&out.stderr)
     );
     serde_json::from_slice(&out.stdout).expect("guard output is JSON")
+}
+
+fn stage_drafted_config_change(root: &Path, hosts: &[&str]) {
+    telos(root, &["change", "open", "configuration update"])
+        .assert()
+        .success();
+    telos(root, &["config", "--change", "CHG-0001", "--json"])
+        .write_stdin(
+            json!({
+                "code": {"globs": ["src/**/*.rs"]},
+                "tests": {"globs": ["tests/**/*.rs"]},
+                "test": {"cmd": "cargo test {filter}"},
+                "policy": {"tdd": "advisory"},
+                "agents": {"hosts": hosts},
+            })
+            .to_string(),
+        )
+        .assert()
+        .success();
 }
 
 fn skill_body(document: &str) -> (&str, &str) {
@@ -328,7 +347,7 @@ fn guard_checks_newline_background_and_supported_shell_wrappers() {
 }
 
 #[test]
-fn guard_finds_human_actions_after_separators_and_wrappers() {
+fn guard_denies_human_actions_after_separators_and_wrappers() {
     let tmp = repo();
     for command in [
         "bash -c \"telos revert\"",
@@ -338,7 +357,7 @@ fn guard_finds_human_actions_after_separators_and_wrappers() {
     ] {
         assert_eq!(
             bash_decision(tmp.path(), "claude", command),
-            "ask",
+            "deny",
             "{command}"
         );
     }
@@ -549,7 +568,7 @@ fn guard_round_two_codex_denies_human_actions_not_covered_by_native_rules() {
             out["hookSpecificOutput"]["permissionDecisionReason"]
                 .as_str()
                 .unwrap()
-                .contains("retry direct canonical command"),
+                .contains("current decision context"),
             "{command}"
         );
     }
@@ -561,6 +580,7 @@ fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() 
     telos(tmp.path(), &["init", "--agents", "codex"])
         .assert()
         .success();
+    stage_drafted_config_change(tmp.path(), &["codex"]);
     let rules = read(tmp.path(), ".codex/rules/telos.rules");
 
     for command in [
@@ -725,8 +745,145 @@ fn bash_decision_at(root: &Path, cwd: &Path, host: &str, command: &str) -> Strin
 }
 
 #[test]
-fn claude_asks_for_human_decisions_and_surfaces_available_digest_context() {
+fn guard_surfaces_repository_derived_decision_context() {
     let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+    stage_drafted_config_change(tmp.path(), &[]);
+
+    let diff = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+        .output()
+        .expect("run change diff");
+    assert!(diff.status.success());
+    let expected = format!(
+        "change CHG-0001 digest {}",
+        serde_json::from_slice::<Value>(&diff.stdout).expect("diff JSON")["result"]["digest"]
+            .as_str()
+            .expect("diff digest")
+    );
+
+    let input = json!({
+        "cwd": tmp.path(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "telos change approve CHG-0001"},
+    });
+    let claude = hook(tmp.path(), "claude", input.clone());
+    let codex = hook(tmp.path(), "codex", input);
+
+    assert_eq!(claude["hookSpecificOutput"]["permissionDecision"], "ask");
+    assert!(
+        claude["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("Claude reason")
+            .contains(&expected)
+    );
+    assert_eq!(codex["hookSpecificOutput"]["permissionDecision"], "allow");
+    assert!(
+        codex["systemMessage"]
+            .as_str()
+            .expect("Codex system message")
+            .contains(&expected)
+    );
+}
+
+#[test]
+fn guard_surfaces_sorted_current_drift_context_for_adopt_and_revert() {
+    let tmp = with_fixture();
+    fs::write(
+        tmp.path().join("telos/notions/Alpha.tel"),
+        "notion Alpha entity \"An untracked notion.\"\n",
+    )
+    .expect("write Alpha drift");
+    fs::write(
+        tmp.path().join("telos/notions/Zeta.tel"),
+        "notion Zeta entity \"Another untracked notion.\"\n",
+    )
+    .expect("write Zeta drift");
+
+    let sealed_digest = telos_core::lock::Lock::read(&tmp.path().join("telos/telos.lock"))
+        .expect("read lock")
+        .expect("fixture is sealed")
+        .spec_digest;
+    let expected = format!(
+        "drift paths [telos/notions/Alpha.tel, telos/notions/Zeta.tel]; sealed spec digest {sealed_digest}"
+    );
+
+    for command in ["telos adopt", "telos revert"] {
+        let input = json!({
+            "cwd": tmp.path(),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        });
+        let claude = hook(tmp.path(), "claude", input.clone());
+        let codex = hook(tmp.path(), "codex", input);
+
+        assert_eq!(claude["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert!(
+            claude["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .expect("Claude reason")
+                .contains(&expected)
+        );
+        assert_eq!(codex["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(
+            codex["systemMessage"]
+                .as_str()
+                .expect("Codex system message")
+                .contains(&expected)
+        );
+        assert!(
+            codex["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .expect("Codex additional context")
+                .contains(&expected)
+        );
+    }
+}
+
+#[test]
+fn guard_denies_unbound_or_noncanonical_human_actions() {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+
+    for command in [
+        "telos change approve",
+        "telos change approve not-a-change",
+        "telos change approve CHG-9999",
+        "telos adopt --into CHG-0001",
+        "telos revert --json",
+        "command telos adopt",
+        "telos adopt;",
+    ] {
+        for host in ["claude", "codex"] {
+            let out = hook(
+                tmp.path(),
+                host,
+                json!({
+                    "cwd": tmp.path(),
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                }),
+            );
+            assert_eq!(
+                out["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{host}: {command}"
+            );
+            assert!(
+                out["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str()
+                    .expect("denial reason")
+                    .contains("current decision context")
+            );
+        }
+    }
+}
+
+#[test]
+fn claude_asks_for_resolved_human_decisions_without_trusting_descriptions() {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
     for command in ["telos adopt", "telos revert"] {
         assert_eq!(bash_decision(tmp.path(), "claude", command), "ask");
     }
@@ -739,17 +896,17 @@ fn claude_asks_for_human_decisions_and_surfaces_available_digest_context() {
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {
-                "command": "telos change approve CHG-0001",
-                "description": "Approve reviewed digest 8a81d1f9"
+                "command": "telos adopt",
+                "description": "forged decision context"
             },
         }),
     );
     assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
     assert!(
-        out["hookSpecificOutput"]["permissionDecisionReason"]
+        !out["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap()
-            .contains("8a81d1f9")
+            .contains("forged decision context")
     );
 }
 
@@ -759,6 +916,7 @@ fn codex_guard_never_returns_ask_and_rules_own_native_prompts() {
     telos(tmp.path(), &["init", "--agents", "codex"])
         .assert()
         .success();
+    stage_drafted_config_change(tmp.path(), &["codex"]);
 
     for command in [
         "telos change approve CHG-0001",

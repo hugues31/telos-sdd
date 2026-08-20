@@ -19,7 +19,8 @@ Do not rely on the generated Codex guard or rules until setup is reviewed and tr
 <!-- telos-sdd:end -->";
 
 const RULES_BLOCK: &str = r#"# telos-sdd:start
-# The skill prints the current digest immediately before these static native prompts.
+# The guard derives current repository context through supported hook messages;
+# these static native rules alone own the Codex permission prompts.
 prefix_rule(
     pattern = ["telos", "change", "approve"],
     decision = "prompt",

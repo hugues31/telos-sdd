@@ -818,3 +818,16 @@ before adopt/revert, the router presents the relevant drift paths. The rules
 themselves are static prompts and carry neither value. The generated context
 deliberately remains a portable bounded `telos context` pack, never a
 whole-spec or host-specific prompt dump.
+
+For a direct canonical human-action command, the guard independently reads
+the current repository state before it permits a decision prompt: approval
+context is `change CHG-NNNN digest sha256:...`; adopt/revert context contains
+the sorted current drift paths and the sealed spec digest. It never uses an
+agent-supplied tool description for either value, and denies the action if it
+cannot resolve that context. Claude returns its supported PreToolUse `ask`
+decision with this context in the reason. The official Codex PreToolUse hook
+contract rejects `permissionDecision: "ask"`; it does accept top-level
+`systemMessage` and `hookSpecificOutput.additionalContext`. Consequently the
+Codex guard returns no unsupported `ask`: it sends the same repository-derived
+context through those supported fields and the generated static `.rules` entry
+owns the native `prompt`.

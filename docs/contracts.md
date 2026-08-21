@@ -1393,15 +1393,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
       - name: Install Telos v0.7.0
-        run: cargo install --git https://github.com/hugues31/telos-sdd --tag v0.7.0 --locked telos
+        run: |
+          version=0.7.0
+          asset="telos_${version}_linux_amd64.tar.gz"
+          base="https://github.com/hugues31/telos-sdd/releases/download/v${version}"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "${base}/${asset}"
+          curl -fsSLO "${base}/checksums.txt"
+          sha256sum --check --ignore-missing checksums.txt
+          tar -xzf "${asset}"
+          install -D -m 0755 telos "$HOME/.local/bin/telos"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Verify sealed Telos state
         run: telos check --sealed
 ```
 
-The install tag is derived from the CLI package version. Shipping 0.7.0
-therefore requires publishing repository tag `v0.7.0`; without that tag the
+The downloaded release version is derived from the CLI package version.
+Shipping 0.7.0 therefore requires release `v0.7.0` to carry the
+`telos_0.7.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
 generated install step cannot succeed. The workflow reports a check but does
 not itself make GitHub treat it as required: repository branch protection
 must separately require job `sealed` before merges.

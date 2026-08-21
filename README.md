@@ -20,7 +20,40 @@ application code, or require a hosted service.
 
 ## Install
 
-Telos requires Git and the stable Rust toolchain.
+Telos ships as a single self-contained binary for Linux, macOS, and Windows.
+Git must be available on your PATH at runtime; no Rust toolchain is needed.
+
+### Linux and macOS
+
+```console
+curl -fsSL https://raw.githubusercontent.com/hugues31/telos-sdd/main/install.sh | sh
+```
+
+The script downloads the latest release, verifies its SHA-256 checksum, and
+installs `telos` to `~/.local/bin`. Set `TELOS_VERSION` to pin a release and
+`TELOS_INSTALL_DIR` to change the destination.
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/hugues31/telos-sdd/main/install.ps1 | iex
+```
+
+Installs to `%USERPROFILE%\.local\bin` and adds it to your user PATH. The
+same `TELOS_VERSION` and `TELOS_INSTALL_DIR` variables apply.
+
+### Manual download
+
+Download the archive for your platform and `checksums.txt` from the
+[releases page](https://github.com/hugues31/telos-sdd/releases), verify the
+checksum, and place `telos` on your PATH. Assets are named
+`telos_<version>_<linux|darwin|windows>_<amd64|arm64>.tar.gz` (`.zip` on
+Windows). On macOS, browser downloads are quarantined by Gatekeeper; use the
+install script above or run `xattr -d com.apple.quarantine ./telos`.
+
+### From source
+
+Requires the stable Rust toolchain:
 
 ```console
 git clone https://github.com/hugues31/telos-sdd.git
@@ -46,10 +79,10 @@ Codex integrations and create a GitHub sealed-state workflow:
 telos init --agents claude,codex --ci github
 ```
 
-The generated workflow installs the corresponding Telos release and runs
-`telos check --sealed`. Publish that release tag before relying on the
-workflow, and enable branch protection separately if the check must be required
-before merge.
+The generated workflow downloads the corresponding Telos release binary and
+runs `telos check --sealed`. Publish that release with its binary assets
+before relying on the workflow, and enable branch protection separately if the
+check must be required before merge.
 
 ## Core workflow
 

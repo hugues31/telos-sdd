@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v* tag to build and (re)publish release assets for"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            os: linux
+            arch: amd64
+            smoke: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
+            smoke: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            os: darwin
+            arch: amd64
+            smoke: true
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            os: darwin
+            arch: arm64
+            smoke: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            os: windows
+            arch: amd64
+            smoke: true
+          # No emulation on the x64 runner: build only, never smoke.
+          - target: aarch64-pc-windows-msvc
+            runner: windows-latest
+            os: windows
+            arch: arm64
+            smoke: false
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl linker support
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Refuse a tag that disagrees with the workspace version
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          manifest="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "telos") | .version')"
+          if [ "$version" != "$manifest" ]; then
+            echo "Tag ${TAG} does not match workspace version ${manifest}." >&2
+            exit 1
+          fi
+      - name: Build
+        run: cargo build --release --locked -p telos --target ${{ matrix.target }}
+      - name: Smoke test
+        if: matrix.smoke
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/telos"
+          if [ "${{ matrix.os }}" = windows ]; then bin="${bin}.exe"; fi
+          "./${bin}" --version
+      - name: Package archive
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          mkdir -p dist/package
+          if [ "${{ matrix.os }}" = windows ]; then
+            cp "target/${{ matrix.target }}/release/telos.exe" dist/package/
+            (cd dist/package && 7z a "../telos_${version}_windows_${{ matrix.arch }}.zip" telos.exe)
+          else
+            cp "target/${{ matrix.target }}/release/telos" dist/package/
+            tar -C dist/package -czf "dist/telos_${version}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz" telos
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: telos-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/telos_*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum telos_* > checksums.txt
+      - name: Publish GitHub Release
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json id >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --generate-notes --verify-tag -R "$GITHUB_REPOSITORY"
+          fi

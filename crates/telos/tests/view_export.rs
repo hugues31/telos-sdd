@@ -117,11 +117,12 @@ fn export_writes_the_embedded_spa_and_sealed_billing_payload() {
 
     let disk_paths = exported_paths(&site);
     assert_eq!(
-        announced,
-        disk_paths
+        announced
             .iter()
-            .map(|path| path.to_str().expect("export paths are UTF-8"))
-            .collect::<Vec<_>>()
+            .copied()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>(),
+        disk_paths
     );
     assert_eq!(
         disk_paths,

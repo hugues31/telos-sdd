@@ -95,6 +95,13 @@ coding agent, or replay deterministically, and the demo's CI rebuilds the
 whole story from an empty directory on every push. Browse the exported spec at
 [hugues31.github.io/telos-tamagotchi](https://hugues31.github.io/telos-tamagotchi/).
 
+<p align="center">
+  <a href="https://hugues31.github.io/telos-tamagotchi/">
+    <img src="https://raw.githubusercontent.com/hugues31/telos-tamagotchi/main/docs/demo.gif"
+         alt="telos view browsing the sealed tamagotchi spec" width="840">
+  </a>
+</p>
+
 ## Core workflow
 
 Never edit files under `telos/` directly. Use a change transaction:

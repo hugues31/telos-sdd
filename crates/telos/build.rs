@@ -274,7 +274,7 @@ fn git_dependencies(manifest_dir: &Path) -> Result<Vec<PathBuf>, String> {
     }
     names.push("packed-refs".to_string());
 
-    let mut paths = names
+    let paths = names
         .iter()
         .map(|name| {
             git_output(
@@ -283,6 +283,16 @@ fn git_dependencies(manifest_dir: &Path) -> Result<Vec<PathBuf>, String> {
             )
             .map(PathBuf::from)
             .ok_or_else(|| format!("failed to resolve Git metadata path `{name}`"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut paths = paths
+        .into_iter()
+        .filter_map(|path| match fs::symlink_metadata(&path) {
+            Ok(_) => Some(Ok(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(Err(format!(
+                "failed to inspect Git metadata path {path:?}: {error}"
+            ))),
         })
         .collect::<Result<Vec<_>, _>>()?;
     paths.sort();

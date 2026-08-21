@@ -11,10 +11,12 @@ import type {
 import {
   buildGraphElements,
   dimmedElementIds,
+  nodeId,
   type GraphSelection,
   type RelationFilter,
 } from './elements';
 import { DAGRE_LAYOUT_OPTIONS, runDagreLayout } from './layout';
+import { replacementNodePositions } from './replacement';
 import { buildGraphStylesheet } from './stylesheet';
 
 const props = defineProps<{
@@ -88,11 +90,15 @@ watch(
     const previousPositions = new Map(
       cy.nodes().map((node) => [node.id(), { ...node.position() }] as const),
     );
+    const nextPositions = replacementNodePositions(
+      props.nodes.map((node) => nodeId(node.key)),
+      previousPositions,
+    );
     cy.batch(() => {
       cy?.elements().remove();
       const added = cy?.add(buildGraphElements(props.nodes, props.edges));
       added?.nodes().forEach((node) => {
-        const position = previousPositions.get(node.id());
+        const position = nextPositions.get(node.id());
         if (position) node.position(position);
       });
     });

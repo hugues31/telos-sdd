@@ -8,11 +8,12 @@ import KindPill from '../components/KindPill.vue';
 import { scenarioToIntent, snapshot } from '../data/snapshot';
 import type { GraphKey, GraphRelation } from '../data/types';
 import CytoGraph from '../graph/CytoGraph.vue';
-import type { GraphSelection, RelationFilter } from '../graph/elements';
+import type { RelationFilter } from '../graph/elements';
+import { useGraphSelection } from '../graph/selection';
 
 const nodes = computed(() => snapshot.value.snapshot.nodes);
 const edges = computed(() => snapshot.value.snapshot.edges);
-const selected = ref<GraphSelection | null>(null);
+const { selected, setSelection } = useGraphSelection(nodes, edges);
 const relationFilter = ref<RelationFilter>('all');
 
 const relations = computed<GraphRelation[]>(() => {
@@ -117,7 +118,7 @@ function relationLabel(relation: GraphRelation): string {
           :nodes="nodes"
           :edges="edges"
           :relation-filter="relationFilter"
-          @select="selected = $event"
+          @select="setSelection($event)"
         />
 
         <aside class="selection-panel" aria-live="polite">

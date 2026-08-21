@@ -38,6 +38,11 @@ export function buildGraphElements(
   nodes: GraphNodeView[],
   edges: GraphEdgeView[],
 ): ElementDefinition[] {
+  const edgeIds = edges.map(edgeId);
+  const edgeIdCounts = new Map<string, number>();
+  for (const id of edgeIds) edgeIdCounts.set(id, (edgeIdCounts.get(id) ?? 0) + 1);
+  const edgeIdOccurrences = new Map<string, number>();
+
   return [
     ...nodes.map<ElementDefinition>((node) => ({
       group: 'nodes',
@@ -48,19 +53,26 @@ export function buildGraphElements(
         label: node.label,
       },
     })),
-    ...edges.map<ElementDefinition>((edge) => ({
-      group: 'edges',
-      data: {
-        id: edgeId(edge),
-        source: nodeId(edge.from),
-        target: nodeId(edge.to),
-        relation: edge.relation,
-        sourceKind: edge.from.kind,
-        sourceId: edge.from.id,
-        targetKind: edge.to.kind,
-        targetId: edge.to.id,
-      },
-    })),
+    ...edges.map<ElementDefinition>((edge, index) => {
+      const baseId = edgeIds[index];
+      const occurrence = edgeIdOccurrences.get(baseId) ?? 0;
+      edgeIdOccurrences.set(baseId, occurrence + 1);
+      const id = edgeIdCounts.get(baseId) === 1 ? baseId : `${baseId}:${occurrence}`;
+
+      return {
+        group: 'edges',
+        data: {
+          id,
+          source: nodeId(edge.from),
+          target: nodeId(edge.to),
+          relation: edge.relation,
+          sourceKind: edge.from.kind,
+          sourceId: edge.from.id,
+          targetKind: edge.to.kind,
+          targetId: edge.to.id,
+        },
+      };
+    }),
   ];
 }
 

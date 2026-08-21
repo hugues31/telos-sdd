@@ -151,6 +151,16 @@ describe('buildGraphElements', () => {
     ]);
   });
 
+  it('adds deterministic occurrence ordinals to identical parallel edges', () => {
+    const duplicate = edges[0];
+    const elements = buildGraphElements(nodes.slice(0, 2), [duplicate, duplicate]);
+
+    expect(elements.slice(2).map((element) => element.data.id)).toEqual([
+      'edge:intent%3AINT-0042:uses:notion%3AInvoice:0',
+      'edge:intent%3AINT-0042:uses:notion%3AInvoice:1',
+    ]);
+  });
+
   it('preserves every graph relation value', () => {
     const relationData = buildGraphElements(nodes, edges)
       .filter((element) => element.group === 'edges')

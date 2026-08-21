@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Telos</title>
+    <!--
+      Anti-FOUC: pick the theme before any CSS or Vue code runs, so the
+      first paint is already in the right theme. Mirrors the rule
+      `useTheme` applies later: a stored choice wins, otherwise fall back to
+      the OS preference.
+    -->
+    <script>
+      (function () {
+        var theme = 'light';
+        try {
+          var stored = localStorage.getItem('telos-theme');
+          if (stored === 'light' || stored === 'dark') {
+            theme = stored;
+          } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            theme = 'dark';
+          }
+        } catch (e) {
+          // localStorage unavailable (private mode, disabled) — default to light.
+        }
+        document.documentElement.setAttribute('data-theme', theme);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!--
+      Classic, relative script: works both on GitHub Pages and opened
+      straight from disk as file://. In dev this is served from public/ by
+      Vite; at export time `telos` writes a real data.js next to this file.
+    -->
+    <script src="./data.js"></script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

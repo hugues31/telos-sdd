@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 use telos_core::emit::{emit_constraint, emit_intent, emit_notion};
 use telos_core::graph::{NodeRef, Relation};
-use telos_core::ids::IntentId;
 use telos_core::model::{Binding, ConstraintKind, IntentStatus, NotionKind, Scope, TelosModel};
 use telos_core::state::{DriftKind, ProjectStateKind, StateReport, coverage as model_coverage};
 
@@ -130,38 +129,6 @@ pub(crate) enum GraphKey {
     Constraint(String),
     Code(String),
     Test(String),
-}
-
-impl GraphKey {
-    pub(crate) fn id(&self) -> &str {
-        match self {
-            Self::Notion(id)
-            | Self::Intent(id)
-            | Self::Scenario(id)
-            | Self::Constraint(id)
-            | Self::Code(id)
-            | Self::Test(id) => id,
-        }
-    }
-
-    pub(crate) fn kind(&self) -> &'static str {
-        match self {
-            Self::Notion(_) => "notion",
-            Self::Intent(_) => "intent",
-            Self::Scenario(_) => "scenario",
-            Self::Constraint(_) => "constraint",
-            Self::Code(_) => "code",
-            Self::Test(_) => "test",
-        }
-    }
-
-    pub(crate) fn dom_key(&self) -> String {
-        format!("{}:{}", self.kind(), self.id())
-    }
-
-    pub(crate) fn dom_id(&self) -> String {
-        format!("{}-{}", self.kind(), self.id())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -366,11 +333,6 @@ impl ViewSnapshot {
             edges,
         }
     }
-
-    pub(crate) fn intent(&self, id: IntentId) -> Option<&IntentView> {
-        let id = id.to_string();
-        self.intents.iter().find(|intent| intent.id == id)
-    }
 }
 
 impl From<&NodeRef> for GraphKey {
@@ -550,6 +512,17 @@ mod tests {
 
     use super::{GraphKey, ViewSnapshot};
 
+    fn graph_key_id(key: &GraphKey) -> &str {
+        match key {
+            GraphKey::Notion(id)
+            | GraphKey::Intent(id)
+            | GraphKey::Scenario(id)
+            | GraphKey::Constraint(id)
+            | GraphKey::Code(id)
+            | GraphKey::Test(id) => id,
+        }
+    }
+
     fn fixture_model() -> TelosModel {
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telos-core/tests/corpus/billing");
@@ -585,7 +558,11 @@ mod tests {
                 && edge.to == GraphKey::Intent("INT-0017".to_string())
         }));
 
-        let intent = snapshot.intent(IntentId(42)).unwrap();
+        let intent = snapshot
+            .intents
+            .iter()
+            .find(|intent| intent.id == IntentId(42).to_string())
+            .unwrap();
         assert_eq!(intent.implements, ["src/billing/invoice.rs"]);
         assert_eq!(intent.scenarios[0].id, "SCN-0107");
         assert_eq!(
@@ -659,7 +636,7 @@ mod tests {
             snapshot
                 .nodes
                 .iter()
-                .map(|node| node.key.id())
+                .map(|node| graph_key_id(&node.key))
                 .collect::<Vec<_>>(),
             [
                 "Customer",
@@ -679,7 +656,13 @@ mod tests {
             snapshot
                 .edges
                 .iter()
-                .map(|edge| { (edge.from.id(), edge.relation.as_str(), edge.to.id(),) })
+                .map(|edge| {
+                    (
+                        graph_key_id(&edge.from),
+                        edge.relation.as_str(),
+                        graph_key_id(&edge.to),
+                    )
+                })
                 .collect::<Vec<_>>(),
             [
                 ("INT-0017", "uses", "Invoice"),
@@ -800,99 +783,95 @@ mod tests {
             snapshot
                 .edges
                 .iter()
-                .map(|edge| {
-                    (
-                        edge.from.dom_key(),
-                        edge.relation.as_str(),
-                        edge.to.dom_key(),
-                    )
-                })
+                .map(|edge| (edge.from.clone(), edge.relation.as_str(), edge.to.clone()))
                 .collect::<Vec<_>>(),
             [
                 (
-                    "intent:INT-0017".to_string(),
+                    GraphKey::Intent("INT-0017".to_string()),
                     "uses",
-                    "notion:Invoice".to_string()
+                    GraphKey::Notion("Invoice".to_string())
                 ),
                 (
-                    "intent:INT-0017".to_string(),
+                    GraphKey::Intent("INT-0017".to_string()),
                     "uses",
-                    "notion:InvoiceIssued".to_string()
+                    GraphKey::Notion("InvoiceIssued".to_string())
                 ),
                 (
-                    "intent:INT-0042".to_string(),
+                    GraphKey::Intent("INT-0042".to_string()),
                     "refines",
-                    "intent:INT-0017".to_string()
+                    GraphKey::Intent("INT-0017".to_string())
                 ),
                 (
-                    "intent:INT-0042".to_string(),
+                    GraphKey::Intent("INT-0042".to_string()),
                     "requires",
-                    "intent:INT-0017".to_string()
+                    GraphKey::Intent("INT-0017".to_string())
                 ),
                 (
-                    "intent:INT-0042".to_string(),
+                    GraphKey::Intent("INT-0042".to_string()),
                     "excludes",
-                    "intent:INT-0017".to_string()
+                    GraphKey::Intent("INT-0017".to_string())
                 ),
                 (
-                    "intent:INT-0042".to_string(),
+                    GraphKey::Intent("INT-0042".to_string()),
                     "uses",
-                    "notion:Invoice".to_string()
+                    GraphKey::Notion("Invoice".to_string())
                 ),
                 (
-                    "intent:INT-0042".to_string(),
+                    GraphKey::Intent("INT-0042".to_string()),
                     "uses",
-                    "notion:PaymentReceived".to_string()
+                    GraphKey::Notion("PaymentReceived".to_string())
                 ),
                 (
-                    "scenario:SCN-0091".to_string(),
+                    GraphKey::Scenario("SCN-0091".to_string()),
                     "verifies",
-                    "intent:INT-0017".to_string()
+                    GraphKey::Intent("INT-0017".to_string())
                 ),
                 (
-                    "scenario:SCN-0091".to_string(),
+                    GraphKey::Scenario("SCN-0091".to_string()),
                     "uses",
-                    "notion:Customer".to_string()
+                    GraphKey::Notion("Customer".to_string())
                 ),
                 (
-                    "scenario:SCN-0091".to_string(),
+                    GraphKey::Scenario("SCN-0091".to_string()),
                     "uses",
-                    "notion:Invoice".to_string()
+                    GraphKey::Notion("Invoice".to_string())
                 ),
                 (
-                    "scenario:SCN-0091".to_string(),
+                    GraphKey::Scenario("SCN-0091".to_string()),
                     "uses",
-                    "notion:InvoiceIssued".to_string()
+                    GraphKey::Notion("InvoiceIssued".to_string())
                 ),
                 (
-                    "scenario:SCN-0107".to_string(),
+                    GraphKey::Scenario("SCN-0107".to_string()),
                     "verifies",
-                    "intent:INT-0042".to_string()
+                    GraphKey::Intent("INT-0042".to_string())
                 ),
                 (
-                    "scenario:SCN-0107".to_string(),
+                    GraphKey::Scenario("SCN-0107".to_string()),
                     "uses",
-                    "notion:Invoice".to_string()
+                    GraphKey::Notion("Invoice".to_string())
                 ),
                 (
-                    "scenario:SCN-0107".to_string(),
+                    GraphKey::Scenario("SCN-0107".to_string()),
                     "uses",
-                    "notion:PaymentReceived".to_string()
+                    GraphKey::Notion("PaymentReceived".to_string())
                 ),
                 (
-                    "constraint:CON-0003".to_string(),
+                    GraphKey::Constraint("CON-0003".to_string()),
                     "constrains",
-                    "intent:INT-0042".to_string()
+                    GraphKey::Intent("INT-0042".to_string())
                 ),
                 (
-                    "code:src/billing/invoice.rs".to_string(),
+                    GraphKey::Code("src/billing/invoice.rs".to_string()),
                     "implements",
-                    "intent:INT-0042".to_string()
+                    GraphKey::Intent("INT-0042".to_string())
                 ),
                 (
-                    "test:tests/billing.rs::scn_0107_full_payment_settles_the_invoice".to_string(),
+                    GraphKey::Test(
+                        "tests/billing.rs::scn_0107_full_payment_settles_the_invoice".to_string(),
+                    ),
                     "proves",
-                    "scenario:SCN-0107".to_string(),
+                    GraphKey::Scenario("SCN-0107".to_string()),
                 ),
             ]
         );

@@ -25,6 +25,9 @@ use serde_json::{Value, json};
 
 use common::{repo, telos, with_fixture};
 
+const DATA_PREFIX: &str = "window.__TELOS_DATA__ = ";
+const DATA_SUFFIX: &str = ";\n";
+
 struct ProjectionServer(Option<Child>);
 
 impl Drop for ProjectionServer {
@@ -34,6 +37,73 @@ impl Drop for ProjectionServer {
             let _ = child.wait();
         }
     }
+}
+
+fn exported_files(root: &Path) -> Vec<String> {
+    fn visit(root: &Path, directory: &Path, files: &mut Vec<String>) {
+        for entry in fs::read_dir(directory).expect("read exported directory") {
+            let entry = entry.expect("read exported entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.push(
+                    path.strip_prefix(root)
+                        .expect("exported file stays below export root")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files.sort();
+    files
+}
+
+fn data_payload(script: &str) -> Value {
+    let json = script
+        .strip_prefix(DATA_PREFIX)
+        .and_then(|script| script.strip_suffix(DATA_SUFFIX))
+        .expect("data.js is one window.__TELOS_DATA__ assignment");
+    serde_json::from_str(json).expect("data.js assignment contains valid JSON")
+}
+
+fn http_get(url: &str, route: &str, cookie: Option<&str>) -> String {
+    let address = url
+        .strip_prefix("http://")
+        .and_then(|url| url.strip_suffix('/'))
+        .expect("view URL has the documented HTTP shape");
+    let mut stream = TcpStream::connect(address).expect("connect to live view");
+    write!(stream, "GET {route} HTTP/1.1\r\nHost: {address}\r\n").expect("write HTTP request head");
+    if let Some(cookie) = cookie {
+        write!(stream, "Cookie: {cookie}\r\n").expect("write session cookie");
+    }
+    write!(stream, "Connection: close\r\n\r\n").expect("finish HTTP request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read HTTP response");
+    response
+}
+
+fn session_cookie(response: &str) -> String {
+    response
+        .split_once("\r\n\r\n")
+        .expect("HTTP response separates headers and body")
+        .0
+        .split("\r\n")
+        .find_map(|line| {
+            line.strip_prefix("set-cookie: ")
+                .or_else(|| line.strip_prefix("Set-Cookie: "))
+        })
+        .expect("the live shell establishes a session")
+        .split(';')
+        .next()
+        .expect("Set-Cookie starts with a cookie pair")
+        .to_string()
 }
 
 // --- shared harness: run a step, assert its envelope ------------------------
@@ -651,7 +721,7 @@ fn loop_merge() {
     assert_state(dir, "coherent");
 }
 
-/// Starting from the same coherent project, static export and every live page
+/// Starting from the same coherent project, static export and the live SPA
 /// must expose one shared projection without changing project state. The
 /// separate `rebuild_demo` acceptance owns the longer spec-only reconstruction
 /// lifecycle.
@@ -667,14 +737,62 @@ fn loop_projection() {
             "mode": "export",
             "destination": "site",
             "files": [
-                "coverage.html",
-                "glossary.html",
-                "graph.html",
+                ".nojekyll",
+                "assets/app.css",
+                "assets/app.js",
+                "assets/logo.png",
+                "data.js",
                 "index.html",
-                "intents/INT-0017.html",
-                "intents/INT-0042.html",
             ]
         })
+    );
+    let expected_files = exported["result"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(exported_files(&tmp.path().join("site")), expected_files);
+
+    let export_payload = data_payload(
+        &fs::read_to_string(tmp.path().join("site/data.js")).expect("read exported data.js"),
+    );
+    assert_eq!(export_payload["meta"]["mode"], "export");
+    assert_eq!(export_payload["snapshot"]["dashboard"]["state"], "coherent");
+    assert_eq!(
+        export_payload["snapshot"]["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|intent| intent["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["INT-0017", "INT-0042"]
+    );
+    assert!(
+        export_payload["snapshot"]["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scenario| scenario["id"] == "SCN-0107")
+    );
+    assert!(
+        export_payload["snapshot"]["notions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|notion| notion["name"] == "Invoice")
+    );
+    assert!(
+        export_payload["snapshot"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge
+                == &json!({
+                    "from": {"kind": "intent", "id": "INT-0042"},
+                    "relation": "requires",
+                    "to": {"kind": "intent", "id": "INT-0017"}
+                }))
     );
 
     let args = ["view", "--port", "0", "--json"];
@@ -703,27 +821,51 @@ fn loop_projection() {
     assert_eq!(envelope["command"], "view");
     assert_eq!(envelope["result"]["mode"], "server");
 
-    for (route, marker) in [
-        ("/", "Telos dashboard"),
-        ("/graph", "requires"),
-        ("/intent/INT-0042", "SCN-0107"),
-        ("/glossary", "Invoice"),
-        ("/coverage", "Intent × scenario × test"),
+    let shell = http_get(url, "/", None);
+    assert!(shell.starts_with("HTTP/1.1 200 "), "/: {shell}");
+    let cookie = session_cookie(&shell);
+
+    let live_data = http_get(url, "/data.js", Some(&cookie));
+    assert!(
+        live_data.starts_with("HTTP/1.1 200 "),
+        "/data.js: {live_data}"
+    );
+    let live_payload = data_payload(
+        live_data
+            .split_once("\r\n\r\n")
+            .expect("HTTP response separates headers and body")
+            .1,
+    );
+    assert_eq!(live_payload["meta"]["mode"], "live");
+    assert_eq!(live_payload["snapshot"], export_payload["snapshot"]);
+
+    let live_status = http_get(url, "/live.json", Some(&cookie));
+    assert!(
+        live_status.starts_with("HTTP/1.1 200 "),
+        "/live.json: {live_status}"
+    );
+    let status: Value = serde_json::from_str(
+        live_status
+            .split_once("\r\n\r\n")
+            .expect("HTTP response separates headers and body")
+            .1,
+    )
+    .expect("live.json is valid JSON");
+    assert_eq!(
+        status,
+        json!({"generation": 0, "reload_error": null, "watcher_error": null})
+    );
+
+    for route in [
+        "/intents",
+        "/graph",
+        "/glossary",
+        "/intent/INT-0042",
+        "/coverage",
+        "/missing",
     ] {
-        let address = url
-            .strip_prefix("http://")
-            .and_then(|url| url.strip_suffix('/'))
-            .unwrap();
-        let mut stream = TcpStream::connect(address).unwrap();
-        write!(
-            stream,
-            "GET {route} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        assert!(response.starts_with("HTTP/1.1 200 "), "{route}: {response}");
-        assert!(response.contains(marker), "{route}: {response}");
+        let response = http_get(url, route, Some(&cookie));
+        assert!(response.starts_with("HTTP/1.1 404 "), "{route}: {response}");
     }
 
     drop(server);

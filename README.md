@@ -32,11 +32,16 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/hugues31/telos-sdd/main/install.ps1 | iex
 ```
 
-From source (stable Rust toolchain required):
+From source (stable Rust toolchain and Node.js 22 required; build the embedded
+frontend first):
 
 ```console
 git clone https://github.com/hugues31/telos-sdd.git
 cd telos-sdd
+cd frontend
+npm ci
+npm run build
+cd ..
 cargo install --locked --path crates/telos
 ```
 
@@ -126,6 +131,10 @@ telos view --export site
 telos rebuild plan --json
 telos rebuild status --json
 ```
+
+`telos view` serves the embedded SPA with hash routes such as `#/intents` and
+`#/graph`. An exported site is ready for static hosting, including GitHub
+Pages, and `site/index.html` also opens directly with `file://`.
 
 `rebuild` plans and measures a reconstruction; it does not write application
 code. The [Billing demo](demo/billing) is a spec-only project that exercises

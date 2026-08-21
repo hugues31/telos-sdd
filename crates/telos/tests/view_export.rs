@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use common::{telos, with_fixture};
 
 const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
+const DATA_PREFIX: &str = "window.__TELOS_DATA__ = ";
+const DATA_SUFFIX: &str = ";\n";
 
 fn json_stdout(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -47,8 +49,33 @@ fn collect_paths(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) {
     }
 }
 
+fn data_payload(script: &[u8]) -> Value {
+    let script = std::str::from_utf8(script).expect("data.js is UTF-8");
+    assert!(script.starts_with(DATA_PREFIX), "unexpected data.js prefix");
+    assert!(script.ends_with(DATA_SUFFIX), "unexpected data.js suffix");
+    serde_json::from_str(&script[DATA_PREFIX.len()..script.len() - DATA_SUFFIX.len()])
+        .expect("data.js assignment contains JSON")
+}
+
+fn is_build_date(value: &str) -> bool {
+    value.len() == 10
+        && value.as_bytes()[4] == b'-'
+        && value.as_bytes()[7] == b'-'
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+}
+
+fn is_export_path(path: &str) -> bool {
+    matches!(path, ".nojekyll" | "index.html" | "data.js")
+        || path
+            .strip_prefix("assets/")
+            .is_some_and(|relative| !relative.is_empty())
+}
+
 #[test]
-fn export_writes_the_sealed_billing_snapshot_with_the_exact_envelope() {
+fn export_writes_the_embedded_spa_and_sealed_billing_payload() {
     let tmp = with_fixture();
 
     let output = export(tmp.path(), "site");
@@ -58,66 +85,127 @@ fn export_writes_the_sealed_billing_snapshot_with_the_exact_envelope() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        json_stdout(&output),
-        json!({
-            "ok": true,
-            "command": "view",
-            "result": {
-                "mode": "export",
-                "destination": "site",
-                "files": [
-                    "coverage.html",
-                    "glossary.html",
-                    "graph.html",
-                    "index.html",
-                    "intents/INT-0017.html",
-                    "intents/INT-0042.html"
-                ]
-            },
-            "error": null,
-            "next_actions": []
-        })
-    );
-
     let site = tmp.path().join("site");
+    let envelope = json_stdout(&output);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "view");
+    assert_eq!(envelope["result"]["mode"], "export");
+    assert_eq!(envelope["result"]["destination"], "site");
+    assert_eq!(envelope["error"], Value::Null);
+    assert_eq!(envelope["next_actions"], json!([]));
+
+    let announced = envelope["result"]["files"]
+        .as_array()
+        .expect("files is an array")
+        .iter()
+        .map(|path| path.as_str().expect("file path is a string"))
+        .collect::<Vec<_>>();
+    let mut sorted = announced.clone();
+    sorted.sort_unstable();
     assert_eq!(
-        exported_paths(&site),
+        announced, sorted,
+        "CLI file list is lexicographically sorted"
+    );
+    assert!(announced.iter().all(|path| is_export_path(path)));
+    assert!(
+        announced
+            .iter()
+            .any(|path| { path.starts_with("assets/") && path.ends_with(".js") })
+    );
+    assert!(announced.contains(&"assets/app.css"));
+    assert!(announced.contains(&"assets/logo.png"));
+
+    let disk_paths = exported_paths(&site);
+    assert_eq!(
+        announced,
+        disk_paths
+            .iter()
+            .map(|path| path.to_str().expect("export paths are UTF-8"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        disk_paths,
         [
-            PathBuf::from("coverage.html"),
-            PathBuf::from("glossary.html"),
-            PathBuf::from("graph.html"),
+            PathBuf::from(".nojekyll"),
+            PathBuf::from("assets/app.css"),
+            PathBuf::from("assets/app.js"),
+            PathBuf::from("assets/logo.png"),
+            PathBuf::from("data.js"),
             PathBuf::from("index.html"),
-            PathBuf::from("intents/INT-0017.html"),
-            PathBuf::from("intents/INT-0042.html"),
         ]
     );
 
-    let dashboard = fs::read_to_string(site.join("index.html")).unwrap();
-    let graph = fs::read_to_string(site.join("graph.html")).unwrap();
-    let intent = fs::read_to_string(site.join("intents/INT-0042.html")).unwrap();
-    let glossary = fs::read_to_string(site.join("glossary.html")).unwrap();
-    let coverage = fs::read_to_string(site.join("coverage.html")).unwrap();
+    assert_eq!(
+        fs::read(site.join("index.html")).unwrap(),
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/dist/index.html"
+        ))
+    );
+    assert!(fs::read(site.join(".nojekyll")).unwrap().is_empty());
 
-    assert!(dashboard.contains("INT-0017"));
-    assert!(dashboard.contains("INT-0042"));
-    assert!(dashboard.contains("Project state: <strong>coherent</strong>"));
-    assert!(graph.contains("id=\"relation-filter\""));
-    assert!(graph.contains("requires"));
-    assert!(intent.contains("Customers must see immediately that their debt is cleared."));
-    assert!(intent.contains("CON-0003"));
-    assert!(intent.contains("src/billing/invoice.rs"));
-    assert!(intent.contains("tests/billing.rs::scn_0107_full_payment_settles_the_invoice"));
-    assert!(intent.contains("href=\"../graph.html\""));
-    assert!(intent.contains("href=\"INT-0017.html\""));
-    assert!(glossary.contains("Invoice"));
-    assert!(glossary.contains("href=\"intents/INT-0042.html\""));
-    assert!(coverage.contains("Intent × scenario × test"));
-    assert!(coverage.contains("SCN-0107"));
-    assert!(coverage.contains("href=\"intents/INT-0042.html#scenario-SCN-0107\""));
+    let payload = data_payload(&fs::read(site.join("data.js")).unwrap());
+    assert_eq!(payload["meta"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(is_build_date(
+        payload["meta"]["build_date"]
+            .as_str()
+            .expect("build_date is a string")
+    ));
+    assert_eq!(payload["meta"]["mode"], "export");
+    assert_eq!(payload["snapshot"]["dashboard"]["state"], "coherent");
+    assert!(
+        payload["snapshot"]["dashboard"]["drift"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        payload["snapshot"]["dashboard"]["open_changes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        payload["snapshot"]["coverage"],
+        json!({
+            "notions": 4,
+            "constraints": 1,
+            "intents_total": 2,
+            "intents_active": 2,
+            "intents_implemented": 1,
+            "scenarios_total": 2,
+            "scenarios_proved": 2,
+            "rows": [
+                {
+                    "intent": "INT-0017",
+                    "scenario": "SCN-0091",
+                    "test": "tests/billing.rs"
+                },
+                {
+                    "intent": "INT-0042",
+                    "scenario": "SCN-0107",
+                    "test": "tests/billing.rs::scn_0107_full_payment_settles_the_invoice"
+                }
+            ]
+        })
+    );
+    assert!(
+        payload["snapshot"]["intents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|intent| intent["id"] == "INT-0042")
+    );
+    assert!(
+        payload["snapshot"]["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scenario| scenario["id"] == "SCN-0107")
+    );
 
-    for path in exported_paths(&site) {
-        let html = fs::read_to_string(site.join(path)).unwrap();
+    for path in ["index.html", "assets/app.css"] {
+        let text = fs::read_to_string(site.join(path)).unwrap();
         for forbidden in [
             "http://",
             "https://",
@@ -126,7 +214,7 @@ fn export_writes_the_sealed_billing_snapshot_with_the_exact_envelope() {
             "href=\"http",
             "src=\"http",
         ] {
-            assert!(!html.contains(forbidden), "found {forbidden:?} in {html}");
+            assert!(!text.contains(forbidden), "found {forbidden:?} in {path}");
         }
     }
 }

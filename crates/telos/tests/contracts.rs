@@ -79,6 +79,29 @@ fn markdown_row(line: &str) -> Vec<&str> {
         .collect()
 }
 
+fn json_code_block_after(document: &str, marker: &str) -> Value {
+    let section = document
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("missing structured contract marker {marker:?}"))
+        .1;
+    let json = section
+        .split_once("```json\n")
+        .unwrap_or_else(|| panic!("missing JSON block after {marker:?}"))
+        .1
+        .split_once("\n```")
+        .expect("JSON contract block is terminated")
+        .0;
+    serde_json::from_str(json)
+        .unwrap_or_else(|error| panic!("invalid JSON contract block after {marker:?}: {error}"))
+}
+
+fn is_export_path(path: &str) -> bool {
+    matches!(path, ".nojekyll" | "index.html" | "data.js")
+        || path
+            .strip_prefix("assets/")
+            .is_some_and(|asset| !asset.is_empty())
+}
+
 struct ServerChild(Option<Child>);
 
 impl Drop for ServerChild {
@@ -554,15 +577,94 @@ fn published_view_routes_and_export_files_are_an_exact_projection() {
     let contracts = include_str!("../../../docs/contracts.md");
     let rows = markdown_table(contracts, "### Live routes and export files");
 
-    assert_eq!(rows[0], ["Page", "Live route", "Export file"]);
+    assert_eq!(rows[0], ["Resource", "Live path", "Export path"]);
     assert_eq!(
         rows[1..],
         [
-            ["Dashboard", "/", "index.html"],
-            ["Graph", "/graph", "graph.html"],
-            ["Intent", "/intent/INT-NNNN", "intents/INT-NNNN.html"],
-            ["Glossary", "/glossary", "glossary.html"],
-            ["Coverage", "/coverage", "coverage.html"],
+            ["Application shell", "/", "index.html"],
+            ["Snapshot payload", "/data.js", "data.js"],
+            ["Embedded asset", "/<path>", "<path>"],
+            ["Live status", "/live.json", "—"],
+            ["Pages marker", "—", ".nojekyll"],
+        ]
+    );
+
+    let routes = markdown_table(contracts, "### Frontend hash routes");
+    assert_eq!(routes[0], ["Page", "Hash route"]);
+    assert_eq!(
+        routes[1..],
+        [
+            ["Dashboard", "#/"],
+            ["Intents", "#/intents"],
+            ["Intent detail", "#/intent/INT-NNNN"],
+            ["Graph", "#/graph"],
+            ["Glossary", "#/glossary"],
+            ["Coverage", "#/coverage"],
+        ]
+    );
+}
+
+#[test]
+fn published_live_status_and_lifecycle_are_exact() {
+    let contracts = include_str!("../../../docs/contracts.md");
+    assert_eq!(
+        json_code_block_after(contracts, "### Initial live status"),
+        json!({
+            "generation": 0,
+            "reload_error": null,
+            "watcher_error": null
+        })
+    );
+
+    let lifecycle = markdown_table(contracts, "### Live status lifecycle");
+    assert_eq!(
+        lifecycle[0],
+        [
+            "Event",
+            "Snapshot",
+            "generation",
+            "reload_error",
+            "watcher_error",
+        ]
+    );
+    assert_eq!(
+        lifecycle[1..],
+        [
+            [
+                "Initial state",
+                "initial good snapshot",
+                "0",
+                "null",
+                "null"
+            ],
+            [
+                "Successful relevant batch at sequence S",
+                "replaced atomically",
+                "increment once, saturating at u64::MAX",
+                "null",
+                "clear only when S > recorded watcher-error sequence; otherwise unchanged",
+            ],
+            [
+                "Invalid reload",
+                "last good snapshot retained",
+                "unchanged",
+                "reload error message",
+                "unchanged",
+            ],
+            [
+                "Watcher failure at sequence W",
+                "last good snapshot retained",
+                "unchanged",
+                "unchanged",
+                "watcher error message recorded with W",
+            ],
+            [
+                "Later successful relevant batch at sequence S > W",
+                "replaced atomically",
+                "increment once, saturating at u64::MAX",
+                "null",
+                "null",
+            ],
         ]
     );
 }
@@ -1021,22 +1123,51 @@ fn view_export_and_live_use_exact_representative_envelopes() {
         .output()
         .unwrap();
     assert!(output.status.success());
+    let export_envelope = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+    assert_exactly_the_five_keys(export_envelope.as_object().unwrap());
+    assert_eq!(export_envelope["ok"], true);
+    assert_eq!(export_envelope["command"], "view");
+    assert_eq!(export_envelope["error"], Value::Null);
+    assert_eq!(export_envelope["next_actions"], json!([]));
+    assert_eq!(export_envelope["result"]["mode"], "export");
+    assert_eq!(export_envelope["result"]["destination"], "site");
+
+    let files = export_envelope["result"]["files"]
+        .as_array()
+        .expect("view export result.files is an array")
+        .iter()
+        .map(|path| path.as_str().expect("an export path is a string"))
+        .collect::<Vec<_>>();
+    assert!(files.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(files.iter().copied().all(is_export_path));
+    assert!(
+        files
+            .iter()
+            .any(|path| path.starts_with("assets/") && path.ends_with(".js")),
+        "the SPA export includes at least one JavaScript asset"
+    );
+
+    let expected_export = json!({
+        "ok":true,
+        "command":"view",
+        "result":{
+            "mode":"export",
+            "destination":"site",
+            "files":[
+                ".nojekyll", "assets/app.css", "assets/app.js", "assets/logo.png",
+                "data.js", "index.html"
+            ]
+        },
+        "error":null,
+        "next_actions":[]
+    });
+    assert_eq!(export_envelope, expected_export);
+
+    let contracts = include_str!("../../../docs/contracts.md");
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        json!({
-            "ok":true,
-            "command":"view",
-            "result":{
-                "mode":"export",
-                "destination":"site",
-                "files":[
-                    "coverage.html", "glossary.html", "graph.html", "index.html",
-                    "intents/INT-0017.html", "intents/INT-0042.html"
-                ]
-            },
-            "error":null,
-            "next_actions":[]
-        })
+        json_code_block_after(contracts, "### Export envelope"),
+        expected_export,
+        "the published example is the exact representative export envelope"
     );
 
     let live = with_fixture();
@@ -1052,7 +1183,9 @@ fn view_export_and_live_use_exact_representative_envelopes() {
     let mut line = String::new();
     BufReader::new(stdout).read_line(&mut line).unwrap();
     let envelope: Value = serde_json::from_str(line.trim_end()).unwrap();
-    let url = envelope["result"]["url"].as_str().unwrap();
+    let url = envelope["result"]["url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("live projection startup failed: {envelope}"));
     assert!(url.starts_with("http://127.0.0.1:"));
     assert_eq!(
         envelope,

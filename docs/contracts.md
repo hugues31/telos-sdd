@@ -1076,24 +1076,42 @@ or constraint gate.
 
 ### `view [--port N] [--export DIR]`
 
-Live and export consume the same immutable `ViewSnapshot` and the same HTML
-renderer. The five page families and their exact mappings are:
+Live and export consume the same immutable `ViewSnapshot`. The binary embeds
+one SPA application shell and all of its assets; live serves that shell with a
+generated `/data.js`, while export writes the same shell and assets with the
+same deterministic snapshot payload in `data.js`.
+
+The SPA owns navigation. Its six frontend routes are:
+
+### Frontend hash routes
+
+| Page | Hash route |
+|---|---|
+| Dashboard | `#/` |
+| Intents | `#/intents` |
+| Intent detail | `#/intent/INT-NNNN` |
+| Graph | `#/graph` |
+| Glossary | `#/glossary` |
+| Coverage | `#/coverage` |
 
 ### Live routes and export files
 
-| Page | Live route | Export file |
+| Resource | Live path | Export path |
 |---|---|---|
-| Dashboard | `/` | `index.html` |
-| Graph | `/graph` | `graph.html` |
-| Intent | `/intent/INT-NNNN` | `intents/INT-NNNN.html` |
-| Glossary | `/glossary` | `glossary.html` |
-| Coverage | `/coverage` | `coverage.html` |
+| Application shell | `/` | `index.html` |
+| Snapshot payload | `/data.js` | `data.js` |
+| Embedded asset | `/<path>` | `<path>` |
+| Live status | `/live.json` | — |
+| Pages marker | — | `.nojekyll` |
 
-The Dashboard exposes state, open changes, and drift; Graph exposes all eight
-relation filters; Intent exposes canonical statement, scenarios, applicable
-constraints, `implements`, and `proves`; Glossary exposes notions; Coverage
-is the intent × scenario × test matrix. All pages cross-link through the
-mapping above. An unknown or malformed intent route is HTTP 404.
+Every other server HTTP path returns HTTP 404. In particular, frontend hash
+routes are never direct server paths.
+
+The Dashboard exposes state, open changes, and drift; Intents lists every
+intent; Graph exposes all eight relation filters; Intent detail exposes the
+canonical statement, scenarios, applicable constraints, `implements`, and
+`proves`; Glossary exposes notions; Coverage is the intent × scenario × test
+matrix. All pages cross-link through the hash routes above.
 
 #### Static export
 
@@ -1115,14 +1133,16 @@ refused as drift; newly saved model bytes are never labelled coherent. The
 snapshot itself owns the already-authenticated model bytes, so later working
 tree edits cannot change what is rendered.
 
-Every page is rendered in memory before publication. Under the filesystem
+Every file is assembled in memory before publication. Under the filesystem
 publication threat model below, the exporter writes a unique sibling staging
 directory and promotes it atomically with a no-replacement primitive: no
 ordinary concurrent owner is overwritten, and any render, write, or
 finalization error leaves no final destination. `files` is sorted by
-repository-style `/` path. HTML is byte-deterministic and self-contained: CSS
-and JavaScript are inline and no page contains an external URL, font, image,
-stylesheet, script, or network request.
+repository-style `/` path. For a given binary and snapshot, the complete
+export tree is byte-deterministic and self-contained: every script, style,
+font, and image it uses is present in the export, and no exported page makes a
+network request. Every published path is exactly `index.html`, `data.js`,
+`.nojekyll`, or is below `assets/`.
 
 The exporter also captures the no-follow identity of the full destination
 parent chain. It reopens that pathname chain and compares every identity
@@ -1140,6 +1160,8 @@ the replacement owner.
 | render/write/finalization error | absent | n/a | authenticated Telos staging cleaned |
 | staging identity mismatch | absent | replacement preserved | foreign/replaced entry never cleaned |
 
+### Export envelope
+
 ```json
 {
   "ok": true,
@@ -1148,12 +1170,12 @@ the replacement owner.
     "mode": "export",
     "destination": "site",
     "files": [
-      "coverage.html",
-      "glossary.html",
-      "graph.html",
-      "index.html",
-      "intents/INT-0017.html",
-      "intents/INT-0042.html"
+      ".nojekyll",
+      "assets/app.css",
+      "assets/app.js",
+      "assets/logo.png",
+      "data.js",
+      "index.html"
     ]
   },
   "error": null,
@@ -1173,14 +1195,62 @@ exactly one startup line, then serves until Ctrl-C or process termination:
 {"ok":true,"command":"view","result":{"mode":"server","url":"http://127.0.0.1:<allocated>/"},"error":null,"next_actions":[]}
 ```
 
+The live HTTP boundary is tied to that exact advertised authority. Every
+request must carry `Host: 127.0.0.1:<allocated>`; a missing or different Host
+is refused with HTTP 421, including `localhost` or another port. A successful
+`GET /` establishes a per-process 256-bit CSPRNG session as the host-only
+session cookie `telos_view_session_<allocated>`, with
+`HttpOnly; SameSite=Strict; Path=/`. Including the port in the name lets
+multiple live servers coexist even though cookies themselves have no port
+scope. `Secure` is intentionally absent because the advertised loopback URL
+is HTTP. The credential is never placed in the URL or shell body.
+
+`/data.js` and `/live.json` require that exact session cookie. They also reject
+HTTP 403 when a present `Sec-Fetch-Site` is anything except `same-origin` or
+`none`; this includes `same-site` requests from another loopback port, where a
+Strict cookie alone would not create an origin boundary. A non-browser client
+may omit Fetch Metadata, but still needs the exact Host and must first obtain
+the session through `/`. Sensitive successes and refusals are `no-store`, and
+all live resources carry `Cross-Origin-Resource-Policy: same-origin`.
+
+This boundary prevents a web origin from importing the executable live
+snapshot or polling its status. It does not attempt to isolate the model from
+another local process running as the user, because such a process can make the
+same two raw loopback requests. Static export has no session boundary: its
+`data.js` remains a self-contained file suitable for `file://` and GitHub
+Pages.
+
 The recursive watcher ignores root `.git`, the repository-root `target`, and
 exporter staging paths. A nested project path such as
 `examples/target/...` remains relevant and triggers reload. It coalesces bursts, rebuilds the complete state/model off the
 read lock, and atomically replaces the snapshot only after successful
-validation. An invalid edit retains the last good pages and adds an escaped
-reload-error banner; a later valid reload clears it. Watcher errors are
-reported in the banner rather than terminating the server. Serving and
-reloading never write project or Telos bytes.
+validation. Watcher errors are reported through `/live.json` rather than
+terminating the server.
+
+### Live status lifecycle
+
+| Event | Snapshot | generation | reload_error | watcher_error |
+|---|---|---|---|---|
+| Initial state | initial good snapshot | `0` | `null` | `null` |
+| Successful relevant batch at sequence S | replaced atomically | increment once, saturating at u64::MAX | `null` | clear only when S > recorded watcher-error sequence; otherwise unchanged |
+| Invalid reload | last good snapshot retained | unchanged | reload error message | unchanged |
+| Watcher failure at sequence W | last good snapshot retained | unchanged | unchanged | watcher error message recorded with W |
+| Later successful relevant batch at sequence S > W | replaced atomically | increment once, saturating at u64::MAX | `null` | `null` |
+
+Event sequences increase monotonically. Thus a successful relevant batch
+clears a watcher error only when its sequence is strictly greater than the
+recorded watcher-error sequence; an older or same-sequence success may clear
+`reload_error` and increment `generation`, but it retains `watcher_error`.
+
+### Initial live status
+
+The status response initially has the exact three-field shape:
+
+```json
+{"generation":0,"reload_error":null,"watcher_error":null}
+```
+
+Serving and reloading never write project or Telos bytes.
 
 ### `rebuild plan|status`
 
@@ -1393,9 +1463,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Telos v0.7.1
+      - name: Install Telos v0.8.0
         run: |
-          version=0.7.1
+          version=0.8.0
           asset="telos_${version}_linux_amd64.tar.gz"
           base="https://github.com/hugues31/telos-sdd/releases/download/v${version}"
           cd "$RUNNER_TEMP"
@@ -1410,8 +1480,8 @@ jobs:
 ```
 
 The downloaded release version is derived from the CLI package version.
-Shipping 0.7.1 therefore requires release `v0.7.1` to carry the
-`telos_0.7.1_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
+Shipping 0.8.0 therefore requires release `v0.8.0` to carry the
+`telos_0.8.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
 generated install step cannot succeed. The workflow reports a check but does
 not itself make GitHub treat it as required: repository branch protection
 must separately require job `sealed` before merges.

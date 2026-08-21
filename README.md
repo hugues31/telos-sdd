@@ -84,6 +84,17 @@ runs `telos check --sealed`. Publish that release with its binary assets
 before relying on the workflow, and enable branch protection separately if the
 check must be required before merge.
 
+## See it in action on GitHub
+
+[telos-tamagotchi](https://github.com/hugues31/telos-tamagotchi) is a
+complete, replayable demo: a Tamagotchi raised spec-first through five sealed
+change transactions — 12 intents, 17 scenarios each proven by red-then-green
+witnesses, and two constraints with executable checks — with the
+implementation in Python. Each version is a prompt you can read, hand to a
+coding agent, or replay deterministically, and the demo's CI rebuilds the
+whole story from an empty directory on every push. Browse the exported spec at
+[hugues31.github.io/telos-tamagotchi](https://hugues31.github.io/telos-tamagotchi/).
+
 ## Core workflow
 
 Never edit files under `telos/` directly. Use a change transaction:

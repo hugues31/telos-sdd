@@ -613,9 +613,11 @@ fn publish_no_replace(
     })?;
 
     // SAFETY: both C strings remain alive for the call, and both names are
-    // resolved relative to the retained destination-parent capability.
+    // resolved relative to the retained destination-parent capability. The
+    // raw syscall is used because musl exports no `renameat2` wrapper.
     let result = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             staging.parent.as_raw_fd(),
             staging_name.as_ptr(),
             staging.parent.as_raw_fd(),

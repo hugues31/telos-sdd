@@ -6,3 +6,7 @@ crates/telos-core/tests/corpus/** text eol=lf
 # The rebuild demo is executable documentation: its tests match exact
 # LF-delimited markers in the README and compare demo bytes.
 demo/** text eol=lf
+# The installers are fetched raw from GitHub and piped straight into
+# sh/PowerShell: keep the committed bytes LF on every checkout.
+install.sh text eol=lf
+install.ps1 text eol=lf

@@ -3,3 +3,6 @@
 # round-trip tests compare bytes, on Windows CI too.
 *.tel text eol=lf
 crates/telos-core/tests/corpus/** text eol=lf
+# The rebuild demo is executable documentation: its tests match exact
+# LF-delimited markers in the README and compare demo bytes.
+demo/** text eol=lf

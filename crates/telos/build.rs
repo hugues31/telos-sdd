@@ -208,7 +208,7 @@ fn content_type(extension: &str) -> Option<&'static str> {
 }
 
 fn generated_assets(assets: &[FrontendAsset]) -> String {
-    let mut generated = String::from("static ASSETS: &[Asset] = &[\n");
+    let mut generated = String::from("pub(crate) static ASSETS: &[Asset] = &[\n");
     for asset in assets {
         generated.push_str(&format!(
             "    Asset {{ path: {:?}, content_type: {:?}, bytes: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../frontend/dist/\", {:?})) }},\n",

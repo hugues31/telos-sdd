@@ -1,6 +1,6 @@
-//! Atomic static export of a rendered [`ViewSnapshot`].
+//! Atomic static export of an embedded SPA and its [`ViewSnapshot`] payload.
 //!
-//! Every page is rendered in memory, written through a held capability into a
+//! Every file is assembled in memory, written through a held capability into a
 //! high-entropy sibling staging directory, and validated before one atomic,
 //! no-replace publication. The final destination is therefore absent on
 //! failure and never exposes a partially written tree.
@@ -19,16 +19,15 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use super::assets::ASSETS;
+use super::data::{DataMode, data_js};
+use super::model::ViewSnapshot;
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::ids::IntentId;
-
-use super::html::{LinkMode, Page, render};
-use super::model::ViewSnapshot;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct EntryIdentity {
@@ -127,17 +126,17 @@ where
     before_reserve(destination)
         .map_err(|error| io_error("prepare destination reservation for", destination, error))?;
     refuse_existing(destination)?;
-    let rendered = rendered_files(snapshot)?;
+    let files = export_files(snapshot);
     let mut staging = StagingDirectory::reserve_with_hook(destination, after_staging_create)?;
 
     (|| {
-        for (relative, bytes) in &rendered {
+        for (relative, bytes) in &files {
             let path = staging.path().join(relative);
             write_file(staging.path(), staging.dir(), relative, bytes)
                 .map_err(|error| io_error("write", &path, error))?;
         }
 
-        staging.validate_contents(&rendered)?;
+        staging.validate_contents(&files)?;
         before_publish(staging.path())
             .map_err(|error| io_error("finalize staging for", destination, error))?;
         staging.refuse_existing_destination(destination)?;
@@ -149,7 +148,7 @@ where
         staging.verify_announced_parent(destination)?;
         publish_no_replace(&mut staging, destination, existing_destination)?;
         staging.published = true;
-        Ok(rendered.into_iter().map(|(path, _)| path).collect())
+        Ok(files.into_iter().map(|(path, _)| path).collect())
     })()
 }
 
@@ -533,41 +532,20 @@ fn stale_parent(destination: &Path, reason: impl std::fmt::Display) -> TelosErro
     )
 }
 
-fn rendered_files(snapshot: &ViewSnapshot) -> Result<Vec<(PathBuf, Vec<u8>)>, TelosError> {
-    let mut pages = vec![
-        (PathBuf::from("index.html"), Page::Dashboard),
-        (PathBuf::from("graph.html"), Page::Graph),
-        (PathBuf::from("glossary.html"), Page::Glossary),
-        (PathBuf::from("coverage.html"), Page::Coverage),
-    ];
-    for intent in &snapshot.intents {
-        let id: IntentId = intent.id.parse().map_err(|_| {
-            TelosError::new(
-                ErrorCode::TelosInternal,
-                format!("snapshot contains an invalid intent id `{}`", intent.id),
-            )
-        })?;
-        pages.push((
-            PathBuf::from(format!("intents/{id}.html")),
-            Page::Intent(id),
-        ));
-    }
-    pages.sort_by(|left, right| left.0.cmp(&right.0));
+fn export_files(snapshot: &ViewSnapshot) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = ASSETS
+        .iter()
+        .map(|asset| (PathBuf::from(asset.path), asset.bytes.to_vec()))
+        .collect::<Vec<_>>();
+    files.push((
+        PathBuf::from("data.js"),
+        data_js(snapshot, DataMode::Export).into_bytes(),
+    ));
+    files.push((PathBuf::from(".nojekyll"), Vec::new()));
+    files.sort_by(|left, right| left.0.cmp(&right.0));
 
-    pages
-        .into_iter()
-        .map(|(path, page)| {
-            let bytes = render(snapshot, page, LinkMode::Export)
-                .ok_or_else(|| {
-                    TelosError::new(
-                        ErrorCode::TelosInternal,
-                        format!("snapshot cannot render {}", path.display()),
-                    )
-                })?
-                .into_bytes();
-            Ok((path, bytes))
-        })
-        .collect()
+    debug_assert!(files.windows(2).all(|pair| pair[0].0 != pair[1].0));
+    files
 }
 
 fn refuse_existing(destination: &Path) -> Result<(), TelosError> {
@@ -972,17 +950,23 @@ fn io_error(verb: &str, path: &Path, error: io::Error) -> TelosError {
 mod tests {
     use std::fs;
     use std::io;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
 
     use telos_core::state::{ProjectStateKind, StateReport};
     use telos_core::workspace::Workspace;
 
     use super::{
-        export_with_writer, export_with_writer_and_before_publish, export_with_writer_and_hooks,
-        write_relative,
+        export_files, export_with_writer, export_with_writer_and_before_publish,
+        export_with_writer_and_hooks, write_relative,
     };
-    use crate::view::model::ViewSnapshot;
+    use crate::view::{
+        assets::{ASSETS, lookup},
+        model::ViewSnapshot,
+    };
+
+    const DATA_PREFIX: &str = "window.__TELOS_DATA__ = ";
+    const DATA_SUFFIX: &str = ";\n";
 
     fn fixture_snapshot() -> ViewSnapshot {
         let root =
@@ -997,6 +981,73 @@ mod tests {
             },
             &model,
         )
+    }
+
+    #[test]
+    fn export_files_are_sorted_and_preserve_every_embedded_asset_byte() {
+        let files = export_files(&fixture_snapshot());
+        let paths = files.iter().map(|(path, _)| path).collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            [
+                &PathBuf::from(".nojekyll"),
+                &PathBuf::from("assets/app.css"),
+                &PathBuf::from("assets/app.js"),
+                &PathBuf::from("assets/logo.png"),
+                &PathBuf::from("data.js"),
+                &PathBuf::from("index.html"),
+            ]
+        );
+        assert!(paths.windows(2).all(|pair| pair[0] < pair[1]));
+
+        for asset in ASSETS {
+            let matching = files
+                .iter()
+                .filter(|(path, _)| path == Path::new(asset.path))
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "asset {} appears once", asset.path);
+            assert_eq!(matching[0].1, asset.bytes, "asset {} bytes", asset.path);
+        }
+        assert_eq!(
+            files
+                .iter()
+                .find(|(path, _)| path == Path::new("index.html"))
+                .unwrap()
+                .1,
+            lookup("index.html").unwrap().bytes
+        );
+        assert!(
+            files
+                .iter()
+                .find(|(path, _)| path == Path::new("assets/logo.png"))
+                .unwrap()
+                .1
+                .starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+    }
+
+    #[test]
+    fn export_files_add_an_empty_nojekyll_and_export_mode_data_script() {
+        let files = export_files(&fixture_snapshot());
+        let nojekyll = files
+            .iter()
+            .find(|(path, _)| path == Path::new(".nojekyll"))
+            .unwrap();
+        assert!(nojekyll.1.is_empty());
+
+        let data = files
+            .iter()
+            .find(|(path, _)| path == Path::new("data.js"))
+            .unwrap();
+        let script = std::str::from_utf8(&data.1).unwrap();
+        assert!(script.starts_with(DATA_PREFIX));
+        assert!(script.ends_with(DATA_SUFFIX));
+        let payload: serde_json::Value =
+            serde_json::from_str(&script[DATA_PREFIX.len()..script.len() - DATA_SUFFIX.len()])
+                .unwrap();
+        assert_eq!(payload["meta"]["mode"], "export");
+        assert_eq!(payload["snapshot"]["dashboard"]["state"], "coherent");
     }
 
     #[test]
@@ -1217,7 +1268,7 @@ mod tests {
 
         assert_eq!(error.code, telos_core::error::ErrorCode::TelosInternal);
         assert!(!destination.exists());
-        assert!(displaced.join("graph.html").is_file());
+        assert!(displaced.join("assets/app.js").is_file());
         let replacement = fs::read_dir(temporary.path())
             .unwrap()
             .filter_map(Result::ok)

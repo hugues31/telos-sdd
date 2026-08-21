@@ -80,6 +80,7 @@ fn markdown_row(line: &str) -> Vec<&str> {
 }
 
 fn json_code_block_after(document: &str, marker: &str) -> Value {
+    let document = document.replace("\r\n", "\n");
     let section = document
         .split_once(marker)
         .unwrap_or_else(|| panic!("missing structured contract marker {marker:?}"))
@@ -93,6 +94,16 @@ fn json_code_block_after(document: &str, marker: &str) -> Value {
         .0;
     serde_json::from_str(json)
         .unwrap_or_else(|error| panic!("invalid JSON contract block after {marker:?}: {error}"))
+}
+
+#[test]
+fn json_code_block_after_accepts_crlf_markdown() {
+    let document = "### Example\r\n\r\n```json\r\n{\"ok\":true}\r\n```\r\n";
+
+    assert_eq!(
+        json_code_block_after(document, "### Example"),
+        json!({"ok": true})
+    );
 }
 
 fn is_export_path(path: &str) -> bool {

@@ -25,7 +25,7 @@ fn build() -> Result<(), String> {
             .ok_or_else(|| "CARGO_MANIFEST_DIR is not set while building telos".to_string())?,
     );
     let dist = manifest_dir.join("../../frontend/dist");
-    println!("cargo::rerun-if-changed={}", dist.display());
+    emit_rerun_if_changed(&dist)?;
     println!("cargo::rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     let mut assets = collect_assets(&dist)?;
@@ -44,7 +44,7 @@ fn build() -> Result<(), String> {
     }
 
     for asset in &assets {
-        println!("cargo::rerun-if-changed={}", asset.source.display());
+        emit_rerun_if_changed(&asset.source)?;
     }
 
     let output = PathBuf::from(
@@ -55,14 +55,32 @@ fn build() -> Result<(), String> {
     fs::write(&output, generated_assets(&assets))
         .map_err(|error| format!("failed to write {}: {error}", output.display()))?;
 
-    let date = build_date(&manifest_dir)?;
-    println!("cargo::rustc-env=TELOS_BUILD_DATE={date}");
+    let build_date = build_date(&manifest_dir)?;
+    for dependency in &build_date.git_dependencies {
+        emit_rerun_if_changed(dependency)?;
+    }
+    println!("cargo::rustc-env=TELOS_BUILD_DATE={}", build_date.date);
     Ok(())
 }
 
 fn collect_assets(dist: &Path) -> Result<Vec<FrontendAsset>, String> {
-    if !dist.is_dir() {
-        return Err(invalid_dist(dist, "directory is missing"));
+    let metadata = match fs::symlink_metadata(dist) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(invalid_dist(dist, "directory is missing"));
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect frontend directory {}: {error}",
+                dist.display()
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(invalid_dist(dist, "directory must not be a symlink"));
+    }
+    if !metadata.is_dir() {
+        return Err(invalid_dist(dist, "path is not a directory"));
     }
 
     let mut files = Vec::new();
@@ -121,6 +139,11 @@ fn validate_asset(root: &Path, source: &Path) -> Result<FrontendAsset, String> {
                     return Err(format!(
                         "frontend asset has a dangerous path component: {}",
                         source.display()
+                    ));
+                }
+                if value.chars().any(char::is_control) {
+                    return Err(format!(
+                        "frontend asset path contains a control character: {source:?}"
                     ));
                 }
                 components.push(value);
@@ -203,34 +226,89 @@ fn invalid_dist(dist: &Path, reason: &str) -> String {
     )
 }
 
-fn build_date(manifest_dir: &Path) -> Result<String, String> {
-    let seconds = match env::var("SOURCE_DATE_EPOCH") {
-        Ok(value) => value
-            .parse::<i64>()
-            .map_err(|error| format!("invalid SOURCE_DATE_EPOCH value `{value}`: {error}"))?,
-        Err(env::VarError::NotPresent) => {
-            git_timestamp(manifest_dir).unwrap_or_else(current_timestamp)
-        }
+struct BuildDate {
+    date: String,
+    git_dependencies: Vec<PathBuf>,
+}
+
+fn build_date(manifest_dir: &Path) -> Result<BuildDate, String> {
+    let (seconds, git_dependencies) = match env::var("SOURCE_DATE_EPOCH") {
+        Ok(value) => (
+            value
+                .parse::<i64>()
+                .map_err(|error| format!("invalid SOURCE_DATE_EPOCH value `{value}`: {error}"))?,
+            Vec::new(),
+        ),
+        Err(env::VarError::NotPresent) => match git_timestamp(manifest_dir) {
+            Some(seconds) => (seconds, git_dependencies(manifest_dir)?),
+            None => (current_timestamp(), Vec::new()),
+        },
         Err(env::VarError::NotUnicode(_)) => {
             return Err("SOURCE_DATE_EPOCH is not valid UTF-8".to_string());
         }
     };
-    Ok(date_from_unix_seconds(seconds))
+    Ok(BuildDate {
+        date: date_from_unix_seconds(seconds)?,
+        git_dependencies,
+    })
 }
 
-fn git_timestamp(manifest_dir: &Path) -> Option<i64> {
+fn emit_rerun_if_changed(path: &Path) -> Result<(), String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| format!("cannot emit a Cargo rerun path that is not UTF-8: {path:?}"))?;
+    if path.chars().any(char::is_control) {
+        return Err(format!(
+            "cannot emit a Cargo rerun path containing a control character: {path:?}"
+        ));
+    }
+    println!("cargo::rerun-if-changed={path}");
+    Ok(())
+}
+
+fn git_dependencies(manifest_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut names = vec!["HEAD".to_string(), "logs/HEAD".to_string()];
+    if let Some(reference) = git_output(manifest_dir, &["symbolic-ref", "-q", "HEAD"]) {
+        names.push(reference.clone());
+        names.push(format!("logs/{reference}"));
+    }
+    names.push("packed-refs".to_string());
+
+    let mut paths = names
+        .iter()
+        .map(|name| {
+            git_output(
+                manifest_dir,
+                &["rev-parse", "--path-format=absolute", "--git-path", name],
+            )
+            .map(PathBuf::from)
+            .ok_or_else(|| format!("failed to resolve Git metadata path `{name}`"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn git_output(manifest_dir: &Path, arguments: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(manifest_dir)
-        .args(["log", "-1", "--format=%ct"])
+        .args(arguments)
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    std::str::from_utf8(&output.stdout)
-        .ok()?
-        .trim()
+    let output = std::str::from_utf8(&output.stdout).ok()?.trim();
+    if output.is_empty() || output.contains(['\r', '\n']) {
+        return None;
+    }
+    Some(output.to_string())
+}
+
+fn git_timestamp(manifest_dir: &Path) -> Option<i64> {
+    git_output(manifest_dir, &["log", "-1", "--format=%ct"])?
         .parse()
         .ok()
 }
@@ -242,7 +320,7 @@ fn current_timestamp() -> i64 {
     }
 }
 
-fn date_from_unix_seconds(seconds: i64) -> String {
+fn date_from_unix_seconds(seconds: i64) -> Result<String, String> {
     let days = seconds.div_euclid(86_400);
     let shifted = days + 719_468;
     let era = if shifted >= 0 {
@@ -259,5 +337,10 @@ fn date_from_unix_seconds(seconds: i64) -> String {
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     year += i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
+    if !(0..=9_999).contains(&year) {
+        return Err(format!(
+            "Unix timestamp {seconds} resolves to unsupported UTC year {year}; supported date range is 0000-01-01 through 9999-12-31"
+        ));
+    }
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
 }

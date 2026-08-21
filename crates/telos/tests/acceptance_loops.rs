@@ -838,7 +838,14 @@ fn loop_projection() {
         json!({"generation": 0, "reload_error": null, "watcher_error": null})
     );
 
-    for route in ["/graph", "/glossary", "/intent/INT-0042", "/coverage"] {
+    for route in [
+        "/intents",
+        "/graph",
+        "/glossary",
+        "/intent/INT-0042",
+        "/coverage",
+        "/missing",
+    ] {
         let response = http_get(url, route);
         assert!(response.starts_with("HTTP/1.1 404 "), "{route}: {response}");
     }

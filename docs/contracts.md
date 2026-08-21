@@ -1199,11 +1199,27 @@ The recursive watcher ignores root `.git`, the repository-root `target`, and
 exporter staging paths. A nested project path such as
 `examples/target/...` remains relevant and triggers reload. It coalesces bursts, rebuilds the complete state/model off the
 read lock, and atomically replaces the snapshot only after successful
-validation. A successful replacement increases `generation` monotonically.
-An invalid edit retains the last good snapshot and sets `reload_error` in
-`/live.json`; a later valid reload clears it. Watcher errors set
-`watcher_error` in `/live.json` rather than terminating the server. The status
-response always has the same three fields:
+validation. Watcher errors are reported through `/live.json` rather than
+terminating the server.
+
+### Live status lifecycle
+
+| Event | Snapshot | generation | reload_error | watcher_error |
+|---|---|---|---|---|
+| Initial state | initial good snapshot | `0` | `null` | `null` |
+| Successful relevant batch at sequence S | replaced atomically | increment once, saturating at u64::MAX | `null` | clear only when S > recorded watcher-error sequence; otherwise unchanged |
+| Invalid reload | last good snapshot retained | unchanged | reload error message | unchanged |
+| Watcher failure at sequence W | last good snapshot retained | unchanged | unchanged | watcher error message recorded with W |
+| Later successful relevant batch at sequence S > W | replaced atomically | increment once, saturating at u64::MAX | `null` | `null` |
+
+Event sequences increase monotonically. Thus a successful relevant batch
+clears a watcher error only when its sequence is strictly greater than the
+recorded watcher-error sequence; an older or same-sequence success may clear
+`reload_error` and increment `generation`, but it retains `watcher_error`.
+
+### Initial live status
+
+The status response initially has the exact three-field shape:
 
 ```json
 {"generation":0,"reload_error":null,"watcher_error":null}

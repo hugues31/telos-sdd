@@ -605,6 +605,71 @@ fn published_view_routes_and_export_files_are_an_exact_projection() {
 }
 
 #[test]
+fn published_live_status_and_lifecycle_are_exact() {
+    let contracts = include_str!("../../../docs/contracts.md");
+    assert_eq!(
+        json_code_block_after(contracts, "### Initial live status"),
+        json!({
+            "generation": 0,
+            "reload_error": null,
+            "watcher_error": null
+        })
+    );
+
+    let lifecycle = markdown_table(contracts, "### Live status lifecycle");
+    assert_eq!(
+        lifecycle[0],
+        [
+            "Event",
+            "Snapshot",
+            "generation",
+            "reload_error",
+            "watcher_error",
+        ]
+    );
+    assert_eq!(
+        lifecycle[1..],
+        [
+            [
+                "Initial state",
+                "initial good snapshot",
+                "0",
+                "null",
+                "null"
+            ],
+            [
+                "Successful relevant batch at sequence S",
+                "replaced atomically",
+                "increment once, saturating at u64::MAX",
+                "null",
+                "clear only when S > recorded watcher-error sequence; otherwise unchanged",
+            ],
+            [
+                "Invalid reload",
+                "last good snapshot retained",
+                "unchanged",
+                "reload error message",
+                "unchanged",
+            ],
+            [
+                "Watcher failure at sequence W",
+                "last good snapshot retained",
+                "unchanged",
+                "unchanged",
+                "watcher error message recorded with W",
+            ],
+            [
+                "Later successful relevant batch at sequence S > W",
+                "replaced atomically",
+                "increment once, saturating at u64::MAX",
+                "null",
+                "null",
+            ],
+        ]
+    );
+}
+
+#[test]
 fn published_state_admission_matrix_is_exact() {
     let contracts = include_str!("../../../docs/contracts.md");
     let rows = markdown_table(contracts, "### State admission matrix");

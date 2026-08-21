@@ -20,47 +20,29 @@ application code, or require a hosted service.
 
 ## Install
 
-Telos ships as a single self-contained binary for Linux, macOS, and Windows.
-Git must be available on your PATH at runtime; no Rust toolchain is needed.
-
-### Linux and macOS
+Linux and macOS:
 
 ```console
 curl -fsSL https://raw.githubusercontent.com/hugues31/telos-sdd/main/install.sh | sh
 ```
 
-The script downloads the latest release, verifies its SHA-256 checksum, and
-installs `telos` to `~/.local/bin`. Set `TELOS_VERSION` to pin a release and
-`TELOS_INSTALL_DIR` to change the destination.
-
-### Windows (PowerShell)
+Windows (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/hugues31/telos-sdd/main/install.ps1 | iex
 ```
 
-Installs to `%USERPROFILE%\.local\bin` and adds it to your user PATH. The
-same `TELOS_VERSION` and `TELOS_INSTALL_DIR` variables apply.
-
-### Manual download
-
-Download the archive for your platform and `checksums.txt` from the
-[releases page](https://github.com/hugues31/telos-sdd/releases), verify the
-checksum, and place `telos` on your PATH. Assets are named
-`telos_<version>_<linux|darwin|windows>_<amd64|arm64>.tar.gz` (`.zip` on
-Windows). On macOS, browser downloads are quarantined by Gatekeeper; use the
-install script above or run `xattr -d com.apple.quarantine ./telos`.
-
-### From source
-
-Requires the stable Rust toolchain:
+From source (stable Rust toolchain required):
 
 ```console
 git clone https://github.com/hugues31/telos-sdd.git
 cd telos-sdd
 cargo install --locked --path crates/telos
-telos version
 ```
+
+Prebuilt archives are also on the
+[releases page](https://github.com/hugues31/telos-sdd/releases). Git must be
+available on your PATH at runtime.
 
 ## Quick start
 
@@ -164,12 +146,6 @@ the complete reconstruction protocol.
 Every public command supports a stable five-key `--json` envelope. See the
 [CLI contracts](docs/contracts.md) for schemas, error codes, safety boundaries,
 and exact command behavior.
-
-## Project scope
-
-Telos currently targets single-repository projects. The web view is read-only,
-the CLI has no hosted runtime, and semantic merge and formal verification are
-out of scope.
 
 ## Development
 

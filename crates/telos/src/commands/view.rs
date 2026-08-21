@@ -19,6 +19,13 @@ use crate::view::model::ViewSnapshot;
 use crate::view::server::LiveServer;
 
 pub fn export(ctx: &Ctx, destination: &str) -> CmdResult {
+    export_with_after_model(ctx, destination, || Ok(()))
+}
+
+fn export_with_after_model<F>(ctx: &Ctx, destination: &str, after_model: F) -> CmdResult
+where
+    F: FnOnce() -> Result<(), TelosError>,
+{
     let mut project = project(ctx)?;
     // Match `check --sealed` gate order exactly: damage wins over work in
     // progress, and neither state is permitted to publish as a sealed view.
@@ -27,6 +34,7 @@ pub fn export(ctx: &Ctx, destination: &str) -> CmdResult {
 
     debug_assert_eq!(project.state.state, ProjectStateKind::Coherent);
     let model = project.ws.load_model().map_err(diagnostics_to_error)?;
+    after_model()?;
     // Authenticate the exact model read above. A normal save between the
     // first state pass and model loading is now visible here, and a newly
     // opened change is included by the fresh single scan.
@@ -111,4 +119,90 @@ pub(crate) fn render_startup_error(error: TelosError, json: bool) -> ExitCode {
         eprintln!("{text}");
     }
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use telos_core::git::GitRepo;
+    use telos_core::lock::seal;
+    use telos_core::workspace::Workspace;
+
+    use super::export_with_after_model;
+    use crate::commands::Ctx;
+
+    fn copy_dir(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let target = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    fn sealed_fixture() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telos-core/tests/corpus/billing");
+        copy_dir(&source, tmp.path());
+
+        let bindings_path = tmp.path().join("telos/bindings.tel");
+        let bindings = fs::read_to_string(&bindings_path).unwrap();
+        let (first, rest) = bindings.split_once('\n').unwrap();
+        fs::write(
+            bindings_path,
+            format!("{first}\nproves     \"tests/billing.rs\" -> SCN-0091\n{rest}"),
+        )
+        .unwrap();
+        let config_path = tmp.path().join("telos/telos.toml");
+        let config = fs::read_to_string(&config_path).unwrap();
+        fs::write(
+            config_path,
+            config.replace("cmd = \"\"", "cmd = \"git --version\""),
+        )
+        .unwrap();
+
+        let ws = Workspace::discover(tmp.path()).unwrap();
+        let git = GitRepo::discover(tmp.path()).unwrap();
+        let model = ws.load_model().unwrap();
+        seal(&ws, &model, &git, None)
+            .unwrap()
+            .write(&ws.lock_path())
+            .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn export_refuses_a_normal_save_between_model_read_and_authentication() {
+        let tmp = sealed_fixture();
+        let destination = tmp.path().join("site");
+        let intent_path = tmp.path().join("telos/intents/INT-0017.tel");
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+
+        let result = export_with_after_model(&ctx, destination.to_str().unwrap(), || {
+            let mut source = fs::read_to_string(&intent_path).unwrap();
+            source.push('\n');
+            fs::write(&intent_path, source).unwrap();
+            Ok(())
+        });
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code, telos_core::error::ErrorCode::TelosDriftDetected);
+        assert!(!destination.exists());
+    }
 }

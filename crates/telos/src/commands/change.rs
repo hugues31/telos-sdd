@@ -345,15 +345,10 @@ fn approve(ctx: &Ctx, id: &str, expected_digest: Option<&str>) -> CmdResult {
     let project = project(ctx)?;
     require_no_unclaimed_drift(&project)?;
 
-    let mut change = read_change(&project.ws, id)?;
+    let change = read_change(&project.ws, id)?;
     let current_digest = change.ops_digest();
-    if expected_digest.is_some_and(|expected| expected != current_digest) {
-        return Err(TelosError::new(
-            ErrorCode::TelosChangeStateInvalid,
-            format!("change {id} no longer matches the expected digest"),
-        )
-        .hint("run `telos change diff` again and review the new digest"));
-    }
+    let authorized_digest = expected_digest.unwrap_or(&current_digest).to_string();
+    require_expected_digest(id, &current_digest, &authorized_digest)?;
     if change.ops.is_empty() {
         return Err(TelosError::new(
             ErrorCode::TelosChangeStateInvalid,
@@ -364,12 +359,20 @@ fn approve(ctx: &Ctx, id: &str, expected_digest: Option<&str>) -> CmdResult {
     let effective = apply_config_ops(&project.ws.config, &change.ops);
     Config::validate_transition(&project.ws.config, &effective)?;
 
+    // Re-read at the mutation boundary. The optional argument is retained
+    // for deliberate interactive-human compatibility, but even that route
+    // binds itself to the digest first observed above rather than silently
+    // approving a delta saved while validation was in progress.
+    let mut change = read_change(&project.ws, id)?;
+    let boundary_digest = change.ops_digest();
+    require_expected_digest(id, &boundary_digest, &authorized_digest)?;
+
     let status = match change.status {
         ChangeStatus::Implementing => ChangeStatus::Implementing,
         _ => ChangeStatus::Approved,
     };
     change.status = status;
-    change.approved_digest = Some(current_digest);
+    change.approved_digest = Some(boundary_digest);
     write_change(&project.ws, &change)?;
 
     let digest = change.approved_digest.expect("just set above");
@@ -378,6 +381,17 @@ fn approve(ctx: &Ctx, id: &str, expected_digest: Option<&str>) -> CmdResult {
         human: format!("{id}: approved, digest {digest}"),
         next_actions: vec![format!("telos change reconcile {id}")],
     })
+}
+
+fn require_expected_digest(id: ChangeId, current: &str, expected: &str) -> Result<(), TelosError> {
+    if current == expected {
+        return Ok(());
+    }
+    Err(TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        format!("change {id} no longer matches the expected digest"),
+    )
+    .hint("run `telos change diff` again and review the new digest"))
 }
 
 // --- change reconcile --------------------------------------------------------

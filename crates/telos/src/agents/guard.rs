@@ -933,6 +933,15 @@ fn human_action(commands: &[SimpleCommand]) -> Result<Option<HumanAction>, ()> {
         {
             Ok(Some(HumanAction::Adopt(token.clone())))
         }
+        [program, action, into_flag, id, state_flag, token]
+            if program == "telos"
+                && action == "adopt"
+                && into_flag == "--into"
+                && state_flag == "--expected-state" =>
+        {
+            id.parse::<ChangeId>().map_err(|_| ())?;
+            Ok(Some(HumanAction::Adopt(token.clone())))
+        }
         [program, action, flag, token]
             if program == "telos" && action == "revert" && flag == "--expected-state" =>
         {

@@ -51,6 +51,7 @@ struct RebuildInput {
 /// semantic pass judges their combined result.
 fn load(ctx: &Ctx, include_contexts: bool) -> Result<RebuildInput, TelosError> {
     let discovered = Workspace::discover(&ctx.cwd)?;
+    discovered.config.validate_self()?;
     let lock_path = discovered.lock_path();
     let has_lock_entry = match fs::symlink_metadata(&lock_path) {
         Ok(_) => true,
@@ -208,6 +209,27 @@ fn plan(input: &RebuildInput) -> CmdResult {
 
 fn status(input: &RebuildInput) -> CmdResult {
     let runner = require_runner(&input.ws)?;
+    let mut first_scenario_by_proof = BTreeMap::<TestRef, ScenarioId>::new();
+    for scenario in input.model.scenario_owner.keys() {
+        for proof in proofs_for(&input.model, *scenario) {
+            first_scenario_by_proof.entry(proof).or_insert(*scenario);
+        }
+    }
+    let mut outcomes = BTreeMap::<TestRef, (bool, String)>::new();
+    for (test, scenario) in first_scenario_by_proof {
+        let filter = test.name.as_deref().unwrap_or_else(|| test.path.as_str());
+        let command = substitute_filter(&runner, filter);
+        let green = if proof_resolves(&input.ws, scenario, &test)? {
+            run_shell_with_filter(&runner, filter, &input.ws.repo_root)?
+                .result
+                .status
+                == 0
+        } else {
+            false
+        };
+        outcomes.insert(test, (green, command));
+    }
+
     let mut green_count = 0usize;
     let mut scenarios = Vec::with_capacity(input.model.scenario_owner.len());
 
@@ -217,16 +239,9 @@ fn status(input: &RebuildInput) -> CmdResult {
         let mut green = !proofs.is_empty();
 
         for test in &proofs {
-            let filter = test.name.as_deref().unwrap_or_else(|| test.path.as_str());
-            let command = substitute_filter(&runner, filter);
-            let target_green = if proof_resolves(&input.ws, *scenario, test)? {
-                run_shell_with_filter(&runner, filter, &input.ws.repo_root)?
-                    .result
-                    .status
-                    == 0
-            } else {
-                false
-            };
+            let (target_green, command) = outcomes
+                .get(test)
+                .expect("every scenario proof was executed in the global pass");
             green &= target_green;
             tests.push(json!({
                 "test": test.to_string(),

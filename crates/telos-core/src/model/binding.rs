@@ -36,7 +36,7 @@ impl Binding {
 
 /// A test locator: `path` (mandatory) and an optional test `name`, joined by
 /// `"::"` (e.g. `"tests/billing.rs::scn_0107"`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct TestRef {
     pub path: RepoPath,
     pub name: Option<String>,

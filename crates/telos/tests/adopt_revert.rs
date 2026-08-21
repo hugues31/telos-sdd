@@ -571,6 +571,51 @@ fn revert_on_a_coherent_project_is_refused() {
     );
 }
 
+#[test]
+fn adopt_refuses_a_drift_token_whose_scope_changed_during_review() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+    append(dir, INVOICE, "\n");
+    let token = state(dir)["drift"]["token"].as_str().unwrap().to_string();
+    append(dir, CONFIG, "\n# later drift\n");
+
+    let error = run_err(
+        dir,
+        &["adopt", "--expected-state", &token, "--json"],
+        "TELOS_CHANGE_STATE_INVALID",
+    );
+
+    assert_eq!(
+        error["message"],
+        json!("project drift no longer matches the expected state token")
+    );
+    assert!(!dir.join("telos/changes/CHG-0001.tel").exists());
+}
+
+#[test]
+fn revert_refuses_a_drift_token_whose_scope_changed_during_review() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+    append(dir, INVOICE, "\n");
+    let token = state(dir)["drift"]["token"].as_str().unwrap().to_string();
+    append(dir, CONFIG, "\n# later drift\n");
+    let invoice_before = read(dir, INVOICE);
+    let config_before = read(dir, CONFIG);
+
+    let error = run_err(
+        dir,
+        &["revert", "--expected-state", &token, "--json"],
+        "TELOS_CHANGE_STATE_INVALID",
+    );
+
+    assert_eq!(
+        error["message"],
+        json!("project drift no longer matches the expected state token")
+    );
+    assert_eq!(read(dir, INVOICE), invoice_before);
+    assert_eq!(read(dir, CONFIG), config_before);
+}
+
 /// A drifted `.tel` file that no longer parses cannot become an op: `adopt`
 /// says so, names the other exit, and writes nothing.
 #[test]

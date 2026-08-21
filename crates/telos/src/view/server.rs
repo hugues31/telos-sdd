@@ -447,16 +447,19 @@ fn ignored_event(root: &FsPath, event: &Event) -> bool {
     }
     !event.paths.iter().any(|path| {
         let relative = path.strip_prefix(root).unwrap_or(path);
-        !relative.components().any(|component| match component {
-            Component::Normal(name) => {
-                let name = name.to_string_lossy();
-                name == ".git"
-                    || name == "target"
-                    || name == ".superpowers"
-                    || (name.starts_with('.') && name.contains(".telos-staging-"))
-            }
-            _ => false,
-        })
+        !relative
+            .components()
+            .enumerate()
+            .any(|(index, component)| match component {
+                Component::Normal(name) => {
+                    let name = name.to_string_lossy();
+                    name == ".git"
+                        || (index == 0 && name == "target")
+                        || name == ".superpowers"
+                        || (name.starts_with('.') && name.contains(".telos-staging-"))
+                }
+                _ => false,
+            })
     })
 }
 
@@ -488,7 +491,7 @@ mod tests {
 
     use super::{
         LiveState, MAX_REBUILD_LATENCY, PendingEvents, WatchNotifier, WatchTiming, WatchWork,
-        add_reload_banner, subscribe_before_build, watch_loop,
+        add_reload_banner, ignored_event, subscribe_before_build, watch_loop,
     };
     use crate::view::model::ViewSnapshot;
 
@@ -572,6 +575,17 @@ mod tests {
             10_000,
             "a full wake channel must retain the newest dirty event"
         );
+    }
+
+    #[test]
+    fn watcher_ignores_only_the_repository_root_target_directory() {
+        let root = PathBuf::from("/repo");
+
+        assert!(ignored_event(&root, &event("/repo/target/debug/telos")));
+        assert!(!ignored_event(
+            &root,
+            &event("/repo/examples/target/source.rs")
+        ));
     }
 
     #[test]

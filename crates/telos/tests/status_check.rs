@@ -103,13 +103,21 @@ fn status_reports_drift_after_a_one_byte_append_to_a_sealed_file() {
     );
     let envelope = json_stdout(&out);
     assert_eq!(envelope["result"]["state"], json!("drifted"));
+    assert_eq!(envelope["result"]["drift"]["paths"], json!([INVOICE_TEL]));
     assert_eq!(
-        envelope["result"]["drift"],
-        json!({ "paths": [INVOICE_TEL], "suggestion": "telos adopt" })
+        envelope["result"]["drift"]["suggestion"],
+        json!("telos adopt")
     );
+    let token = envelope["result"]["drift"]["token"]
+        .as_str()
+        .expect("drift token");
+    assert!(token.starts_with("sha256:"));
     assert_eq!(
         envelope["next_actions"],
-        json!(["telos adopt", "telos revert"])
+        json!([
+            format!("telos adopt --expected-state {token}"),
+            format!("telos revert --expected-state {token}")
+        ])
     );
 }
 

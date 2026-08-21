@@ -231,6 +231,35 @@ fn multiple_proofs_are_sorted_deduplicated_and_conjunctive() {
 }
 
 #[test]
+fn one_proof_shared_by_two_scenarios_runs_once_and_projects_one_outcome() {
+    let tmp = unsealed_fixture();
+    write_runner_config(
+        tmp.path(),
+        "git config --file .proof-count --add proof.runs {filter}",
+    );
+    fs::write(tmp.path().join("tests/shared.rs"), "whole-file proof\n").unwrap();
+    fs::write(
+        tmp.path().join("telos/bindings.tel"),
+        "proves \"tests/shared.rs\" -> SCN-0091\n\
+         proves \"tests/shared.rs\" -> SCN-0107\n",
+    )
+    .unwrap();
+
+    let envelope = success(tmp.path(), &["rebuild", "status", "--json"]);
+
+    assert_eq!(envelope["result"]["scenarios_green"], json!(2));
+    let rows = envelope["result"]["scenarios"].as_array().unwrap();
+    assert_eq!(rows[0]["tests"], rows[1]["tests"]);
+    assert_eq!(rows[0]["tests"][0]["green"], json!(true));
+    let count = fs::read_to_string(tmp.path().join(".proof-count")).unwrap();
+    assert_eq!(
+        count.matches("runs = tests/shared.rs").count(),
+        1,
+        "the distinct proof target ran more than once:\n{count}"
+    );
+}
+
+#[test]
 fn a_stale_bound_name_is_red_even_when_the_runner_would_exit_zero() {
     let tmp = unsealed_fixture();
     write_runner_config(tmp.path(), "git hash-object .green");
@@ -342,7 +371,7 @@ fn a_legitimate_path_with_spaces_and_shell_metacharacters_is_one_safe_filter_arg
 }
 
 #[test]
-fn unsafe_or_escaping_proof_paths_are_red_and_never_run() {
+fn unsafe_or_escaping_proof_paths_are_rejected_and_never_run() {
     let tmp = unsealed_fixture();
     write_runner_config(tmp.path(), "mkdir invalid-proof-ran");
     let mut bindings = "proves \"../outside.rs\" -> SCN-0091\n\
@@ -357,15 +386,15 @@ fn unsafe_or_escaping_proof_paths_are_red_and_never_run() {
     }
     fs::write(tmp.path().join("telos/bindings.tel"), bindings).unwrap();
 
-    let envelope = success(tmp.path(), &["rebuild", "status", "--json"]);
+    let (ok, envelope) = run(tmp.path(), &["rebuild", "status", "--json"]);
 
-    assert_eq!(envelope["result"]["scenarios"][0]["green"], json!(false));
+    assert!(!ok);
+    assert_eq!(envelope["error"]["code"], json!("TELOS_PARSE_ERROR"));
     assert!(
-        envelope["result"]["scenarios"][0]["tests"]
-            .as_array()
+        envelope["error"]["message"]
+            .as_str()
             .unwrap()
-            .iter()
-            .all(|test| test["green"] == json!(false))
+            .contains("invalid repository-relative path")
     );
     assert!(!tmp.path().join("invalid-proof-ran").exists());
 }
@@ -775,6 +804,31 @@ fn spec_only_plan_and_status_are_read_only() {
 
     assert_eq!(tree_bytes(tmp.path()), before);
     assert!(!tmp.path().join("telos/telos.lock").exists());
+}
+
+#[test]
+fn spec_only_rebuild_validates_runtime_glob_syntax() {
+    for subcommand in ["plan", "status"] {
+        let tmp = unsealed_fixture();
+        let config_path = tmp.path().join("telos/telos.toml");
+        let source = fs::read_to_string(&config_path).unwrap();
+        fs::write(
+            config_path,
+            source.replace("globs = [\"src/**/*.rs\"]", "globs = [\"[\"]"),
+        )
+        .unwrap();
+
+        let (ok, envelope) = run(tmp.path(), &["rebuild", subcommand, "--json"]);
+
+        assert!(!ok, "{subcommand} accepted an invalid runtime glob");
+        assert_eq!(envelope["error"]["code"], json!("TELOS_PARSE_ERROR"));
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid glob pattern `[`")
+        );
+    }
 }
 
 #[cfg(unix)]

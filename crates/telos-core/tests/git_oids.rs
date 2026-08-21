@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use tempfile::TempDir;
 
@@ -108,6 +110,37 @@ fn blob_oids_hashes_a_batch_in_one_call() {
         Some(&Oid("b2a7546679fdf79ca0eb7bfbee1e1bb342487380".to_string()))
     );
     assert_eq!(oids.len(), 3);
+}
+
+/// More stdout than a conventional 64 KiB pipe can hold. The writer and
+/// reader must make progress concurrently; writing every stdin path before
+/// draining stdout deadlocks this exact real-Git batch.
+#[test]
+fn blob_oids_drains_a_large_real_git_batch_without_pipe_deadlock() {
+    const PATHS: usize = 4_096;
+    let tmp = init_repo();
+    let mut paths = Vec::with_capacity(PATHS);
+    for index in 0..PATHS {
+        let name = format!("many/f{index:04}.txt");
+        let absolute = tmp.path().join(&name);
+        fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        fs::write(absolute, format!("{index}\n")).unwrap();
+        paths.push(RepoPath::parse(&name).unwrap());
+    }
+    let repo = GitRepo::discover(tmp.path()).unwrap();
+    let (sent, received) = mpsc::sync_channel(1);
+
+    std::thread::spawn(move || {
+        let result = repo.blob_oids(&paths).map(|oids| oids.len());
+        let _keep_repository_alive = tmp;
+        sent.send(result).unwrap();
+    });
+
+    let count = received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("git hash-object batch exceeded its bounded completion time")
+        .unwrap();
+    assert_eq!(count, PATHS);
 }
 
 // --- blob_oids: filters apply (the hard Windows point) ---------------------

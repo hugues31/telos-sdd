@@ -253,7 +253,7 @@ fn loop_feature() {
     assert_eq!(status["result"]["state"], json!("coherent"));
 
     // --- Configure the test runner, through the protocol ----------------
-    // The fixture configures a marker-controlled runner. The generated
+    // The fixture configures a direct marker-controlled runner. The generated
     // scenario source below is discoverable under `[tests].globs`; its bytes
     // stay unchanged across the red and green witness calls, while the marker
     // alone selects the runner outcome.
@@ -264,28 +264,10 @@ fn loop_feature() {
         dir.join("telos/telos.toml"),
         "[code]\nglobs = [\"src/**/*.rs\"]\n\n\
          [tests]\nglobs = [\"tests/**/*.rs\"]\n\n\
-         [test]\ncmd = \"sh scripts/fake-test.sh {filter}\"\n\n\
+         [test]\ncmd = \"git hash-object .fake-test-green\"\n\n\
          [policy]\ntdd = \"strict\"\n",
     )
     .expect("failed to write telos.toml");
-    fs::create_dir_all(dir.join("scripts")).expect("failed to create scripts/");
-    fs::write(
-        dir.join("scripts/fake-test.sh"),
-        "#!/bin/sh\n\
-         # Fixture runner: the marker file selects red or green while the
-         # generated scenario test source remains byte-for-byte unchanged.
-         dir=$(dirname \"$0\")\n\
-         if [ -f \"$dir/../.fake-test-green\" ]; then exit 0; else exit 1; fi\n",
-    )
-    .expect("failed to write scripts/fake-test.sh");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let script = dir.join("scripts/fake-test.sh");
-        let mut perms = fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).unwrap();
-    }
 
     let adopted_toml = run_ok(dir, &["adopt", "--json"]);
     let toml_change_id = adopted_toml["result"]["change"]

@@ -160,7 +160,7 @@ Both modes expose Dashboard, Graph, Intent, Glossary, and Coverage. Exported
 HTML is self-contained, uses inline assets, and contains no external URLs.
 Export renders and verifies a sibling staging tree, then publishes it with one
 atomic no-replace operation; collision or any render/write/finalization error
-leaves no final destination and never overwrites an existing owner.
+publishes no Telos-owned destination and preserves the existing owner.
 
 ## Rebuild proof
 

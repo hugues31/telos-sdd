@@ -24,8 +24,9 @@
 use serde_json::json;
 
 use telos_core::adopt::revert;
+use telos_core::changes::scan_changes;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::state::drift_token;
+use telos_core::state::{compute_state, drift_token};
 
 use crate::commands::{Ctx, project, require_drift};
 use crate::envelope::{CmdResult, Outcome};
@@ -34,12 +35,15 @@ pub fn run(ctx: &Ctx, expected_state: Option<&str>) -> CmdResult {
     let project = project(ctx)?;
     require_drift(&project, "revert")?;
     let current = drift_token(&project.lock, &project.state.drift);
-    if expected_state.is_some_and(|expected| expected != current) {
-        return Err(TelosError::new(
-            ErrorCode::TelosChangeStateInvalid,
-            "project drift no longer matches the expected state token",
-        )
-        .hint("run `telos status` again and review the new drift scope"));
+    let authorized = expected_state.unwrap_or(&current).to_string();
+    if authorized != current {
+        return Err(stale_state());
+    }
+
+    let changes = scan_changes(&project.ws)?;
+    let boundary = compute_state(&project.ws, &project.lock, &project.git, &changes.infos)?;
+    if drift_token(&project.lock, &boundary.drift) != authorized {
+        return Err(stale_state());
     }
 
     let outcome = revert(
@@ -59,4 +63,12 @@ pub fn run(ctx: &Ctx, expected_state: Option<&str>) -> CmdResult {
         human,
         next_actions: vec!["telos status".to_string()],
     })
+}
+
+fn stale_state() -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        "project drift no longer matches the expected state token",
+    )
+    .hint("run `telos status` again and review the new drift scope")
 }

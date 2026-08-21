@@ -23,19 +23,19 @@ const RULES_BLOCK: &str = r#"# telos-sdd:start
 prefix_rule(
     pattern = ["telos", "change", "approve"],
     decision = "prompt",
-    justification = "Approve only the digest displayed by `telos change diff` immediately before this command",
+    justification = "Approve only the exact --expected-digest displayed by `telos change diff` immediately before this command",
 )
 
 prefix_rule(
     pattern = ["telos", "adopt"],
     decision = "prompt",
-    justification = "Adopting drift is a human decision",
+    justification = "Adopting the exact --expected-state drift scope is a human decision",
 )
 
 prefix_rule(
     pattern = ["telos", "revert"],
     decision = "prompt",
-    justification = "Reverting drift is a human decision",
+    justification = "Reverting the exact --expected-state drift scope is a human decision",
 )
 # telos-sdd:end"#;
 

@@ -994,6 +994,37 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_partial_agent_publication_refuses_corrupted_owned_markers() {
+        let tmp = repo();
+        let ctx = Ctx {
+            cwd: tmp.path().to_path_buf(),
+        };
+        let first = run_with_agent_renderer(&ctx, &[AgentHost::Codex], None, |plan| {
+            agents::render_with_before_publish(plan, |relative| {
+                if relative == Path::new(".codex/hooks.json") {
+                    Err(io::Error::other("stop after AGENTS publication"))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        assert_eq!(error_code(first), ErrorCode::TelosInternal);
+        let agents_path = tmp.path().join("AGENTS.md");
+        let mut corrupted = fs::read_to_string(&agents_path).unwrap();
+        corrupted.push_str("\n<!-- telos-sdd:start -->\nowner bytes after orphan marker\n");
+        fs::write(&agents_path, corrupted).unwrap();
+        let before = non_git_tree(tmp.path());
+
+        let retried = run(&ctx, &[AgentHost::Codex], None);
+
+        assert_eq!(error_code(retried), ErrorCode::TelosChangeStateInvalid);
+        assert_eq!(non_git_tree(tmp.path()), before);
+        assert!(tmp.path().join(INIT_MARKER_PATH).exists());
+        assert!(!tmp.path().join(".codex/hooks.json").exists());
+        assert!(!tmp.path().join(".codex/rules/telos.rules").exists());
+    }
+
+    #[test]
     fn pre_seal_partial_core_publication_resumes_without_duplicate_merge() {
         let tmp = repo();
         let ctx = Ctx {

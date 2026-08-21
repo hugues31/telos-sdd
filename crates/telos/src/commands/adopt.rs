@@ -32,12 +32,12 @@
 use serde_json::json;
 
 use telos_core::adopt::plan_adopt;
-use telos_core::changes::{read_change, write_change};
+use telos_core::changes::{read_change, scan_changes, write_change};
 use telos_core::counters::write_counters;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::model::{Change, ChangeStatus};
 use telos_core::overlay::validate_ops_idempotent;
-use telos_core::state::drift_token;
+use telos_core::state::{compute_state, drift_token};
 
 use crate::commands::change::parse_change_id;
 use crate::commands::mutate::require_unclaimed;
@@ -59,7 +59,7 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
 
     let project = project(ctx)?;
     require_drift(&project, "adopt")?;
-    require_expected_state(&project, expected_state)?;
+    let authorized_state = require_expected_state(&project, expected_state)?;
 
     // Before the allocator, deliberately: [`allocator`] loads the model, and
     // a spec that does not parse is exactly what an unparseable drifted file
@@ -107,6 +107,8 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
 
     validate_ops_idempotent(&project.ws, &change.ops).map_err(diagnostics_to_error)?;
 
+    require_unchanged_state(&project, &authorized_state)?;
+
     write_change(&project.ws, &change)?;
     // Only a *new* change spent an id; `--into` reuses one that was
     // allocated and persisted when it was opened (D4).
@@ -128,14 +130,31 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
 fn require_expected_state(
     project: &crate::commands::Project,
     expected: Option<&str>,
-) -> Result<(), TelosError> {
+) -> Result<String, TelosError> {
     let current = drift_token(&project.lock, &project.state.drift);
-    if expected.is_some_and(|expected| expected != current) {
-        return Err(TelosError::new(
-            ErrorCode::TelosChangeStateInvalid,
-            "project drift no longer matches the expected state token",
-        )
-        .hint("run `telos status` again and review the new drift scope"));
+    let authorized = expected.unwrap_or(&current);
+    if authorized != current {
+        return Err(stale_state());
+    }
+    Ok(authorized.to_string())
+}
+
+fn require_unchanged_state(
+    project: &crate::commands::Project,
+    expected: &str,
+) -> Result<(), TelosError> {
+    let changes = scan_changes(&project.ws)?;
+    let current = compute_state(&project.ws, &project.lock, &project.git, &changes.infos)?;
+    if drift_token(&project.lock, &current.drift) != expected {
+        return Err(stale_state());
     }
     Ok(())
+}
+
+fn stale_state() -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosChangeStateInvalid,
+        "project drift no longer matches the expected state token",
+    )
+    .hint("run `telos status` again and review the new drift scope")
 }

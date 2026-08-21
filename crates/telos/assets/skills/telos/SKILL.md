@@ -9,7 +9,7 @@ Always begin with `telos status --json`. Do not infer state from files, prose, o
 
 - `coherent`: use `telos-challenger` for a requested behavior/specification change; use `telos-implementer` only for an already approved change.
 - `changing`: inspect `result.changes[*].status` and `obligations`. Route an `open` or `drafted` change to `telos-challenger`; route an `approved` or `implementing` change to `telos-implementer`.
-- `drifted`: stop. Show `result.drift.paths` and ask the human to choose `telos adopt` or `telos revert`. Never choose either action for them. Run only the command they choose, then restart with `telos status --json`.
+- `drifted`: stop. Show `result.drift.paths` and `result.drift.token`, then ask the human to choose adopt or revert. Never choose either action for them. Run only `telos adopt --expected-state <the displayed token>` or `telos revert --expected-state <the displayed token>` after that choice, then restart with `telos status --json`. A missing or stale token is a hard stop; refresh status and ask again.
 
 Routing is a mandatory handoff. After selecting a phase, load and invoke the routed skill before any action in that phase. Never execute Challenge or Implement steps yourself without the routed skill.
 

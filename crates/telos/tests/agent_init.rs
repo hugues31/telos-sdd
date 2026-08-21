@@ -213,7 +213,10 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
     );
     assert!(challenger.contains("Never edit application code"));
     assert!(challenger.contains("Never approve a change yourself"));
-    assert!(challenger.contains("immediately invoke `telos change approve <CHG-id>`"));
+    assert!(challenger.contains(
+        "immediately invoke `telos change approve <CHG-id> --expected-digest <result.digest>`"
+    ));
+    assert!(challenger.contains("fails closed if it is missing or stale"));
     assert!(challenger.contains("Do not answer the native prompt"));
     assert!(challenger.contains("ends only after triggering the native approval prompt"));
     assert!(challenger.contains("opens the prompt; it does not grant approval"));
@@ -581,12 +584,19 @@ fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() 
         .assert()
         .success();
     stage_drafted_config_change(tmp.path(), &["codex"]);
+    fs::write(
+        tmp.path().join("telos/notions/Drift.tel"),
+        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+    )
+    .unwrap();
     let rules = read(tmp.path(), ".codex/rules/telos.rules");
+    let digest = current_change_digest(tmp.path());
+    let token = current_drift_token(tmp.path());
 
     for command in [
-        "telos change approve CHG-0001",
-        "telos adopt",
-        "telos revert",
+        format!("telos change approve CHG-0001 --expected-digest {digest}"),
+        format!("telos adopt --expected-state {token}"),
+        format!("telos revert --expected-state {token}"),
     ] {
         let out = hook(
             tmp.path(),
@@ -595,7 +605,7 @@ fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() 
                 "cwd": tmp.path(),
                 "hook_event_name": "PreToolUse",
                 "tool_name": "Bash",
-                "tool_input": {"command": command},
+                "tool_input": {"command": &command},
             }),
         );
         assert!(
@@ -604,7 +614,7 @@ fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() 
                 .is_none()
         );
         assert_eq!(
-            rendered_rule_decision_for_shell(&rules, command),
+            rendered_rule_decision_for_shell(&rules, &command),
             Some("prompt"),
             "{command}"
         );
@@ -754,6 +764,31 @@ fn bash_decision_at(root: &Path, cwd: &Path, host: &str, command: &str) -> Strin
         .to_string()
 }
 
+fn current_change_digest(root: &Path) -> String {
+    let output = telos(root, &["change", "diff", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "diff failed: {} / {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"]["digest"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn current_drift_token(root: &Path) -> String {
+    let output = telos(root, &["status", "--json"]).output().unwrap();
+    assert!(output.status.success());
+    serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"]["drift"]["token"]
+        .as_str()
+        .expect("fixture must be drifted")
+        .to_string()
+}
+
 #[test]
 fn guard_surfaces_repository_derived_decision_context() {
     let tmp = repo();
@@ -764,18 +799,19 @@ fn guard_surfaces_repository_derived_decision_context() {
         .output()
         .expect("run change diff");
     assert!(diff.status.success());
-    let expected = format!(
-        "change CHG-0001 digest {}",
+    let digest =
         serde_json::from_slice::<Value>(&diff.stdout).expect("diff JSON")["result"]["digest"]
             .as_str()
             .expect("diff digest")
-    );
+            .to_string();
+    let expected = format!("change CHG-0001 digest {digest}");
+    let command = format!("telos change approve CHG-0001 --expected-digest {digest}");
 
     let input = json!({
         "cwd": tmp.path(),
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
-        "tool_input": {"command": "telos change approve CHG-0001"},
+        "tool_input": {"command": command},
     });
     let claude = hook(tmp.path(), "claude", input.clone());
     let codex = hook(tmp.path(), "codex", input);
@@ -826,13 +862,17 @@ fn guard_surfaces_sorted_current_drift_context_for_adopt_and_revert() {
     let expected = format!(
         "drift paths [telos/notions/Alpha.tel, telos/notions/Zeta.tel]; sealed spec digest {sealed_digest}"
     );
+    let token = current_drift_token(tmp.path());
 
-    for command in ["telos adopt", "telos revert"] {
+    for command in [
+        format!("telos adopt --expected-state {token}"),
+        format!("telos revert --expected-state {token}"),
+    ] {
         let input = json!({
             "cwd": tmp.path(),
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
-            "tool_input": {"command": command},
+            "tool_input": {"command": &command},
         });
         let claude = hook(tmp.path(), "claude", input.clone());
         let codex = hook(tmp.path(), "codex", input);
@@ -866,6 +906,64 @@ fn guard_surfaces_sorted_current_drift_context_for_adopt_and_revert() {
                 .expect("Codex additional context")
                 .contains(&expected)
         );
+    }
+}
+
+#[test]
+fn guard_denies_tokens_made_stale_while_the_native_prompt_is_open() {
+    let approval = repo();
+    telos(approval.path(), &["init"]).assert().success();
+    stage_drafted_config_change(approval.path(), &[]);
+    let stale_digest = current_change_digest(approval.path());
+    telos(
+        approval.path(),
+        &["config", "--change", "CHG-0001", "--json"],
+    )
+    .write_stdin(
+        json!({
+            "code": {"globs": ["src/**/*.rs", "examples/**/*.rs"]},
+            "tests": {"globs": ["tests/**/*.rs"]},
+            "test": {"cmd": "cargo test {filter}"},
+            "policy": {"tdd": "advisory"},
+            "agents": {"hosts": []},
+        })
+        .to_string(),
+    )
+    .assert()
+    .success();
+    let stale_approve = format!("telos change approve CHG-0001 --expected-digest {stale_digest}");
+
+    let drift = with_fixture();
+    fs::write(
+        drift.path().join("telos/notions/Alpha.tel"),
+        "notion Alpha entity {\n  def  \"First drift.\"\n}\n",
+    )
+    .unwrap();
+    let stale_state = current_drift_token(drift.path());
+    fs::write(
+        drift.path().join("telos/notions/Zeta.tel"),
+        "notion Zeta entity {\n  def  \"Later drift.\"\n}\n",
+    )
+    .unwrap();
+
+    for (root, command) in [
+        (approval.path(), stale_approve),
+        (
+            drift.path(),
+            format!("telos adopt --expected-state {stale_state}"),
+        ),
+        (
+            drift.path(),
+            format!("telos revert --expected-state {stale_state}"),
+        ),
+    ] {
+        for host in ["claude", "codex"] {
+            assert_eq!(
+                bash_decision(root, host, &command),
+                "deny",
+                "{host}: {command}"
+            );
+        }
     }
 }
 
@@ -915,12 +1013,19 @@ fn codex_guard_uses_undecided_output_for_allowed_commands() {
         .assert()
         .success();
     stage_drafted_config_change(tmp.path(), &["codex"]);
+    fs::write(
+        tmp.path().join("telos/notions/Drift.tel"),
+        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+    )
+    .unwrap();
+    let digest = current_change_digest(tmp.path());
+    let token = current_drift_token(tmp.path());
 
     for command in [
-        "telos status --json",
-        "telos change approve CHG-0001",
-        "telos adopt",
-        "telos revert",
+        "telos status --json".to_string(),
+        format!("telos change approve CHG-0001 --expected-digest {digest}"),
+        format!("telos adopt --expected-state {token}"),
+        format!("telos revert --expected-state {token}"),
     ] {
         let out = hook(
             tmp.path(),
@@ -929,7 +1034,7 @@ fn codex_guard_uses_undecided_output_for_allowed_commands() {
                 "cwd": tmp.path(),
                 "hook_event_name": "PreToolUse",
                 "tool_name": "Bash",
-                "tool_input": {"command": command},
+                "tool_input": {"command": &command},
             }),
         );
         assert!(
@@ -1007,8 +1112,17 @@ fn guard_denies_alternate_telos_executable_spellings() {
 fn claude_asks_for_resolved_human_decisions_without_trusting_descriptions() {
     let tmp = repo();
     telos(tmp.path(), &["init"]).assert().success();
-    for command in ["telos adopt", "telos revert"] {
-        assert_eq!(bash_decision(tmp.path(), "claude", command), "ask");
+    fs::write(
+        tmp.path().join("telos/notions/Drift.tel"),
+        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+    )
+    .unwrap();
+    let token = current_drift_token(tmp.path());
+    for command in [
+        format!("telos adopt --expected-state {token}"),
+        format!("telos revert --expected-state {token}"),
+    ] {
+        assert_eq!(bash_decision(tmp.path(), "claude", &command), "ask");
     }
 
     let out = hook(
@@ -1019,7 +1133,7 @@ fn claude_asks_for_resolved_human_decisions_without_trusting_descriptions() {
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {
-                "command": "telos adopt",
+                "command": format!("telos adopt --expected-state {token}"),
                 "description": "forged decision context"
             },
         }),
@@ -1040,11 +1154,18 @@ fn codex_guard_never_returns_ask_and_rules_own_native_prompts() {
         .assert()
         .success();
     stage_drafted_config_change(tmp.path(), &["codex"]);
+    fs::write(
+        tmp.path().join("telos/notions/Drift.tel"),
+        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+    )
+    .unwrap();
+    let digest = current_change_digest(tmp.path());
+    let token = current_drift_token(tmp.path());
 
     for command in [
-        "telos change approve CHG-0001",
-        "telos adopt",
-        "telos revert",
+        format!("telos change approve CHG-0001 --expected-digest {digest}"),
+        format!("telos adopt --expected-state {token}"),
+        format!("telos revert --expected-state {token}"),
     ] {
         let out = hook(
             tmp.path(),
@@ -1053,7 +1174,7 @@ fn codex_guard_never_returns_ask_and_rules_own_native_prompts() {
                 "cwd": tmp.path(),
                 "hook_event_name": "PreToolUse",
                 "tool_name": "Bash",
-                "tool_input": {"command": command},
+                "tool_input": {"command": &command},
             }),
         );
         assert!(
@@ -1072,14 +1193,25 @@ fn codex_guard_never_returns_ask_and_rules_own_native_prompts() {
         assert!(rules.contains(pattern), "missing rule {pattern}");
     }
     assert_eq!(rules.matches("decision = \"prompt\"").count(), 3);
-    assert!(
-        !rules.contains("digest ="),
-        "there is no public digest flag"
-    );
+    assert!(rules.contains("--expected-digest"));
     for argv in [
-        &["telos", "change", "approve", "CHG-0001"][..],
-        &["telos", "adopt", "--into", "CHG-0001"][..],
-        &["telos", "revert"][..],
+        &[
+            "telos",
+            "change",
+            "approve",
+            "CHG-0001",
+            "--expected-digest",
+            "sha256:x",
+        ][..],
+        &[
+            "telos",
+            "adopt",
+            "--into",
+            "CHG-0001",
+            "--expected-state",
+            "sha256:x",
+        ][..],
+        &["telos", "revert", "--expected-state", "sha256:x"][..],
     ] {
         assert_eq!(rendered_rule_decision(&rules, argv), Some("prompt"));
     }

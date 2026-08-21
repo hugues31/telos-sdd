@@ -713,7 +713,9 @@ fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
     );
     assert_eq!(
         envelope["next_actions"],
-        json!(["telos change approve CHG-0001"])
+        json!([format!(
+            "telos change approve CHG-0001 --expected-digest {digest}"
+        )])
     );
 }
 
@@ -846,6 +848,60 @@ fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
     );
 }
 
+#[test]
+fn change_approve_refuses_a_digest_that_changed_during_review() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload(),
+    );
+    let diff = json_stdout(
+        &telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+            .output()
+            .unwrap(),
+    );
+    let stale = diff["result"]["digest"].as_str().unwrap().to_string();
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &vendor_payload().replace("Vendor", "Supplier"),
+    );
+    let before = fs::read_to_string(tmp.path().join(CHG_0001)).unwrap();
+
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-0001",
+            "--expected-digest",
+            &stale,
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
+    let envelope = json_stdout(&out);
+
+    assert!(!out.status.success(), "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"],
+        json!("TELOS_CHANGE_STATE_INVALID")
+    );
+    assert_eq!(
+        envelope["error"]["message"],
+        json!("change CHG-0001 no longer matches the expected digest")
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join(CHG_0001)).unwrap(),
+        before
+    );
+    assert!(!before.contains("status approved"));
+    assert!(!before.contains("\n  digest \""));
+}
+
 /// `approve` of a change with no staged op is refused, with the exact
 /// message and hint the brief freezes -- and writes nothing: the file is
 /// left exactly as `change open` wrote it.
@@ -923,7 +979,9 @@ fn staging_after_approve_goes_stale_and_re_approve_clears_it() {
     assert_ne!(live_digest, first_digest);
     assert_eq!(
         envelope["next_actions"],
-        json!(["telos change approve CHG-0001"])
+        json!([format!(
+            "telos change approve CHG-0001 --expected-digest {live_digest}"
+        )])
     );
 
     let reapprove_out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])

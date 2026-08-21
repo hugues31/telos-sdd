@@ -230,7 +230,7 @@ impl LiveServer {
             .route("/", get(index))
             .route("/data.js", get(live_data))
             .route("/live.json", get(live_status))
-            .fallback(static_asset)
+            .fallback_service(get(static_asset))
             .with_state(state);
 
         Ok(Self {
@@ -307,7 +307,12 @@ async fn live_status(State(state): State<SharedState>) -> Response {
 }
 
 async fn static_asset(OriginalUri(uri): OriginalUri) -> Response {
-    let path = uri.path().strip_prefix('/').unwrap_or(uri.path());
+    let Some(path) = uri.path().strip_prefix('/') else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if path.starts_with('/') {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     assets::lookup(path)
         .map(asset_response)
         .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())

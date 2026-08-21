@@ -94,7 +94,7 @@ impl HttpResponse {
     }
 }
 
-fn get(url: &str, path: &str) -> HttpResponse {
+fn request(url: &str, method: &str, path: &str) -> HttpResponse {
     let address = url
         .strip_prefix("http://")
         .and_then(|url| url.strip_suffix('/'))
@@ -105,7 +105,7 @@ fn get(url: &str, path: &str) -> HttpResponse {
         .unwrap();
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
     let mut response = Vec::new();
@@ -131,6 +131,10 @@ fn get(url: &str, path: &str) -> HttpResponse {
         headers,
         body: response[split + 4..].to_vec(),
     }
+}
+
+fn get(url: &str, path: &str) -> HttpResponse {
+    request(url, "GET", path)
 }
 
 fn data_payload(response: &HttpResponse) -> Value {
@@ -281,6 +285,68 @@ fn serves_the_spa_and_payload_on_loopback() {
 
     server.stop();
     assert_eq!(telos_bytes(tmp.path()), before);
+}
+
+#[test]
+fn asset_paths_require_exactly_one_leading_slash() {
+    let tmp = with_fixture();
+    let (mut server, url, _) = start_server(tmp.path());
+
+    let canonical = get(&url, "/assets/app.js");
+    assert!(canonical.status_line.starts_with("HTTP/1.1 200 "));
+    assert_eq!(
+        canonical.header("content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
+    assert!(!canonical.body.is_empty());
+
+    for path in ["//assets/app.js", "/assets//app.js"] {
+        let response = get(&url, path);
+        assert!(
+            response.status_line.starts_with("HTTP/1.1 404 "),
+            "{path}: {}",
+            response.status_line
+        );
+    }
+
+    server.stop();
+}
+
+#[test]
+fn asset_fallback_rejects_mutating_http_methods() {
+    let tmp = with_fixture();
+    let (mut server, url, _) = start_server(tmp.path());
+
+    for method in ["POST", "PUT"] {
+        let response = request(&url, method, "/assets/app.js");
+        assert!(
+            response.status_line.starts_with("HTTP/1.1 405 "),
+            "{method}: {}",
+            response.status_line
+        );
+        let allow = response.header("allow").expect("405 includes Allow");
+        assert!(allow.split(',').any(|entry| entry.trim() == "GET"));
+        assert!(allow.split(',').any(|entry| entry.trim() == "HEAD"));
+        assert!(response.body.is_empty());
+    }
+
+    server.stop();
+}
+
+#[test]
+fn asset_head_matches_get_headers_without_a_body() {
+    let tmp = with_fixture();
+    let (mut server, url, _) = start_server(tmp.path());
+
+    let get = get(&url, "/assets/app.js");
+    let head = request(&url, "HEAD", "/assets/app.js");
+
+    assert!(head.status_line.starts_with("HTTP/1.1 200 "));
+    assert_eq!(head.header("content-type"), get.header("content-type"));
+    assert_eq!(head.header("content-length"), get.header("content-length"));
+    assert!(head.body.is_empty());
+
+    server.stop();
 }
 
 #[test]

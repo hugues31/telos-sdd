@@ -1,24 +1,24 @@
-//! The canonical `.tel` emitter (Annex C.4).
+//! The canonical `.tel` emitter.
 //!
 //! This module is the *only* writer of `.tel` syntax in the engine: the
 //! canonical form is not a style guide checked after the fact, it is
-//! whatever these functions produce. Every mutation path (M2) re-emits a
+//! whatever these functions produce. Every mutation path re-emits a
 //! whole file from the model rather than editing text, so a spec tree can
 //! never drift into a second, almost-canonical dialect.
 //!
 //! The contract that makes that safe is byte-level idempotence:
-//! `emit(parse(s)) == s` for every canonical `s` (proved on the Annex D
-//! corpus in `tests/roundtrip.rs`). Three consequences shape the code below:
+//! `emit(parse(s)) == s` for every canonical `s` (proved on the corpus in
+//! `tests/roundtrip.rs`). Three consequences shape the code below:
 //!
-//! - **Padding is per group, with fixed widths** (C.4.5). A keyword is
+//! - **Padding is per group, with fixed widths.** A keyword is
 //!   padded to the longest keyword its group *could* hold -- not the longest
 //!   one actually present -- so adding a `check` line to a constraint, or
 //!   dropping a `rel` from a notion, never reflows the columns of its
 //!   neighbours, and a diff stays the size of the edit.
-//! - **Order is normalized, not echoed** (C.4.3). `attrs` and `rels` keep
+//! - **Order is normalized, not echoed.** `attrs` and `rels` keep
 //!   insertion order because their order is data; relation ids, scenarios
 //!   and bindings are sorted, because theirs is not.
-//! - **Parentheses are minimal** (C.4.9): one is emitted exactly when a
+//! - **Parentheses are minimal:** one is emitted exactly when a
 //!   child binds looser than its parent.
 //!
 //! Every file-level function returns a `String` ending in exactly one `\n`
@@ -63,10 +63,10 @@ macro_rules! w {
     }};
 }
 
-/// One indentation level (C.4.1).
+/// One indentation level.
 const INDENT: &str = "  ";
 
-/// Keyword padding widths, one per field group (C.4.5). Each is the length
+/// Keyword padding widths, one per field group. Each is the length
 /// of the longest keyword the group admits, so the width is a property of
 /// the grammar, not of the file being emitted.
 mod width {
@@ -84,7 +84,7 @@ mod width {
     pub const BINDING: usize = 10;
     /// `status`, `digest`.
     pub const CHANGE: usize = 6;
-    /// `run`, `bind` -- the two journal lines of a change (Annex A).
+    /// `run`, `bind` -- the two journal lines of a change.
     pub const JOURNAL: usize = 4;
 }
 
@@ -100,11 +100,11 @@ pub fn emit_file(f: &TelFile) -> String {
 
 // --- notions -------------------------------------------------------------
 
-/// Emits a `notion` file (C.2 `notion-file`).
+/// Emits a `notion` file.
 ///
-/// Two paddings stack here: the field keyword to the group width (C.4.5),
+/// Two paddings stack here: the field keyword to the group width,
 /// then -- inside the `attr` block and inside the `rel` block independently
-/// -- the field *name* to the longest name of its own block (C.4.6), so the
+/// -- the field *name* to the longest name of its own block, so the
 /// types line up in a column.
 pub fn emit_notion(n: &Notion) -> String {
     let mut out = String::new();
@@ -150,7 +150,7 @@ fn attr_type(ty: &AttrType) -> String {
         AttrType::Bool => "bool".to_string(),
         AttrType::Date => "date".to_string(),
         AttrType::Datetime => "datetime".to_string(),
-        // C.4.10: no space after `enum`, `, ` between symbols.
+        // No space after `enum`; `, ` separates symbols.
         AttrType::Enum(symbols) => format!("enum({})", symbols.join(", ")),
         AttrType::Ref(target) => format!("ref({target})"),
     }
@@ -158,10 +158,10 @@ fn attr_type(ty: &AttrType) -> String {
 
 // --- intents -------------------------------------------------------------
 
-/// Emits an `intent` file (C.2 `intent-file`), statement block, relation
+/// Emits an `intent` file, statement block, relation
 /// lines and scenarios included.
 ///
-/// Blank lines appear in exactly one place (C.4.4): before each scenario,
+/// Blank lines appear in exactly one place: before each scenario,
 /// which separates the header from the first one and the scenarios from each
 /// other in a single rule.
 pub fn emit_intent(i: &Intent) -> String {
@@ -175,8 +175,8 @@ pub fn emit_intent(i: &Intent) -> String {
 
     emit_statement(&mut out, &i.statement);
 
-    // Relation lines take no padding (C.4.5), and each group is sorted by
-    // id (C.4.3); the groups themselves stay in grammar order.
+    // Relation lines take no padding, and each group is sorted by id; the
+    // groups themselves stay in grammar order.
     relations(&mut out, "refines", &i.refines);
     relations(&mut out, "requires", &i.requires);
     relations(&mut out, "excludes", &i.excludes);
@@ -298,7 +298,7 @@ fn instance_step(out: &mut String, kw: &str, step: &InstanceStep) {
     );
 }
 
-/// `instance-body` on one line (C.4.7); an empty payload is `{}`, with no
+/// `instance-body` on one line; an empty payload is `{}`, with no
 /// inner space to trim.
 fn instance_body(fields: &[(Sp<FieldName>, Literal)]) -> String {
     if fields.is_empty() {
@@ -313,7 +313,7 @@ fn instance_body(fields: &[(Sp<FieldName>, Literal)]) -> String {
 
 // --- constraints ---------------------------------------------------------
 
-/// Emits a `constraint` file (C.2 `constraint-file`). `check` is optional;
+/// Emits a `constraint` file. `check` is optional;
 /// its absence changes no other line, since the padding width is fixed.
 pub fn emit_constraint(c: &Constraint) -> String {
     let mut out = String::new();
@@ -327,7 +327,7 @@ pub fn emit_constraint(c: &Constraint) -> String {
 
     keyword(&mut out, 1, "rule", width::CONSTRAINT);
     match &c.rule {
-        // A quoted rule is prose, a bare one is machine-checkable (C.2).
+        // A quoted rule is prose; a bare one is machine-checkable.
         Rule::Text(text) => w!(out, "{}\n", quote(text)),
         Rule::Machine(expr) => w!(out, "{}\n", emit_expr(expr)),
     }
@@ -336,7 +336,7 @@ pub fn emit_constraint(c: &Constraint) -> String {
     match &c.scope {
         Scope::Global => out.push_str("global\n"),
         Scope::Intents(ids) => {
-            // Sorted ascending by id regardless of model order (C.4.3):
+            // Sorted ascending by id regardless of model order:
             // this is a canonicalization, not an echo of source order.
             let mut ids: Vec<IntentId> = ids.iter().map(|id| id.node).collect();
             ids.sort();
@@ -366,9 +366,9 @@ fn constraint_kind(k: ConstraintKind) -> &'static str {
 
 // --- bindings ------------------------------------------------------------
 
-/// Emits `bindings.tel` (C.2 `bindings-file`): every `implements` line
+/// Emits `bindings.tel`: every `implements` line
 /// first, sorted by (path, intent id), then every `proves` line, sorted by
-/// (test locator, scenario id) (C.4.2).
+/// (test locator, scenario id).
 ///
 /// The sort happens here rather than at the call site so that no caller can
 /// write an out-of-order bindings file. An empty binding list yields an
@@ -402,7 +402,7 @@ pub fn emit_bindings(bindings: &[Binding]) -> String {
 
 // --- changes -------------------------------------------------------------
 
-/// Emits a `changes/CHG-NNNN.tel` file (Annex C).
+/// Emits a `changes/CHG-NNNN.tel` file.
 ///
 /// The header string is the change's motivation; `status` and `digest`
 /// share one padding group, and `digest` is written exactly when the change
@@ -417,9 +417,9 @@ pub fn emit_bindings(bindings: &[Binding]) -> String {
 /// body and closing brace -- inside the change without the entity emitters
 /// knowing anything about changes.
 ///
-/// The journal comes last (Annex A), separated from the ops by a single
+/// The journal comes last, separated from the ops by a single
 /// blank line and written contiguously in append order -- also never sorted,
-/// and for a stronger reason: it is a chronology, and D1 records no
+/// and for a stronger reason: it is a chronology, and the change journal records no
 /// timestamps precisely because the order of the lines *is* the time.
 pub fn emit_change(c: &Change) -> String {
     let mut out = String::new();
@@ -437,10 +437,10 @@ pub fn emit_change(c: &Change) -> String {
         out.push_str(&indent(&emit_op(op), 1));
     }
 
-    // The journal closes the block (Annex A): one blank line separates it
+    // The journal closes the block: one blank line separates it
     // from whatever precedes it -- the last op, or the header of a change
     // that has none -- and its lines are contiguous, in append order. A
-    // change with no journal is byte-identical to what M2 wrote.
+    // change with no journal keeps the canonical transaction shape.
     if !c.journal.is_empty() {
         out.push('\n');
         for entry in &c.journal {
@@ -454,13 +454,13 @@ pub fn emit_change(c: &Change) -> String {
 
 /// Emits one staged operation at indentation level 0, ending in exactly one
 /// `\n`. A file-level fragment, and the unit of input of
-/// [`crate::model::Change::ops_digest`] (D3).
+/// [`crate::model::Change::ops_digest`].
 ///
 /// `add` and `edit` fuse `op <verb> ` onto the first line of the entity's
 /// own canonical block, so the entity is written by `emit_notion` /
 /// `emit_intent` / `emit_constraint` verbatim -- kind, title and all. That
-/// verbatim reuse is what lets the parser (T2) hand the nested block
-/// straight back to the M1 block parsers, and what keeps `edit` a complete
+/// verbatim reuse is what lets the parser hand the nested block
+/// straight back to the entity block parsers, and what keeps `edit` a complete
 /// post-state rather than a lossy summary.
 ///
 /// `remove` and `accept` have no entity block and are one line each.
@@ -514,17 +514,17 @@ pub fn emit_op(op: &StagedOp) -> String {
 }
 
 /// Emits one journal line at indentation level 0, ending in exactly one
-/// `\n` (Annex A).
+/// `\n`.
 ///
 /// `run` and `bind` share one padding group of width 4, so the two line
 /// kinds keep a common column and adding a `bind` to a journal of `run`s
 /// reflows nothing. Both strings are quoted like any other: a test locator
 /// is written as the single `path[::name]` string [`crate::model::TestRef`]
-/// displays, and the oid is written verbatim -- it is opaque (D1), never
+/// displays, and the oid is written verbatim -- it is opaque, never
 /// parsed, only compared.
 ///
 /// Unlike [`emit_op`], this is *not* an input of any digest: the journal is
-/// written after the approval it must not move (D1).
+/// written after the approval it must not move.
 pub fn emit_journal_entry(e: &JournalEntry) -> String {
     let mut out = String::new();
     match e {
@@ -550,9 +550,9 @@ pub fn emit_journal_entry(e: &JournalEntry) -> String {
 /// The canonical block of one scenario, alone: exactly the bytes
 /// [`emit_intent`] writes for it, indentation included.
 ///
-/// This is a *fingerprint*, not a file: T2 compares the fragment of a
-/// scenario in the base against the fragment of the same scenario in a
-/// change's post-model to decide whether it moved (D7). Emission is what
+/// This is a *fingerprint*, not a file: the witness logic compares the
+/// fragment of a scenario in the base against the same scenario in a
+/// change's post-model to decide whether it moved. Emission is what
 /// makes that comparison sound -- spans differ between a parsed scenario and
 /// a staged one and would defeat structural equality, and the emitter has no
 /// notion of them.
@@ -564,7 +564,7 @@ pub(crate) fn emit_scenario_fragment(s: &Scenario) -> String {
 
 // --- expressions ---------------------------------------------------------
 
-/// Emits an expression (C.3) with minimal parentheses. A fragment: no
+/// Emits an expression with minimal parentheses. A fragment: no
 /// trailing newline.
 pub fn emit_expr(e: &Expr) -> String {
     let mut out = String::new();
@@ -574,7 +574,7 @@ pub fn emit_expr(e: &Expr) -> String {
     out
 }
 
-/// Binding power, loosest first: `or` < `and` < `not` < comparison (C.3).
+/// Binding power, loosest first: `or` < `and` < `not` < comparison.
 fn precedence(e: &Expr) -> u8 {
     match e {
         Expr::Or(..) => 1,
@@ -646,10 +646,10 @@ fn attr_ref(r: &AttrRef) -> String {
     format!("{}.{}", r.notion.node, r.attr.node)
 }
 
-/// Emits a literal (C.3). A fragment: no trailing newline.
+/// Emits a literal. A fragment: no trailing newline.
 ///
 /// `decimal`, `date` and `datetime` re-emit the lexeme they were parsed
-/// from (C.4.10) -- a decimal amount never goes through a float, so
+/// from the canonical literal rules -- a decimal amount never goes through a float, so
 /// `120.50` can never come back as `120.49999999999999`.
 pub fn emit_literal(l: &Literal) -> String {
     match l {
@@ -666,7 +666,7 @@ pub fn emit_literal(l: &Literal) -> String {
 // --- shared layout helpers ----------------------------------------------
 
 /// Writes `level` indents, then `word` right-padded to `width`, then the one
-/// space that separates a keyword from its value (C.4.5).
+/// space that separates a keyword from its value.
 fn keyword(out: &mut String, level: usize, word: &str, width: usize) {
     for _ in 0..level {
         out.push_str(INDENT);
@@ -679,7 +679,7 @@ fn keyword(out: &mut String, level: usize, word: &str, width: usize) {
 }
 
 /// Writes a field name right-padded to the width of its block, plus the
-/// separating space (C.4.6).
+/// separating space.
 fn pad_name(out: &mut String, name: &FieldName, width: usize) {
     out.push_str(name.as_str());
     for _ in 0..width.saturating_sub(name.as_str().len()) {
@@ -715,7 +715,7 @@ fn indent(block: &str, level: usize) -> String {
     out
 }
 
-/// Quotes a string (C.4.8): double quotes, `\"` and `\\` the only escapes.
+/// Quotes a string: double quotes, `\"` and `\\` are the only escapes.
 /// A newline can never appear in a `.tel` string, so none is emitted.
 fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -802,7 +802,7 @@ mod tests {
 
     #[test]
     fn keyword_padding_is_the_group_width_plus_one_space() {
-        // The widths of C.4.5, spelled out as the strings they produce.
+        // The padding widths, spelled out as the strings they produce.
         let mut out = String::new();
         keyword(&mut out, 1, "def", width::NOTION);
         keyword(&mut out, 0, "telos", width::INTENT);
@@ -839,21 +839,21 @@ mod tests {
         use crate::ids::ChangeId;
         use crate::model::ChangeStatus;
         use crate::model::change::fixtures::{
-            ANNEX_A_EXAMPLE, ANNEX_C_EXAMPLE, annex_c_change, con_0003, empty_change,
+            CHANGE_EXAMPLE, JOURNAL_EXAMPLE, con_0003, empty_change, example_change,
             implementing_change, int_0017, invoice, notion_name, run, run_oid,
         };
         use crate::model::{TestRun, Witness};
 
         #[test]
-        fn emit_change_reproduces_the_annex_c_example_byte_for_byte() {
-            assert_eq!(emit_change(&annex_c_change()), ANNEX_C_EXAMPLE);
+        fn emit_change_reproduces_the_canonical_example_byte_for_byte() {
+            assert_eq!(emit_change(&example_change()), CHANGE_EXAMPLE);
         }
 
-        // --- the journal (Annex A) ----------------------------------------
+        // --- the journal ----------------------------------------
 
         #[test]
-        fn emit_change_reproduces_the_annex_a_example_byte_for_byte() {
-            assert_eq!(emit_change(&implementing_change()), ANNEX_A_EXAMPLE);
+        fn emit_change_reproduces_the_journal_example_byte_for_byte() {
+            assert_eq!(emit_change(&implementing_change()), JOURNAL_EXAMPLE);
         }
 
         #[test]
@@ -938,9 +938,9 @@ mod tests {
 
         #[test]
         fn an_empty_journal_adds_no_blank_line_at_all() {
-            // The M2 shape must be untouched: a change with no journal is
-            // byte-identical to what M2 emitted.
-            assert_eq!(emit_change(&annex_c_change()), ANNEX_C_EXAMPLE);
+            // The transaction shape must be untouched: a change with no
+            // journal is byte-identical to the canonical example.
+            assert_eq!(emit_change(&example_change()), CHANGE_EXAMPLE);
             let mut change = empty_change();
             change.journal = vec![];
             assert_eq!(
@@ -1011,7 +1011,7 @@ mod tests {
         #[test]
         fn a_scenario_fragment_ignores_spans_by_construction() {
             // Two scenarios equal but for their spans emit the same bytes,
-            // which is what makes the fragment a fingerprint (D7).
+            // which is what makes the fragment a fingerprint.
             let mut a = int_0017();
             let mut b = int_0017();
             a.scenarios[0].given[0].notion.span = crate::span::Span { start: 1, end: 2 };
@@ -1033,7 +1033,7 @@ mod tests {
 
         #[test]
         fn the_digest_line_is_absent_when_the_change_is_not_approved() {
-            let mut change = annex_c_change();
+            let mut change = example_change();
             change.status = ChangeStatus::Drafted;
             change.approved_digest = None;
             let emitted = emit_change(&change);
@@ -1068,7 +1068,7 @@ mod tests {
 
         #[test]
         fn ops_are_emitted_in_staged_order_never_sorted() {
-            let mut change = annex_c_change();
+            let mut change = example_change();
             change.ops.reverse();
             let emitted = emit_change(&change);
             let order: Vec<&str> = emitted.lines().filter(|l| l.starts_with("  op ")).collect();
@@ -1085,7 +1085,7 @@ mod tests {
 
         #[test]
         fn exactly_one_blank_line_precedes_each_op() {
-            let emitted = emit_change(&annex_c_change());
+            let emitted = emit_change(&example_change());
             for (i, line) in emitted.lines().enumerate() {
                 if line.starts_with("  op ") {
                     let previous = emitted.lines().nth(i - 1).unwrap();
@@ -1099,7 +1099,7 @@ mod tests {
         fn no_line_of_a_change_ever_carries_trailing_whitespace() {
             // The intent block nested in the example has an internal blank
             // line (before its scenario): indenting it must leave it empty.
-            let emitted = emit_change(&annex_c_change());
+            let emitted = emit_change(&example_change());
             for line in emitted.lines() {
                 assert_eq!(line.trim_end(), line, "trailing whitespace: {line:?}");
             }
@@ -1171,7 +1171,7 @@ mod tests {
 
         #[test]
         fn every_op_ends_in_exactly_one_newline() {
-            let mut ops = annex_c_change().ops;
+            let mut ops = example_change().ops;
             ops.push(StagedOp::RemoveNotion(notion_name("Invoice")));
             ops.push(StagedOp::AddConstraint(con_0003()));
             for op in &ops {
@@ -1185,7 +1185,7 @@ mod tests {
         fn a_change_is_its_ops_indented_one_level_between_header_and_brace() {
             // The relation the digest depends on: what `emit_change` writes
             // for an op is exactly `emit_op`'s bytes, shifted.
-            let change = annex_c_change();
+            let change = example_change();
             let emitted = emit_change(&change);
             for op in &change.ops {
                 assert!(

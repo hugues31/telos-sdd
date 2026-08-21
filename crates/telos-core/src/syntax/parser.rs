@@ -1,15 +1,11 @@
-//! Recursive-descent parser for the `.tel` syntax, built on the Task 4
-//! lexer.
+//! Recursive-descent parser for the `.tel` syntax, built on the lexer.
 //!
-//! Covers every rule of Annex C.2 (`notion-file`, `intent-file` with its
-//! EARS `statement-block` and its `scenario-decl`s, `constraint-file`,
-//! `bindings-file`), Annex C.3's expression mini-language, and Annex C's
-//! `change-file` -- whose `op add|edit` nests the C.2 block rules verbatim
-//! rather than restating them (D2), which is what makes a change file's
-//! round-trip byte-exact for free -- with the `run` and `bind` journal lines
-//! Annex A adds to it in M3.
+//! Covers notion, intent, constraint, binding, expression, and change files.
+//! A change's `op add|edit` forms reuse the entity block rules verbatim,
+//! keeping round trips byte-exact, while `run` and `bind` journal lines carry
+//! implementation evidence.
 //!
-//! Diagnostics all share one shape (« expected X, found `Y` »), and every
+//! Diagnostics all share one shape (“ expected X, found `Y` ”), and every
 //! file rule recovers from a field-level error by skipping the rest of the
 //! offending line, so one pass reports as much as it soundly can. Recovery
 //! is brace-depth aware: an error inside a nested block never
@@ -34,7 +30,7 @@ use crate::suggest::closest;
 
 use super::lexer::{TokKind, Token, lex};
 
-/// The five `notion-kind` words (Annex C.2), in grammar order.
+/// The five `notion-kind` words, in grammar order.
 const NOTION_KINDS: [(&str, NotionKind); 5] = [
     ("actor", NotionKind::Actor),
     ("entity", NotionKind::Entity),
@@ -43,19 +39,19 @@ const NOTION_KINDS: [(&str, NotionKind); 5] = [
     ("state", NotionKind::State),
 ];
 
-/// The `attr-type` head words (Annex C.2), in grammar order.
+/// The `attr-type` head words, in grammar order.
 const ATTR_TYPES: [&str; 9] = [
     "string", "int", "decimal", "money", "bool", "date", "datetime", "enum", "ref",
 ];
 
-/// The three `status-field` words (Annex C.2), in grammar order.
+/// The three `status-field` words, in grammar order.
 const INTENT_STATUSES: [(&str, IntentStatus); 3] = [
     ("draft", IntentStatus::Draft),
     ("active", IntentStatus::Active),
     ("deprecated", IntentStatus::Deprecated),
 ];
 
-/// The five EARS `template` words (Annex C.2), in grammar order.
+/// The five EARS `template` words, in grammar order.
 const TEMPLATES: [(&str, Template); 5] = [
     ("ubiquitous", Template::Ubiquitous),
     ("event-driven", Template::EventDriven),
@@ -64,7 +60,7 @@ const TEMPLATES: [(&str, Template); 5] = [
     ("optional", Template::Optional),
 ];
 
-/// The five `constraint-kind` words (Annex C.2), in grammar order.
+/// The five `constraint-kind` words, in grammar order.
 const CONSTRAINT_KINDS: [(&str, ConstraintKind); 5] = [
     ("stack", ConstraintKind::Stack),
     ("architecture", ConstraintKind::Architecture),
@@ -73,7 +69,7 @@ const CONSTRAINT_KINDS: [(&str, ConstraintKind); 5] = [
     ("convention", ConstraintKind::Convention),
 ];
 
-/// The five `status-field` words of a change file (Annex C, D16), in
+/// The five `status-field` words of a change file, in
 /// lifecycle order.
 const CHANGE_STATUSES: [(&str, ChangeStatus); 5] = [
     ("open", ChangeStatus::Open),
@@ -83,7 +79,7 @@ const CHANGE_STATUSES: [(&str, ChangeStatus); 5] = [
     ("abandoned", ChangeStatus::Abandoned),
 ];
 
-/// The two verdicts a `run` line may carry (Annex A, D1).
+/// The two verdicts a `run` line may carry.
 const WITNESSES: [(&str, Witness); 2] = [("red", Witness::Red), ("green", Witness::Green)];
 
 /// How an unknown verdict is named back -- the closed set in full, the way
@@ -95,7 +91,7 @@ const WITNESS_WORDS: &str = "`red` or `green`";
 const CHANGE_STATUS_WORDS: &str =
     "one of `open`, `drafted`, `approved`, `implementing`, `abandoned`";
 
-/// The tail keywords of an `intent-file` block (Annex C.2), in grammar
+/// The tail keywords of an `intent-file` block, in grammar
 /// order: each may appear zero or more times, but never before the
 /// previous one.
 const INTENT_TAIL: [&str; 4] = ["refines", "requires", "excludes", "scenario"];
@@ -147,8 +143,8 @@ enum Verb {
     Edit,
 }
 
-/// Whether `s` is the canonical digest form of D3: `sha256:` then exactly
-/// 64 lower-case hex digits.
+/// Whether `s` is a canonical digest: `sha256:` followed by exactly 64
+/// lower-case hex digits.
 fn is_canonical_digest(s: &str) -> bool {
     let Some(hex) = s.strip_prefix("sha256:") else {
         return false;
@@ -164,7 +160,7 @@ struct ListClose {
     list: &'static str,
 }
 
-/// Parses a whole `notion` file (Annex C.2).
+/// Parses a whole `notion` file.
 ///
 /// Reports every diagnostic found: a syntax error inside a field line is
 /// recovered from (skip to the end of the line, then resume at the next
@@ -173,7 +169,7 @@ pub fn parse_notion_file(path: &RepoPath, src: &str) -> Result<Notion, Vec<Diagn
     parse_file(path, src, |p: &mut P<'_>| p.notion_file())
 }
 
-/// Parses a whole `intent` file (Annex C.2), statement block and scenarios
+/// Parses a whole `intent` file, statement block and scenarios
 /// included.
 ///
 /// Recovers like `parse_notion_file`, brace-depth aware: an error inside a
@@ -183,33 +179,33 @@ pub fn parse_intent_file(path: &RepoPath, src: &str) -> Result<Intent, Vec<Diagn
     parse_file(path, src, |p: &mut P<'_>| p.intent_file())
 }
 
-/// Parses a whole `constraint` file (Annex C.2).
+/// Parses a whole `constraint` file.
 pub fn parse_constraint_file(path: &RepoPath, src: &str) -> Result<Constraint, Vec<Diagnostic>> {
     parse_file(path, src, |p: &mut P<'_>| p.constraint_file())
 }
 
-/// Parses the `bindings.tel` file (Annex C.2): zero or more binding lines.
+/// Parses the `bindings.tel` file: zero or more binding lines.
 /// An empty file is valid and yields no binding.
 pub fn parse_bindings_file(path: &RepoPath, src: &str) -> Result<Vec<Binding>, Vec<Diagnostic>> {
     parse_file(path, src, |p: &mut P<'_>| p.bindings_file())
 }
 
-/// Parses a whole `changes/CHG-NNNN.tel` file (Annex C, D1).
+/// Parses a whole `changes/CHG-NNNN.tel` file.
 ///
 /// The nested `entity-decl` of an `op add|edit` is parsed by the very rules
 /// [`parse_notion_file`], [`parse_intent_file`] and [`parse_constraint_file`]
-/// use (D2), which is what makes the round-trip byte-exact: whatever the
+/// use, which is what makes the round-trip byte-exact: whatever the
 /// emitter writes for an entity, nested or not, this reads back.
 ///
-/// The journal lines that may follow the ops are Annex A's, and the model
+/// Journal lines may follow the ops, and the model
 /// they build takes no part in the digest: a change may be implemented
-/// without going stale (D1).
+/// without going stale.
 ///
 /// Three rules live here rather than in the grammar, because they relate two
 /// lines rather than describing one: a `digest` belongs to a change that has
-/// been approved -- `approved`, or the `implementing` it moves on to in M3
-/// (D16) -- and to no other; it is a `sha256:<64 hex>` (D3); and a journal
-/// belongs to an `implementing` change and to no other (D5). Everything else
+/// been approved -- `approved`, or the `implementing` state it moves on to
+/// -- and to no other; it is a `sha256:<64 hex>`; and a journal
+/// belongs to an `implementing` change and to no other. Everything else
 /// about a change -- that its ops are appliable, that no other change claims
 /// the same paths, that its witnesses are intact -- is a job for later
 /// passes.
@@ -239,7 +235,7 @@ fn parse_file<T>(
     }
 }
 
-/// Parses a single expression (Annex C.3) from `src`, which must be fully
+/// Parses a single expression from `src`, which must be fully
 /// consumed. Returns the first error; recovery is a whole-file concern, so
 /// there is none here.
 pub fn parse_expr(src: &str) -> Result<Expr, Diagnostic> {
@@ -310,7 +306,7 @@ impl<'a> P<'a> {
         &self.peek().kind == kind
     }
 
-    /// Keywords are unreserved (Annex C.1) -- they are `LowerIdent`s
+    /// Keywords are unreserved -- they are `LowerIdent`s
     /// matched contextually, here.
     fn at_kw(&self, kw: &str) -> bool {
         matches!(&self.peek().kind, TokKind::LowerIdent(word) if word == kw)
@@ -355,7 +351,7 @@ impl<'a> P<'a> {
         }
     }
 
-    /// The one syntax-error shape: « expected X, found `Y` ».
+    /// The one syntax-error shape: “ expected X, found `Y` ”.
     fn expected(&self, what: &str) -> Diagnostic {
         self.diag_at(
             self.peek().span,
@@ -365,7 +361,7 @@ impl<'a> P<'a> {
     }
 
     /// `expected` over a set of alternatives that depends on how far
-    /// through a block we are: « expected `a`, `b` or `c`, found `X` ».
+    /// through a block we are: “ expected `a`, `b` or `c`, found `X` ”.
     fn expected_one_of(&self, options: &[String]) -> Diagnostic {
         let what = match options {
             [] => String::new(),
@@ -489,7 +485,7 @@ impl<'a> P<'a> {
         Ok(symbol)
     }
 
-    /// The `INT-NNNN` form of an `id-lit` (Annex C.1).
+    /// The `INT-NNNN` form of an `id-lit`.
     fn expect_intent_id(&mut self) -> Result<Sp<IntentId>, Diagnostic> {
         let TokKind::IdLit(EntityRef::Intent(id)) = &self.peek().kind else {
             return Err(self.expected("an intent id"));
@@ -500,7 +496,7 @@ impl<'a> P<'a> {
         Ok(Sp { node, span })
     }
 
-    /// The `SCN-NNNN` form of an `id-lit` (Annex C.1).
+    /// The `SCN-NNNN` form of an `id-lit`.
     fn expect_scenario_id(&mut self) -> Result<Sp<ScenarioId>, Diagnostic> {
         let TokKind::IdLit(EntityRef::Scenario(id)) = &self.peek().kind else {
             return Err(self.expected("a scenario id"));
@@ -511,7 +507,7 @@ impl<'a> P<'a> {
         Ok(Sp { node, span })
     }
 
-    /// The `CON-NNNN` form of an `id-lit` (Annex C.1).
+    /// The `CON-NNNN` form of an `id-lit`.
     fn expect_constraint_id(&mut self) -> Result<Sp<ConstraintId>, Diagnostic> {
         let TokKind::IdLit(EntityRef::Constraint(id)) = &self.peek().kind else {
             return Err(self.expected("a constraint id"));
@@ -523,7 +519,7 @@ impl<'a> P<'a> {
     }
 
     /// A word out of a *small* closed set, reported by listing the whole
-    /// set: « expected `red` or `green`, found `blue` », with the closest
+    /// set: “ expected `red` or `green`, found `blue` ”, with the closest
     /// known word offered as a hint.
     ///
     /// The two vocabularies written this way -- a change's statuses and a
@@ -579,7 +575,7 @@ impl<'a> P<'a> {
         Err(self.diag_at(span, message, None))
     }
 
-    /// `attr-ref = upper-ident , "." , lower-ident` (Annex C.3).
+    /// `attr-ref = upper-ident , "." , lower-ident`.
     fn attr_ref(&mut self) -> Result<AttrRef, Diagnostic> {
         let notion = self.expect_notion_name()?;
         self.expect(&TokKind::Dot, "`.`")?;
@@ -641,7 +637,7 @@ impl<'a> P<'a> {
         Err(self.expected("end of line"))
     }
 
-    // --- notion files (Annex C.2) ----------------------------------------
+    // --- notion files ----------------------------------------
 
     fn notion_file(&mut self) -> Result<Notion, Diagnostic> {
         let notion = self.notion_decl()?;
@@ -652,7 +648,7 @@ impl<'a> P<'a> {
     /// The `notion-file` rule proper, stopping on its own closing `}`.
     ///
     /// Split from [`P::notion_file`] so an `op add|edit` of a change file
-    /// can reuse it verbatim for its nested `entity-decl` (D2): a notion
+    /// can reuse it verbatim for its nested `entity-decl`: a notion
     /// nested in an op differs from one in a file of its own only in what
     /// may follow the block, which is the caller's business.
     fn notion_decl(&mut self) -> Result<Notion, Diagnostic> {
@@ -805,7 +801,7 @@ impl<'a> P<'a> {
         })
     }
 
-    // --- intent files (Annex C.2) ----------------------------------------
+    // --- intent files ----------------------------------------
 
     fn intent_file(&mut self) -> Result<Intent, Diagnostic> {
         let intent = self.intent_decl()?;
@@ -814,7 +810,7 @@ impl<'a> P<'a> {
     }
 
     /// The `intent-file` rule proper, stopping on its own closing `}` --
-    /// nested by an `op add|edit` of a change file (D2), exactly as
+    /// nested by an `op add|edit` of a change file, exactly as
     /// [`P::notion_decl`] is.
     fn intent_decl(&mut self) -> Result<Intent, Diagnostic> {
         self.skip_newlines();
@@ -1033,7 +1029,7 @@ impl<'a> P<'a> {
         Ok(Action::Free(text.node))
     }
 
-    // --- scenarios (Annex C.2) -------------------------------------------
+    // --- scenarios -------------------------------------------
 
     /// `scenario-decl`: at least one `given`, exactly one `when`, at least
     /// one `then`, in that order.
@@ -1148,7 +1144,7 @@ impl<'a> P<'a> {
         Ok(expr)
     }
 
-    // --- constraint files (Annex C.2) ------------------------------------
+    // --- constraint files ------------------------------------
 
     fn constraint_file(&mut self) -> Result<Constraint, Diagnostic> {
         let constraint = self.constraint_decl()?;
@@ -1157,7 +1153,7 @@ impl<'a> P<'a> {
     }
 
     /// The `constraint-file` rule proper, stopping on its own closing `}`
-    /// -- nested by an `op add|edit` of a change file (D2).
+    /// -- nested by an `op add|edit` of a change file.
     fn constraint_decl(&mut self) -> Result<Constraint, Diagnostic> {
         self.skip_newlines();
         self.expect_lower_kw("constraint")?;
@@ -1238,7 +1234,7 @@ impl<'a> P<'a> {
         Ok(cmd.node)
     }
 
-    // --- bindings file (Annex C.2) ---------------------------------------
+    // --- bindings file ---------------------------------------
 
     /// `bindings-file = { binding-line }` -- an empty file is valid.
     fn bindings_file(&mut self) -> Result<Vec<Binding>, Diagnostic> {
@@ -1282,7 +1278,7 @@ impl<'a> P<'a> {
         Err(self.expected("`implements` or `proves`"))
     }
 
-    // --- change files (Annex C) ------------------------------------------
+    // --- change files ------------------------------------------
 
     /// `change-file = "change" , change-id , string-lit , "{" ,
     ///  status-field , [ digest-field ] , { op-decl } , { journal-line } ,
@@ -1316,7 +1312,7 @@ impl<'a> P<'a> {
             self.skip_newlines();
         }
 
-        // The body is two phases: ops, then journal lines (Annex A). Once a
+        // The body is two phases: ops, then journal lines. Once a
         // journal line has been seen, `op` is no longer one of the options
         // -- the canonical order is what makes a change file readable as
         // "what was decided" followed by "what was done".
@@ -1362,11 +1358,11 @@ impl<'a> P<'a> {
         self.end_of_file();
 
         // Status and digest are one statement written on two lines: the
-        // digest *is* the approval (D3), so it is present exactly on the two
-        // statuses that carry one: `approved`, and the `implementing` an M3
-        // change moves on to -- which is still an approved change, in flight
-        // (D16: reconcile accepts either), and which could never be
-        // reconciled if writing it dropped the digest.
+        // digest *is* the approval, so it is present exactly on the two
+        // statuses that carry one: `approved`, and the `implementing` state a
+        // change moves on to. Reconcile accepts either status, and an
+        // implementing change could not reconcile if that transition dropped
+        // its digest.
         //
         // Checked only when the status line itself parsed -- otherwise the
         // complaint would be about a status nobody wrote.
@@ -1390,9 +1386,9 @@ impl<'a> P<'a> {
                 self.diags.push(diag);
             }
 
-            // A journal is the record of an implementation in flight, and
-            // only one status describes that (D1, D5): the first line a
-            // `telos test` or `telos bind` writes is what moves an approved
+            // A journal records an implementation in flight, and only one
+            // status describes that: the first line written by `telos test`
+            // or `telos bind` moves an approved
             // change to `implementing`, so a journal anywhere else names a
             // transition that never happened.
             if let Some(span) = journal_span
@@ -1417,7 +1413,7 @@ impl<'a> P<'a> {
         })
     }
 
-    /// The `CHG-NNNN` form of an `id-lit` (Annex C.1).
+    /// The `CHG-NNNN` form of an `id-lit`.
     fn expect_change_id(&mut self) -> Result<Sp<ChangeId>, Diagnostic> {
         let TokKind::IdLit(EntityRef::Change(id)) = &self.peek().kind else {
             return Err(self.expected("a change id"));
@@ -1435,14 +1431,14 @@ impl<'a> P<'a> {
         Ok(status)
     }
 
-    /// The five statuses of D16.
+    /// The five statuses of the change lifecycle.
     fn change_status(&mut self) -> Result<ChangeStatus, Diagnostic> {
         self.listed_word(CHANGE_STATUS_WORDS, &CHANGE_STATUSES)
     }
 
     /// `digest-field = "digest" , string-lit`, the string being the
-    /// canonical `"sha256:<64 hex>"` of D3 -- checked here, where the span
-    /// of the offending string is still at hand.
+    /// canonical `"sha256:<64 hex>"` form. It is checked here while the span
+    /// of an offending string is still available.
     fn digest_field(&mut self) -> Result<String, Diagnostic> {
         self.expect_lower_kw("digest")?;
         let text = self.expect_str("a digest string")?;
@@ -1457,7 +1453,7 @@ impl<'a> P<'a> {
         Ok(text.node)
     }
 
-    /// `op-decl`: one staged operation (Annex C).
+    /// `op-decl`: one staged operation.
     fn op_decl(&mut self) -> Result<StagedOp, Diagnostic> {
         self.expect_lower_kw("op")?;
         if self.at_kw("add") {
@@ -1540,8 +1536,8 @@ impl<'a> P<'a> {
         Ok(StagedOp::EditConfig(config))
     }
 
-    /// `entity-decl = notion-file | intent-file | constraint-file`, nested
-    /// (D2): the entity keyword picks the M1 rule, which parses the block
+    /// Nested `entity-decl = notion-file | intent-file | constraint-file`.
+    /// The entity keyword picks the rule that parses the block
     /// exactly as it would at the top of a file of its own.
     fn entity_decl(&mut self, verb: Verb) -> Result<StagedOp, Diagnostic> {
         let op = if self.at_kw("notion") {
@@ -1589,7 +1585,7 @@ impl<'a> P<'a> {
         Ok(op)
     }
 
-    /// `journal-line = run-line | bind-line` (Annex A).
+    /// `journal-line = run-line | bind-line`.
     ///
     /// Only reached on `run` or `bind`, which the body loop matched to
     /// decide the phase; the final `Err` is unreachable in practice and
@@ -1607,7 +1603,7 @@ impl<'a> P<'a> {
             let text = self.expect_str("a test reference")?;
             let test = TestRef::from_str(&text.node)
                 .map_err(|err| self.diag_at(text.span, err.message, err.hint))?;
-            // The oid is opaque (D1): 40 hex in a sha1 repository, 64 in a
+            // The oid is opaque: 40 hex in a sha1 repository, 64 in a
             // sha256 one, and never anything this parser should adjudicate.
             let oid = self.expect_str("the blob oid string after the test reference")?;
             self.end_of_field()?;
@@ -1631,14 +1627,14 @@ impl<'a> P<'a> {
         Err(self.expected("`run` or `bind`"))
     }
 
-    /// Refuses a journal path inside the spec tree (D2, D3, D9).
+    /// Refuses a journal path inside the spec tree.
     ///
     /// A journal line names *code*: the test file a run was taken on, the
     /// source file a bind attaches to an intent. Both become claims of the
-    /// change (D3), and a claim is a licence to drift the file until this
+    /// change, and a claim is a licence to drift the file until this
     /// change reconciles -- which is exactly what `telos/**` must never
     /// hand out. `telos/bindings.tel` is the sharp case: it is sealed, it
-    /// is rewritten by *every* reconcile from the folded journal (D2), and
+    /// is rewritten by *every* reconcile from the folded journal, and
     /// a change claiming it would both lock it against the others and let
     /// unreviewed drift through reconcile's own drift gate. The rest of the
     /// spec tree is no better: an entity file is written by an `op`, whose
@@ -1666,7 +1662,7 @@ impl<'a> P<'a> {
         })
     }
 
-    // --- expressions (Annex C.3) -----------------------------------------
+    // --- expressions -----------------------------------------
 
     /// `expr = or-expr`; precedence `or` < `and` < `not` < comparison.
     fn expr(&mut self) -> Result<Expr, Diagnostic> {
@@ -1702,7 +1698,7 @@ impl<'a> P<'a> {
     }
 
     /// A parenthesized sub-expression, or a comparison. Operands are never
-    /// parenthesized (Annex C.3), so there is no ambiguity here.
+    /// parenthesized, so there is no ambiguity here.
     fn primary(&mut self) -> Result<Expr, Diagnostic> {
         if self.at(&TokKind::LParen) {
             self.advance();
@@ -1786,8 +1782,8 @@ impl<'a> P<'a> {
 mod tests {
     use super::*;
 
-    /// Annex D, `telos/notions/Invoice.tel`, byte for byte (the corpus
-    /// files themselves are created in Task 7).
+    /// Canonical `telos/notions/Invoice.tel`, byte for byte (the corpus files
+    /// themselves are created by mutation commands).
     const INVOICE_TEL: &str = concat!(
         "notion Invoice entity {\n",
         "  def  \"A bill issued to a Customer for delivered work.\"\n",
@@ -1797,7 +1793,7 @@ mod tests {
         "}\n",
     );
 
-    /// Annex D, `telos/intents/INT-0042.tel`, byte for byte.
+    /// Canonical `telos/intents/INT-0042.tel`, byte for byte.
     const INT_0042_TEL: &str = concat!(
         "intent INT-0042 \"Invoice payment marks it settled\" {\n",
         "  status active\n",
@@ -1816,7 +1812,7 @@ mod tests {
         "}\n",
     );
 
-    /// Annex D, `telos/intents/INT-0017.tel`, byte for byte.
+    /// Canonical `telos/intents/INT-0017.tel`, byte for byte.
     const INT_0017_TEL: &str = concat!(
         "intent INT-0017 \"Issuing an invoice opens it\" {\n",
         "  status active\n",
@@ -1834,7 +1830,7 @@ mod tests {
         "}\n",
     );
 
-    /// Annex D, `telos/constraints/CON-0003.tel`, byte for byte.
+    /// Canonical `telos/constraints/CON-0003.tel`, byte for byte.
     const CON_0003_TEL: &str = concat!(
         "constraint CON-0003 architecture \"Hexagonal boundaries\" {\n",
         "  rule  \"Domain code must not import adapter modules.\"\n",
@@ -1843,7 +1839,7 @@ mod tests {
         "}\n",
     );
 
-    /// Annex D, `telos/bindings.tel`, byte for byte.
+    /// Canonical `telos/bindings.tel`, byte for byte.
     const BINDINGS_TEL: &str = concat!(
         "implements \"src/billing/invoice.rs\" -> INT-0042\n",
         "proves     \"tests/billing.rs::scn_0107_full_payment_settles_the_invoice\" -> SCN-0107\n",
@@ -1955,7 +1951,7 @@ mod tests {
     // --- notion files -----------------------------------------------------
 
     #[test]
-    fn parses_the_annex_d_invoice_into_the_exact_expected_ast() {
+    fn parses_the_payload_schema_invoice_into_the_exact_expected_ast() {
         let notion = parse_notion_file(&path(), INVOICE_TEL).unwrap();
 
         assert_eq!(notion.name, nname("Invoice"));
@@ -2172,8 +2168,8 @@ mod tests {
 
     #[test]
     fn blank_lines_between_fields_are_tolerated_by_the_parser() {
-        // Canonical form forbids them (Annex C.4 §4) -- that is the
-        // emitter's and the round-trip test's job, not the parser's.
+        // The emitter's canonical form forbids them, but the parser accepts
+        // them; byte-level normalization belongs to round-trip tests.
         let src = concat!(
             "\n",
             "notion Invoice entity {\n",
@@ -2261,7 +2257,7 @@ mod tests {
 
     #[test]
     fn parse_expr_binds_not_tighter_than_and() {
-        // Annex C.3: `or` < `and` < `not` < comparison.
+        // the textual syntax: `or` < `and` < `not` < comparison.
         let expr = parse_expr("not A.b == 1 and C.d in (1, 2)").unwrap();
         let Expr::And(lhs, rhs) = expr else {
             panic!("expected And, got {expr:?}");
@@ -2392,7 +2388,7 @@ mod tests {
 
     #[test]
     fn parse_expr_rejects_a_bare_operand() {
-        // An expression is always an assertion (Annex C.3).
+        // An expression is always an assertion.
         let diag = parse_expr("Invoice.state").unwrap_err();
         assert_eq!(diag.code, ErrorCode::TelosParseError);
         assert_eq!(
@@ -2411,7 +2407,7 @@ mod tests {
 
     #[test]
     fn parse_expr_requires_an_upper_ident_before_the_dot_of_an_attr_ref() {
-        // `attr-ref = upper-ident, ".", lower-ident` (Annex C.3): a lone
+        // `attr-ref = upper-ident, ".", lower-ident`: a lone
         // lower-ident is an enum symbol, so `a.b` is not an attr-ref.
         let diag = parse_expr("a.b == 1").unwrap_err();
         assert_eq!(
@@ -2461,7 +2457,7 @@ mod tests {
     // --- intent files -----------------------------------------------------
 
     #[test]
-    fn parses_the_annex_d_int_0042_header_statement_and_relations() {
+    fn parses_the_payload_schema_int_0042_header_statement_and_relations() {
         let intent = parse_intent_file(&intent_path(), INT_0042_TEL).unwrap();
 
         assert_eq!(intent.id, IntentId(42));
@@ -2546,7 +2542,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_annex_d_int_0017_including_its_empty_instance_body() {
+    fn parses_the_payload_schema_int_0017_including_its_empty_instance_body() {
         let intent = parse_intent_file(&intent_path(), INT_0017_TEL).unwrap();
 
         assert_eq!(intent.id, IntentId(17));
@@ -2696,7 +2692,7 @@ mod tests {
     #[test]
     fn an_intent_without_scenarios_parses() {
         // "an active intent needs at least one scenario" is an integrity
-        // rule (Task 8), not a syntax rule.
+        // rule, not a syntax rule.
         let src = intent_with_statement("ubiquitous", "    system shall \"log every request\"");
         let intent = parse_intent_file(&intent_path(), &src).unwrap();
         assert!(intent.scenarios.is_empty());
@@ -2948,7 +2944,7 @@ mod tests {
     // --- constraint files -------------------------------------------------
 
     #[test]
-    fn parses_the_annex_d_con_0003_into_the_exact_expected_ast() {
+    fn parses_the_payload_schema_con_0003_into_the_exact_expected_ast() {
         let constraint = parse_constraint_file(&constraint_path(), CON_0003_TEL).unwrap();
         assert_eq!(constraint.id, ConstraintId(3));
         assert_eq!(constraint.kind, ConstraintKind::Architecture);
@@ -3074,7 +3070,7 @@ mod tests {
     // --- bindings files ---------------------------------------------------
 
     #[test]
-    fn parses_the_annex_d_bindings_into_both_variants() {
+    fn parses_the_payload_schema_bindings_into_both_variants() {
         let bindings = parse_bindings_file(&bindings_path(), BINDINGS_TEL).unwrap();
         assert_eq!(
             bindings,
@@ -3195,7 +3191,7 @@ mod tests {
         use crate::emit::{emit_change, emit_op};
         use crate::ids::ChangeId;
         use crate::model::change::fixtures::{
-            ANNEX_A_EXAMPLE, ANNEX_C_EXAMPLE, annex_c_change, annex_c_ops, implementing_change,
+            CHANGE_EXAMPLE, JOURNAL_EXAMPLE, example_change, example_ops, implementing_change,
         };
         use crate::model::{JournalEntry, TestRun, Witness};
 
@@ -3213,9 +3209,9 @@ mod tests {
         }
 
         #[test]
-        fn parses_the_annex_c_example_into_the_expected_change() {
-            let change = parse(ANNEX_C_EXAMPLE);
-            let expected = annex_c_change();
+        fn parses_the_canonical_example_into_the_expected_change() {
+            let change = parse(CHANGE_EXAMPLE);
+            let expected = example_change();
 
             assert_eq!(change.id, ChangeId(7));
             assert_eq!(change.motivation, expected.motivation);
@@ -3224,7 +3220,7 @@ mod tests {
 
             // Three of the four ops carry no `Sp` at all, so they compare
             // to the in-code fixture as they are...
-            let ops = annex_c_ops();
+            let ops = example_ops();
             assert_eq!(change.ops.len(), ops.len());
             assert_eq!(change.ops[0], ops[0]);
             assert_eq!(change.ops[2], ops[2]);
@@ -3232,7 +3228,7 @@ mod tests {
             // ...while the intent's references were parsed from real
             // positions, which the fixture (built in code) has no way to
             // predict. Their canonical bytes are the span-free identity,
-            // and `ops_digest` is that identity for the whole delta (D3).
+            // and `ops_digest` is that identity for the whole delta.
             let StagedOp::EditIntent(intent) = &change.ops[1] else {
                 panic!("the second op edits an intent");
             };
@@ -3246,10 +3242,10 @@ mod tests {
         }
 
         #[test]
-        fn the_annex_c_example_round_trips_byte_exact() {
-            // D1: the emitter defines the canonical form, so the golden it
-            // is pinned against must survive a parse untouched.
-            assert_eq!(emit_change(&parse(ANNEX_C_EXAMPLE)), ANNEX_C_EXAMPLE);
+        fn the_canonical_example_round_trips_byte_exact() {
+            // The emitter defines the canonical form, so its golden source
+            // must survive a parse untouched.
+            assert_eq!(emit_change(&parse(CHANGE_EXAMPLE)), CHANGE_EXAMPLE);
         }
 
         #[test]
@@ -3257,13 +3253,13 @@ mod tests {
             // The nested block is parsed in place, so its diagnostics point
             // at the change file's own offsets -- not at offsets in some
             // extracted substring.
-            let StagedOp::EditIntent(intent) = &parse(ANNEX_C_EXAMPLE).ops[1] else {
+            let StagedOp::EditIntent(intent) = &parse(CHANGE_EXAMPLE).ops[1] else {
                 panic!("the second op edits an intent");
             };
             let Statement::EventDriven { event, .. } = &intent.statement else {
                 panic!("an event-driven statement");
             };
-            let at = ANNEX_C_EXAMPLE.find("when   InvoiceIssued").unwrap() + "when   ".len();
+            let at = CHANGE_EXAMPLE.find("when   InvoiceIssued").unwrap() + "when   ".len();
             assert_eq!(
                 event.span,
                 Span {
@@ -3319,7 +3315,7 @@ mod tests {
 
         #[test]
         fn a_status_that_carries_an_approval_must_carry_its_digest() {
-            // `implementing` is an approved change in flight (D16), so it
+            // `implementing` is an approved change in flight, so it
             // owes the same digest -- and one message covers both, since
             // both are approved changes.
             for status in ["approved", "implementing"] {
@@ -3588,7 +3584,7 @@ mod tests {
             assert_eq!(emit_change(&parse(canonical)), canonical);
         }
 
-        // --- the journal (Annex A) ----------------------------------------
+        // --- the journal ----------------------------------------
 
         /// An implementing change with `body` as its journal block.
         fn journalled(body: &str) -> String {
@@ -3600,20 +3596,20 @@ mod tests {
         }
 
         #[test]
-        fn parses_the_annex_a_example_into_the_expected_change() {
-            let change = parse(ANNEX_A_EXAMPLE);
+        fn parses_the_journal_example_into_the_expected_change() {
+            let change = parse(JOURNAL_EXAMPLE);
             let expected = implementing_change();
             assert_eq!(change.status, ChangeStatus::Implementing);
             assert_eq!(change.ops.len(), 1);
             assert_eq!(change.journal, expected.journal);
             // The journal is not hashed: the parsed change digests exactly
-            // as the same ops with no journal at all would (D1).
+            // as the same ops with no journal at all would.
             assert_eq!(change.ops_digest(), expected.ops_digest());
         }
 
         #[test]
-        fn the_annex_a_example_round_trips_byte_exact() {
-            assert_eq!(emit_change(&parse(ANNEX_A_EXAMPLE)), ANNEX_A_EXAMPLE);
+        fn the_journal_example_round_trips_byte_exact() {
+            assert_eq!(emit_change(&parse(JOURNAL_EXAMPLE)), JOURNAL_EXAMPLE);
         }
 
         #[test]
@@ -3719,8 +3715,8 @@ mod tests {
 
         #[test]
         fn an_approved_change_may_not_carry_a_journal_either() {
-            // D5: the first journalled line is what moves an approved change
-            // to `implementing`, so an approved change with a journal is a
+            // The first journalled line moves an approved change to
+            // `implementing`, so an approved change with a journal is a
             // change whose writer skipped that transition.
             let src = format!(
                 "change CHG-0001 \"x\" {{\n  status approved\n  digest \"sha256:{}\"\n\n  \
@@ -3753,7 +3749,7 @@ mod tests {
 
         #[test]
         fn an_op_after_a_journal_line_is_rejected() {
-            // Annex A: journal lines come after the last op, so the body is
+            // the journal format: journal lines come after the last op, so the body is
             // two phases -- once a journal line is seen, no op may follow.
             let src = journalled(concat!(
                 "  bind \"src/b.rs\" -> INT-0001\n",
@@ -3850,8 +3846,8 @@ mod tests {
 
         #[test]
         fn a_journal_line_may_not_name_a_path_under_telos() {
-            // D2/D3/D9: a journal path is a claim, and a claim licenses
-            // drift until reconcile -- which `telos/**` must never grant.
+            // A journal path is a claim, and a claim licenses drift until
+            // reconcile -- which `telos/**` must never grant.
             // Enforced by the grammar so a hand-edited change file cannot
             // buy what the commands would never write.
             let cases = [

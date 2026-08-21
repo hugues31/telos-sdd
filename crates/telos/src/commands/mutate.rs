@@ -3,22 +3,22 @@
 //!
 //! The three verbs are one command with three shapes. Each of them appends
 //! exactly one [`StagedOp`] to a change and writes nothing else -- no `.tel`
-//! file of the spec is touched until `reconcile` (T10). What makes that safe
+//! file of the spec is touched until `reconcile`. What makes that safe
 //! is the order the flow below is written in, which is the whole design of
 //! this module:
 //!
 //! 1. **State first.** [`project`] discovers, locks and computes state;
 //!    [`require_no_unclaimed_drift`] refuses to stage on top of a base
-//!    nobody reviewed (D17).
+//!    nobody reviewed.
 //! 2. **The change must exist**, and is read through the store.
 //! 3. **The op is built against the overlay**, not against the sealed tree:
 //!    the base is the sealed spec with this change's own earlier ops already
 //!    applied, so `add intent` can name a notion the same change added two
 //!    ops ago, and `edit` patches the entity as this change last left it.
-//! 4. **One file, one change** (D5): the op's target path must not be
+//! 4. **One file, one change**: the op's target path must not be
 //!    claimed by another open change.
-//! 5. **The new op is checked against the overlay** ([`apply_ops`] -- rule 2
-//!    of §3.3, and whether the target exists at all), **then the whole spec
+//! 5. **The new op is checked against the overlay** ([`apply_ops`] --
+//!    referential deletion safety and whether the target exists at all), **then the whole spec
 //!    the delta describes is validated** ([`validate_ops_idempotent`]) --
 //!    every reference, every literal.
 //! 6. **Only then does anything reach the disk**, change file first,
@@ -34,7 +34,7 @@
 //! `drafted`), on `drafted`, and on an already-approved change too. The last
 //! case is deliberate: nothing is lost -- the approval's digest stays,
 //! [`Change::is_stale`] turns true, `change diff` reports `stale: true`, and
-//! `reconcile` refuses with `TELOS_APPROVAL_STALE` (D3/D16). Refusing here
+//! `reconcile` refuses with `TELOS_APPROVAL_STALE`. Refusing here
 //! instead would only move the same conversation earlier while making the
 //! natural "review, adjust, re-approve" loop impossible.
 
@@ -78,7 +78,7 @@ pub enum EntityKind {
 
 /// `telos add <kind> --change CHG-NNNN`, payload on stdin.
 ///
-/// An `add` payload never carries an id (Annex D): `intent` and `constraint`
+/// An `add` payload never carries an id: `intent` and `constraint`
 /// get theirs from the allocator, and a notion's identity is its `name`.
 pub fn add(ctx: &Ctx, kind: EntityKind, change: &str, payload: &str) -> CmdResult {
     let mut staging = Staging::begin(ctx, change)?;
@@ -102,7 +102,7 @@ pub fn add(ctx: &Ctx, kind: EntityKind, change: &str, payload: &str) -> CmdResul
 
 /// `telos edit <kind> <key> --change CHG-NNNN`, payload on stdin.
 ///
-/// The op carries the complete post-state, not the patch (Annex C), so the
+/// The op carries the complete post-state, not the patch, so the
 /// entity is read from the overlay, patched in memory, and staged whole.
 pub fn edit(ctx: &Ctx, kind: EntityKind, key: &str, change: &str, payload: &str) -> CmdResult {
     let mut staging = Staging::begin(ctx, change)?;
@@ -141,7 +141,7 @@ pub fn edit(ctx: &Ctx, kind: EntityKind, key: &str, change: &str, payload: &str)
 /// `telos remove <kind> <key> --change CHG-NNNN`. No payload.
 ///
 /// Whether the target exists, and whether anything still references it
-/// (rule 2 of §3.3), are both the overlay's answers -- staged here, decided
+/// (the referential-deletion check), are both the overlay's answers -- staged here, decided
 /// by [`apply_ops`] in [`Staging::finish`], which is where the removal meets
 /// the spec it would leave behind.
 pub fn remove(ctx: &Ctx, kind: EntityKind, key: &str, change: &str) -> CmdResult {
@@ -187,7 +187,7 @@ impl Staging {
         let change = read_change(&project.ws, id)?;
         let base = parse_base(&project.ws).map_err(diagnostics_to_error)?;
         // The change's *own* earlier ops are replayed idempotently: a change
-        // `adopt` produced (T12) describes a tree that already shows them,
+        // `adopt` produced describes a tree that already shows them,
         // and refusing to build a base for the next op because of that would
         // make an adopted change the one kind nobody can add to.
         let base = apply_ops_idempotent(base, &change.ops);
@@ -243,7 +243,7 @@ impl Staging {
     ///
     /// `scenario_ids` is `Some` for `add`/`edit` (whose result reports the
     /// ids allocated along the way, `[]` when none were) and `None` for
-    /// `remove`, whose result is the shorter shape of Annex E.
+    /// `remove`, whose result is the shorter shape of the result schema.
     ///
     /// `claims` in the result is the *change's* claim set with the new op
     /// counted, not this op's one path: what a caller needs to know is which
@@ -254,7 +254,7 @@ impl Staging {
 
         // Step 5 in two halves, because the two halves judge different
         // things. The op's own preconditions -- add of what already exists,
-        // edit/remove of what does not, rule 2 of §3.3 -- are judged
+        // edit/remove of what does not, referential deletion safety -- are judged
         // strictly, against the overlay this change already describes: this
         // op is being staged *now*, and its mistakes are the caller's to fix
         // now. The spec as a whole is judged after, over the full delta,
@@ -267,7 +267,7 @@ impl Staging {
         let key = op.key();
         let verb = op.verb();
         self.change.ops.push(op);
-        // D16: the first staged op is what takes a change out of `open`.
+        // the change lifecycle: the first staged op is what takes a change out of `open`.
         // Every other status is left exactly as it was -- see the module
         // docs on why staging into an approved change is allowed.
         if self.change.status == ChangeStatus::Open {
@@ -281,7 +281,7 @@ impl Staging {
         // Only an op that minted an id has a counter to persist; the others
         // never built an allocator, and re-persisting an unchanged
         // `counters.toml` would be a write for nothing. Nothing is lost by
-        // skipping it: the next allocation rescans the floors anyway (D4).
+        // skipping it: the next allocation rescans the floors anyway.
         if let Some(alloc) = &self.alloc {
             write_counters(&self.project.ws, &alloc.counters())?;
         }
@@ -301,14 +301,14 @@ impl Staging {
     }
 }
 
-/// D5's gate: one file, one change.
+/// Enforces one file, one change.
 ///
 /// The scan is over every *other* open change -- a change may of course
 /// stage the same file twice, a claim keeps others out, it is not a lock
 /// against its owner. `Project::changes` is ordered by id, so a path two
 /// changes somehow claimed names the lower one, deterministically.
 ///
-/// Shared with `adopt` (T12), which stages several ops at once and runs this
+/// Shared with `adopt`, which stages several ops at once and runs this
 /// on each of them: one definition of what a claim collision is, and one
 /// message for it.
 pub(crate) fn require_unclaimed(

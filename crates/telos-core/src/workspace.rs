@@ -4,8 +4,8 @@
 //! Everything here is I/O -- reading `telos.toml`, walking directories,
 //! reading `.tel` files -- and nothing here is git-aware or lock-aware.
 //! Checking that `repo_root` matches the git repository root is
-//! [`crate::git::GitRepo`]'s job (Task 10); reading `telos.lock` and
-//! sealing are [`crate::lock`]'s (Task 11).
+//! [`crate::git::GitRepo`]'s job; reading `telos.lock` and sealing are
+//! [`crate::lock`]'s.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ const SPEC_SUBDIRS: [(&str, &str); 3] = [
 ];
 
 /// The one spec file no entity owns: the bindings table, sealed with the
-/// rest of the tree and *derived* at reconcile from the folded journal (D2),
+/// rest of the tree and *derived* at reconcile from the folded journal,
 /// never claimed by a change.
 pub const BINDINGS_PATH: &str = "telos/bindings.tel";
 
@@ -108,8 +108,8 @@ impl Workspace {
     /// be resolved against.
     ///
     /// This is the half of [`load_model`](Workspace::load_model) that stops
-    /// short of the semantic pass, and it exists because M2's overlay
-    /// ([`crate::overlay`]) needs exactly that: the parsed base, so a
+    /// short of the semantic pass. The overlay ([`crate::overlay`]) needs
+    /// exactly that: the parsed base, so a
     /// change's staged ops can be applied to it *before* a model is built
     /// from the result.
     pub fn parse_spec_files(&self) -> Result<Vec<(RepoPath, TelFile)>, Vec<Diagnostic>> {
@@ -205,7 +205,7 @@ impl Workspace {
     }
 }
 
-/// Routes a spec file to the parser its location calls for (Annex C.4.2):
+/// Routes a spec file to the parser its location calls for:
 /// `notions/*.tel` -> `parse_notion_file`, `intents/*.tel` ->
 /// `parse_intent_file`, `constraints/*.tel` -> `parse_constraint_file`,
 /// `bindings.tel` -> `parse_bindings_file`.

@@ -1,18 +1,12 @@
-//! `telos status`: reports whether the project matches its seal, and how
-//! much of the spec is covered by scenarios and bindings (Annex B's frozen
-//! `status --json` schema).
+//! `telos status`: reports whether the project matches its seal and how much
+//! of the spec is covered by scenarios and bindings.
 //!
-//! Order matters, and is spelled out by the task: state ([`project`], which
-//! ends in `compute_state`) is computed *first*, and never parses a `.tel`
-//! spec file (spec §6) -- it only compares git blob OIDs, and reads the open
-//! changes best-effort, so even a corrupted spec *and* a corrupted change
-//! file still get a state answer (D15). Loading
-//! the model for `coverage` is best-effort *after* that: if the spec fails
-//! to parse, `coverage` is reported as all zeros rather than blocking the
-//! command. Annex B's "coverage computed over what parses" is ambiguous
-//! about a spec that doesn't parse *at all*; all-zeros is the deterministic
-//! reading adopted here, and `status` still exits 0 -- it reports, it does
-//! not fail.
+//! Order matters: state ([`project`], which ends in `compute_state`) is
+//! computed *first* and never parses a `.tel` file. It only compares Git blob
+//! OIDs and reads open changes best-effort, so even a corrupted spec and a
+//! corrupted change file still get a state answer. Coverage is loaded
+//! best-effort afterward; if the spec does not parse, coverage is reported as
+//! all zeros and `status` still exits 0.
 
 use serde_json::{Value, json};
 
@@ -22,8 +16,8 @@ use crate::commands::{Ctx, project, require_sealed_integrity};
 use crate::envelope::{CmdResult, Outcome};
 
 /// A [`Coverage`] with every counter at zero -- what `status` reports when
-/// the spec fails to parse. `Coverage` has no `Default` of its own (Annex
-/// B's freeze doesn't grant it one), so this spells the zero value out.
+/// the spec fails to parse. `Coverage` has no `Default` of its own, so this
+/// spells the public schema's zero value out.
 const ZERO_COVERAGE: Coverage = Coverage {
     notions: 0,
     constraints: 0,
@@ -60,9 +54,8 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     } else {
         Value::Null
     };
-    // One state, one suggestion: drift is the more urgent of the two (D15
-    // ranks it above `changing` for exactly that reason), and a `changing`
-    // project's single next step is to look at what is open.
+    // One state, one suggestion: drift is more urgent than `changing`, and a
+    // changing project's single next step is to inspect what is open.
     let next_actions = match report.state {
         ProjectStateKind::Drifted => vec![
             format!("telos adopt --expected-state {token}"),

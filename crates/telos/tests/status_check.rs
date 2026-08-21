@@ -1,5 +1,5 @@
 //! End-to-end tests for `telos status` and `telos check [--sealed]`: the
-//! frozen `status --json` schema (Annex B), drift reporting, integrity
+//! frozen `status --json` schema, drift reporting, integrity
 //! checking, and the `--sealed` gate. Every test runs the real binary
 //! against the sealed `billing` corpus fixture (or a deliberately broken
 //! copy of it) -- these prove the CLI contract, not the engine (that lives
@@ -49,7 +49,7 @@ fn legacy_incomplete_seal() -> tempfile::TempDir {
 // --- status: the golden schema ------------------------------------------
 
 /// The whole envelope, on a freshly sealed, untouched fixture, equals the
-/// golden JSON from Annex B's «Schéma `status --json` gelé» -- byte for
+/// golden JSON from the stable `status --json` schema -- byte for
 /// byte as a `Value`, not just field by field.
 #[test]
 fn status_json_on_the_sealed_fixture_matches_the_golden_envelope() {
@@ -276,8 +276,9 @@ fn check_json_on_an_unresolvable_reference_reports_telos_reference_unknown() {
     assert_eq!(envelope["error"]["hint"], Value::Null);
 }
 
-/// Human mode is where the M1 limitation documented in `docs/contracts.md`
-/// actually pays off: with two independent diagnostics in the same run
+/// Human mode is where the single-diagnostic envelope limitation documented
+/// in `docs/contracts.md` actually pays off: with two independent diagnostics
+/// in the same run
 /// ([`break_int_0042_in_two_ways`]), stderr lists both, one per line, not
 /// just the first one `error.code`/`error.hint` describe. Nothing reaches
 /// stdout -- human-mode errors are stderr-only, success stays on stdout.

@@ -1,7 +1,7 @@
 //! `changes.rs`, the change store, seen from outside the crate: filesystem
 //! CRUD over `telos/changes/*.tel` (`list_change_ids`, `read_change`,
 //! `write_change`, `delete_change`), and the best-effort scan `scan_changes`
-//! / `open_change_infos` answer with (D15).
+//! / `open_change_infos` answer with.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -266,7 +266,7 @@ fn open_change_infos_is_empty_when_no_change_is_open() {
     assert!(open_change_infos(&ws).unwrap().is_empty());
 }
 
-// --- scan_changes: the one pass both halves come out of (D14) -------------
+// --- scan_changes: one pass produces both halves ----------------------------
 
 #[test]
 fn scan_changes_reports_every_change_parsed_and_summarized_in_one_pass() {
@@ -307,7 +307,7 @@ fn scan_changes_keeps_an_unparseable_file_as_an_info_stub_and_out_of_parsed() {
 
     let scan = scan_changes(&ws).unwrap();
 
-    // D15: the damaged file is still reported -- so the project's state
+    // The damaged file is still reported, so the project's state
     // stays answerable -- but nothing can be parsed out of it, so no caller
     // that reads ops or a journal ever sees it.
     assert_eq!(

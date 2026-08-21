@@ -1,8 +1,7 @@
 //! Argument parsing and dispatch: parse, run exactly one command, render its
 //! result once, print, exit.
 //!
-//! M1's surface is `version` and `init`. Commands are added here as their own
-//! tasks land -- an unimplemented command is absent from this enum, never a
+//! An unimplemented command is absent from this enum, never a
 //! stub, so `telos <not-yet-a-command>` is a clap usage error (exit 2) rather
 //! than a command that answers with something meaningless.
 
@@ -100,7 +99,7 @@ enum Command {
     },
     /// Print the bounded work pack of one intent: its scenarios, notions,
     /// applicable constraints, bindings and 1-hop neighbours -- the unit of
-    /// agent context (spec §7.3).
+    /// agent context.
     Context {
         /// An intent id (`INT-0042`) or a scenario id (`SCN-0107`), which
         /// resolves to the intent that owns it.
@@ -207,11 +206,11 @@ impl Command {
             // with subcommands, the same way `telos query …` is.
             Command::Change { .. } => "change",
             // The staging verbs are three commands, not one with an
-            // argument, so each names itself (Annex E).
+            // argument, so each names itself.
             Command::Add { .. } => "add",
             Command::Edit { .. } => "edit",
             Command::Remove { .. } => "remove",
-            // The two exits from drift, each its own command (Annex E).
+            // The two exits from drift, each its own command.
             Command::Adopt { .. } => "adopt",
             Command::Revert { .. } => "revert",
             Command::Test { .. } => "test",
@@ -313,7 +312,7 @@ fn execute(command: &Command) -> CmdResult {
 }
 
 /// Reads the whole of stdin, for the two commands that take a JSON payload
-/// there (Annex D).
+/// there.
 ///
 /// Read here rather than inside the command so that the command layer stays
 /// a pure function of its arguments -- the same reason `ctx()` reads the

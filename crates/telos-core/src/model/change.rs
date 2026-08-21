@@ -1,4 +1,4 @@
-//! Changes: the staged, reviewable unit of spec mutation (D1, Annex C).
+//! Changes: the staged, reviewable unit of spec mutation.
 //!
 //! A change is *not* part of [`super::TelFile`]. It is its own kind of file,
 //! living under `telos/changes/` -- a directory deliberately excluded from
@@ -7,19 +7,19 @@
 //! an ordered list of [`StagedOp`]s plus enough state to decide whether that
 //! list may still be applied.
 //!
-//! Three properties carry the whole design:
+//! Four properties carry the whole design:
 //!
-//! - **Order is data** (Annex C). `ops` is a `Vec`, never sorted -- the ops
+//! - **Order is data**. `ops` is a `Vec`, never sorted -- the ops
 //!   replay sequentially against the sealed base, so `add` then `edit` of
 //!   the same entity is a different transaction from `edit` then `add`.
-//! - **The digest is over the canonical ops, not over the file** (D3).
+//! - **The digest is over the canonical ops, not over the file**.
 //!   [`Change::ops_digest`] hashes `emit_op` output, so the blank lines the
 //!   change file puts *between* ops, and the motivation line above them,
 //!   cannot move it. What can move it is any edit to an op's content or to
 //!   the ops' order -- which is exactly what an approval is an approval of.
-//! - **Claims are paths** (D5). [`Change::claims`] is the set of files this
+//! - **Claims are paths**. [`Change::claims`] is the set of files this
 //!   change owns while it is open; a second change may not stage them.
-//! - **The journal is digest-inert** (M3, D1). [`Change::journal`] records
+//! - **The journal is digest-inert**. [`Change::journal`] records
 //!   what the implementer did -- test runs and bindings -- *after* the delta
 //!   was approved, so it must never move [`Change::ops_digest`]: an approval
 //!   is an approval of the ops, and implementing an approved change may not
@@ -41,14 +41,14 @@ use super::constraint::Constraint;
 use super::intent::Intent;
 use super::notion::Notion;
 
-/// Where a change sits in the lifecycle of D16.
+/// Where a change sits in its lifecycle.
 ///
-/// `open` (no op yet) advances to `drafted` automatically on the first
-/// stage, to `approved` by `telos change approve`, and to `implementing`
-/// in M3. Both terminal outcomes -- reconciled and abandoned -- delete the
-/// file rather than storing a status, so `Abandoned` is only ever observed
-/// in flight; the audit trail is git, and D4's counters guarantee the id is
-/// never handed out again.
+/// `open` (no op yet) advances to `drafted` automatically on the first stage,
+/// to `approved` by `telos change approve`, and to `implementing` when
+/// implementation evidence is first recorded. Both terminal outcomes --
+/// reconciled and abandoned -- delete the file rather than storing a status,
+/// so `Abandoned` is only ever observed in flight; the audit trail is git,
+/// and the allocation counters guarantee the id is never handed out again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeStatus {
     Open,
@@ -60,7 +60,7 @@ pub enum ChangeStatus {
 
 impl ChangeStatus {
     /// The keyword this status is written as in a change file, and reported
-    /// as in CLI JSON (Annex E).
+    /// as in CLI JSON.
     pub fn as_str(self) -> &'static str {
         match self {
             ChangeStatus::Open => "open",
@@ -75,12 +75,12 @@ impl ChangeStatus {
 /// One staged operation: the post-state of one spec file, or the acceptance
 /// of one non-entity file's current bytes.
 ///
-/// `Edit` carries the *complete* post-state rather than a patch (Annex C):
+/// `Edit` carries the *complete* post-state rather than a patch:
 /// replaying a change never needs the base to reconstruct what an entity
 /// became, only to check that what it was is still what it was.
 ///
 /// `Accept` is the escape hatch for files the engine does not model --
-/// `telos/telos.toml`, and code files pulled in by `adopt` (D7). It seals a
+/// `telos/telos.toml`, and code files pulled in by `adopt`. It seals a
 /// specific blob OID: reconciling it means "the current bytes at this path
 /// are the intended bytes".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +99,7 @@ pub enum StagedOp {
 }
 
 impl StagedOp {
-    /// The one file this op writes, deletes or seals -- its claim (D5).
+    /// The one file this op writes, deletes or seals -- its claim.
     ///
     /// Every entity op derives its path from the entity's identity, not
     /// from where the file happens to be: an entity's location in the spec
@@ -118,7 +118,7 @@ impl StagedOp {
         }
     }
 
-    /// The op's verb, as written and as reported (Annex E `change diff`).
+    /// The op's verb, as written and as reported (the result schema `change diff`).
     pub fn verb(&self) -> &'static str {
         match self {
             StagedOp::AddNotion(_) | StagedOp::AddIntent(_) | StagedOp::AddConstraint(_) => "add",
@@ -188,11 +188,11 @@ pub fn constraint_path(id: ConstraintId) -> RepoPath {
     RepoPath::new(format!("telos/constraints/{id}.tel"))
 }
 
-/// Which side of the red/green pair a run witnessed (D1).
+/// Which side of the red/green pair a run witnessed.
 ///
 /// A `Red` run is the sealed proof that the test failed *before* the code
-/// existed; a `Green` one that it passes now. The pair is what M3's witness
-/// gate (T2) reads, and the reason a run is recorded rather than merely
+/// existed; a `Green` one that it passes now. The pair is what the witness
+/// gate reads, and the reason a run is recorded rather than merely
 /// counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Witness {
@@ -210,7 +210,7 @@ impl Witness {
     }
 }
 
-/// One recorded execution of one scenario's test (D1).
+/// One recorded execution of one scenario's test.
 ///
 /// `oid` is the blob oid of the test *file* at the moment of the run, not a
 /// hash of the run: it is what lets a later pass say "this red witness was
@@ -240,7 +240,7 @@ pub enum JournalEntry {
 
 impl JournalEntry {
     /// The one repository path this line names -- the test file of a run,
-    /// the bound file of a bind. Both become claims of the change (D3).
+    /// the bound file of a bind. Both become claims of the change.
     pub fn path(&self) -> &RepoPath {
         match self {
             JournalEntry::Run(run) => &run.test.path,
@@ -269,16 +269,16 @@ pub struct Change {
     pub motivation: String,
     pub status: ChangeStatus,
     /// The digest frozen by `approve`. `Some` exactly on the two statuses
-    /// that carry an approval, `Approved` and (in M3) `Implementing` --
+    /// that carry an approval, `Approved` and `Implementing` --
     /// `implementing` is an approved change in flight, and reconcile
-    /// accepts either (D16), so the digest must survive the transition.
+    /// accepts either, so the digest must survive the transition.
     /// Comparing it against a fresh [`Change::ops_digest`] is what detects
     /// a delta edited after review; `parse_change_file` enforces the
     /// correspondence on the way in.
     pub approved_digest: Option<String>,
     /// Staged order, never sorted: the order is part of the transaction.
     pub ops: Vec<StagedOp>,
-    /// The implementation record, in append order (D1): every test run and
+    /// The implementation record, in append order: every test run and
     /// every binding the implementer made against this change.
     ///
     /// Append-only by convention -- nothing here enforces it, but a line
@@ -289,8 +289,7 @@ pub struct Change {
 }
 
 impl Change {
-    /// `"sha256:" + hex(SHA-256(emit_op(op) for every op, in staged order))`
-    /// (D3).
+    /// `"sha256:" + hex(SHA-256(emit_op(op) for every op, in staged order))`.
     ///
     /// The unit of input is one op's canonical bytes, concatenated with no
     /// separator -- each `emit_op` output already ends in exactly one `\n`,
@@ -322,8 +321,8 @@ impl Change {
         }
     }
 
-    /// The set of files this change owns while it lives (D5), the journal's
-    /// paths included (D3).
+    /// The set of files this change owns while it lives, the journal's
+    /// paths included.
     ///
     /// A `BTreeSet` both deduplicates (two ops on the same entity claim it
     /// once, a test file run twice is claimed once) and orders, so the claim
@@ -342,7 +341,7 @@ impl Change {
     /// edited by hand as much as for one written by `telos test`. It has to
     /// be the grammar's, because a claim is a licence to drift the file
     /// until this change reconciles -- and `bindings.tel` is sealed,
-    /// rewritten by every reconcile from the folded journal (D2), and owned
+    /// rewritten by every reconcile from the folded journal, and owned
     /// by no one. Note that this method itself enforces nothing: hand a
     /// `Change` a journal entry naming `telos/` in code and it will be
     /// claimed.
@@ -354,8 +353,7 @@ impl Change {
             .collect()
     }
 
-    /// The bindings this journal asserts, in journal order, deduplicated
-    /// (D2).
+    /// The bindings this journal asserts, deduplicated in journal order.
     ///
     /// A `bind` line is an `implements`; a *green* run is a `proves`. A red
     /// run asserts nothing -- it is evidence that the test failed, which is
@@ -398,7 +396,7 @@ impl Change {
     /// Every run recorded for one scenario, in journal order.
     ///
     /// The order is what makes the sequence readable as a history: the
-    /// witness gate (T2) reads the reds and greens of one scenario in the
+    /// witness gate reads the reds and greens of one scenario in the
     /// order they were taken.
     pub fn runs_for(&self, id: ScenarioId) -> impl Iterator<Item = &TestRun> {
         self.journal.iter().filter_map(move |entry| match entry {
@@ -407,10 +405,10 @@ impl Change {
         })
     }
 
-    /// What remains to be done, as the frozen strings of Annex E.
+    /// What remains to be done, as the frozen strings of the result schema.
     ///
     /// These are contract, not prose: `status --json` reports them verbatim
-    /// and T13 freezes them in `contracts.md`. `Abandoned` has none -- an
+    /// and `contracts.md` freezes them. `Abandoned` has none -- an
     /// abandoned change is deleted, so nothing is owed.
     pub fn obligations(&self) -> Vec<String> {
         let steps: &[&str] = match self.status {
@@ -423,7 +421,7 @@ impl Change {
     }
 }
 
-/// The two canonical examples -- Annex C's delta and Annex A's journal --
+/// The two canonical examples -- a staged delta and an implementation journal --
 /// each as a model *and* as its canonical bytes.
 ///
 /// They live outside `mod tests` so that the rest of the crate's tests can
@@ -529,8 +527,8 @@ pub(crate) mod fixtures {
         }
     }
 
-    /// The four ops of the Annex C example, in staged order.
-    pub(crate) fn annex_c_ops() -> Vec<StagedOp> {
+    /// The four ops of the canonical change example, in staged order.
+    pub(crate) fn example_ops() -> Vec<StagedOp> {
         vec![
             StagedOp::AddNotion(invoice()),
             StagedOp::EditIntent(int_0017()),
@@ -542,11 +540,11 @@ pub(crate) mod fixtures {
         ]
     }
 
-    /// The Annex C example. Its `digest` is the annex' placeholder, not a
-    /// real `ops_digest()` -- the golden pins the *layout* of the digest
+    /// The textual-syntax example. Its `digest` is a fixed placeholder, not
+    /// a real `ops_digest()` -- the golden pins the *layout* of the digest
     /// line, and a self-referential digest would make the golden move every
     /// time the fixture does.
-    pub(crate) fn annex_c_change() -> Change {
+    pub(crate) fn example_change() -> Change {
         Change {
             id: ChangeId(7),
             motivation: "Invoices can be settled".to_string(),
@@ -555,26 +553,19 @@ pub(crate) mod fixtures {
                 "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
                     .to_string(),
             ),
-            ops: annex_c_ops(),
+            ops: example_ops(),
             journal: vec![],
         }
     }
 
-    /// The canonical example of Annex C, byte for byte: what
-    /// `emit_change(&annex_c_change())` writes, and what
-    /// `parse_change_file` reads back into `annex_c_change()`.
+    /// The canonical change example, byte for byte: what
+    /// `emit_change(&example_change())` writes, and what
+    /// `parse_change_file` reads back into `example_change()`.
     ///
-    /// It differs from the example as printed in the annex in exactly two
-    /// tokens, both of which the annex' sketch dropped and neither of which
-    /// the emitter may: the notion's kind (`entity`) and the intent's
-    /// title. `entity-decl` is the M1 `notion-file` / `intent-file` grammar
-    /// nested verbatim (Annex C), and both tokens are mandatory there -- an
-    /// `op add notion Invoice {` carries no kind, so replaying it could not
-    /// write a valid notion file, and D1's byte-level round-trip could not
-    /// hold. The values used here are the corpus' own:
-    /// `crates/telos-core/tests/corpus/billing`, which is visibly where the
-    /// annex drew the example from.
-    pub(crate) const ANNEX_C_EXAMPLE: &str = r#"change CHG-0007 "Invoices can be settled" {
+    /// `entity-decl` nests the `notion-file` / `intent-file` grammar verbatim,
+    /// so the notion kind and intent title remain mandatory. The values used
+    /// here come from `crates/telos-core/tests/corpus/billing`.
+    pub(crate) const CHANGE_EXAMPLE: &str = r#"change CHG-0007 "Invoices can be settled" {
   status approved
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
@@ -616,7 +607,7 @@ pub(crate) mod fixtures {
         }
     }
 
-    /// The test the Annex A example's runs were taken on.
+    /// The test referenced by the canonical journal example.
     pub(crate) fn billing_test() -> TestRef {
         TestRef {
             path: RepoPath::new("tests/billing.rs"),
@@ -625,7 +616,7 @@ pub(crate) mod fixtures {
     }
 
     /// The blob oid both runs of the example were taken at -- the same
-    /// bytes, which is what makes the pair a valid witness (D7).
+    /// bytes, which is what makes the pair a valid witness.
     pub(crate) fn run_oid() -> Oid {
         Oid("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".to_string())
     }
@@ -640,10 +631,10 @@ pub(crate) mod fixtures {
         })
     }
 
-    /// The Annex A canonical example: an implementing change whose journal
+    /// The canonical journal-format example: an implementing change whose journal
     /// holds the red/green pair of one scenario and one binding.
     ///
-    /// Its digest is the same placeholder as [`annex_c_change`]'s, and for
+    /// Its digest is the same placeholder as [`example_change`]'s, and for
     /// the same reason: the golden pins the *layout* of the digest line.
     pub(crate) fn implementing_change() -> Change {
         Change {
@@ -666,14 +657,12 @@ pub(crate) mod fixtures {
         }
     }
 
-    /// The canonical example of Annex A, byte for byte: what
+    /// The canonical journal example, byte for byte: what
     /// `emit_change(&implementing_change())` writes, and what
     /// `parse_change_file` reads back into `implementing_change()`.
     ///
-    /// Unlike [`ANNEX_C_EXAMPLE`], this one is the annex' bytes verbatim --
-    /// the journal grammar nests nothing, so there is no dropped token to
-    /// restore.
-    pub(crate) const ANNEX_A_EXAMPLE: &str = r#"change CHG-0001 "Invoices can be settled" {
+    /// The journal grammar nests nothing, so the emitted bytes are direct.
+    pub(crate) const JOURNAL_EXAMPLE: &str = r#"change CHG-0001 "Invoices can be settled" {
   status implementing
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
@@ -810,7 +799,7 @@ mod tests {
     #[test]
     fn target_path_follows_the_entity_identity_not_the_op_verb() {
         // add / edit / remove of the same notion all claim one file, which
-        // is what makes two ops on one entity collide (D5).
+        // is what makes two ops on one entity collide.
         let add = StagedOp::AddNotion(invoice()).target_path();
         let edit = StagedOp::EditNotion(invoice()).target_path();
         let remove = StagedOp::RemoveNotion(notion_name("Invoice")).target_path();
@@ -834,7 +823,7 @@ mod tests {
 
     #[test]
     fn ops_digest_is_a_lowercase_sha256_hex_string() {
-        let digest = annex_c_change().ops_digest();
+        let digest = example_change().ops_digest();
         assert!(
             is_sha256_hex(&digest),
             "not `sha256:<64 lowercase hex>`: {digest}"
@@ -852,7 +841,7 @@ mod tests {
         );
     }
 
-    /// Pins D3's algorithm to a value, not just to a shape.
+    /// Pins the operations-digest algorithm to a value, not just to a shape.
     ///
     /// Every assertion above would still pass if the digest hashed, say,
     /// the ops separated by a delimiter, or the whole change file. This one
@@ -862,7 +851,7 @@ mod tests {
     #[test]
     fn ops_digest_is_pinned_to_the_bytes_of_the_canonical_ops() {
         assert_eq!(
-            annex_c_change().ops_digest(),
+            example_change().ops_digest(),
             "sha256:3c7b089eed526d2dead2aadd21095e1b099be1009ac99379db4795a70be2945d"
         );
         // No op means no byte hashed: the SHA-256 of the empty input.
@@ -874,17 +863,17 @@ mod tests {
 
     #[test]
     fn ops_digest_is_stable_across_recomputation() {
-        let change = annex_c_change();
+        let change = example_change();
         assert_eq!(change.ops_digest(), change.ops_digest());
         // And across two independently built, equal changes.
-        assert_eq!(annex_c_change().ops_digest(), change.ops_digest());
+        assert_eq!(example_change().ops_digest(), change.ops_digest());
     }
 
     #[test]
     fn ops_digest_changes_when_an_op_content_changes() {
-        let before = annex_c_change().ops_digest();
+        let before = example_change().ops_digest();
 
-        let mut edited = annex_c_change();
+        let mut edited = example_change();
         let StagedOp::AddNotion(notion) = &mut edited.ops[0] else {
             panic!("the first op of the example is `add notion`");
         };
@@ -895,9 +884,9 @@ mod tests {
 
     #[test]
     fn ops_digest_changes_when_two_ops_are_reordered() {
-        let before = annex_c_change().ops_digest();
+        let before = example_change().ops_digest();
 
-        let mut reordered = annex_c_change();
+        let mut reordered = example_change();
         reordered.ops.swap(0, 1);
 
         assert_ne!(before, reordered.ops_digest());
@@ -907,7 +896,7 @@ mod tests {
     fn ops_digest_ignores_the_blank_lines_the_change_file_puts_between_ops() {
         // The digest is over `emit_op` output, never over the file: the
         // separators `emit_change` writes are outside every op's bytes.
-        let change = annex_c_change();
+        let change = example_change();
         let concatenated: String = change.ops.iter().map(crate::emit::emit_op).collect();
         assert!(
             !concatenated.contains("\n\nop "),
@@ -924,9 +913,9 @@ mod tests {
 
     #[test]
     fn ops_digest_does_not_depend_on_the_motivation_status_or_approved_digest() {
-        let before = annex_c_change().ops_digest();
+        let before = example_change().ops_digest();
 
-        let mut other = annex_c_change();
+        let mut other = example_change();
         other.motivation = "something else entirely".to_string();
         other.status = ChangeStatus::Drafted;
         other.approved_digest = None;
@@ -940,7 +929,7 @@ mod tests {
     fn an_unapproved_change_is_never_stale() {
         assert!(!empty_change().is_stale());
 
-        let mut drafted = annex_c_change();
+        let mut drafted = example_change();
         drafted.status = ChangeStatus::Drafted;
         drafted.approved_digest = None;
         assert!(!drafted.is_stale());
@@ -948,14 +937,14 @@ mod tests {
 
     #[test]
     fn an_approved_change_whose_digest_matches_is_not_stale() {
-        let mut change = annex_c_change();
+        let mut change = example_change();
         change.approved_digest = Some(change.ops_digest());
         assert!(!change.is_stale());
     }
 
     #[test]
     fn an_approved_change_goes_stale_when_an_op_is_edited() {
-        let mut change = annex_c_change();
+        let mut change = example_change();
         change.approved_digest = Some(change.ops_digest());
         change.ops.push(StagedOp::RemoveIntent(IntentId(42)));
         assert!(change.is_stale());
@@ -964,7 +953,7 @@ mod tests {
     // --- claims ----------------------------------------------------------
 
     #[test]
-    fn claims_of_the_annex_example_are_its_four_target_paths() {
+    fn claims_of_the_public_resultxample_are_its_four_target_paths() {
         let expected: BTreeSet<RepoPath> = [
             "telos/constraints/CON-0003.tel",
             "telos/intents/INT-0017.tel",
@@ -974,7 +963,7 @@ mod tests {
         .into_iter()
         .map(RepoPath::new)
         .collect();
-        assert_eq!(annex_c_change().claims(), expected);
+        assert_eq!(example_change().claims(), expected);
     }
 
     #[test]
@@ -1005,16 +994,17 @@ mod tests {
 
     // --- the journal: digest inertness -----------------------------------
 
-    /// The property the whole journal design rests on (M3, D1).
+    /// The property the whole journal design rests on.
     ///
-    /// The value asserted is the M2 constant, character for character: an
+    /// The value asserted is the approved-delta constant, character for
+    /// character: an
     /// approved delta that starts being implemented -- status moved to
     /// `implementing`, three journal lines written -- must still hash to
     /// exactly what its approval froze, or the first `telos test` would
     /// stale the change it is implementing.
     #[test]
     fn a_journal_never_moves_the_ops_digest() {
-        let mut implementing = annex_c_change();
+        let mut implementing = example_change();
         implementing.status = ChangeStatus::Implementing;
         implementing.journal = implementing_change().journal;
 
@@ -1022,12 +1012,12 @@ mod tests {
             implementing.ops_digest(),
             "sha256:3c7b089eed526d2dead2aadd21095e1b099be1009ac99379db4795a70be2945d"
         );
-        assert_eq!(implementing.ops_digest(), annex_c_change().ops_digest());
+        assert_eq!(implementing.ops_digest(), example_change().ops_digest());
     }
 
     #[test]
     fn a_change_approved_before_its_journal_is_not_stale_after_it() {
-        let mut change = annex_c_change();
+        let mut change = example_change();
         change.approved_digest = Some(change.ops_digest());
         change.status = ChangeStatus::Implementing;
         change.journal = implementing_change().journal;
@@ -1055,7 +1045,7 @@ mod tests {
         );
     }
 
-    // --- claims, journal included (D3) -----------------------------------
+    // --- claims, journal included -----------------------------------
 
     #[test]
     fn claims_take_in_the_test_files_and_bound_paths_of_the_journal() {
@@ -1078,7 +1068,7 @@ mod tests {
         assert_eq!(change.claims().len(), 3);
     }
 
-    /// D2: `bindings.tel` is derived at reconcile, never claimed -- and
+    /// `bindings.tel` is derived at reconcile, never claimed -- and
     /// what keeps it out of [`Change::claims`] is the *grammar*, so that is
     /// what this asserts.
     ///
@@ -1087,7 +1077,7 @@ mod tests {
     /// and a change file is a text file an agent may edit. A claimed
     /// `bindings.tel` would lock the file every other change has to
     /// rewrite, and would slip drift on a sealed file past reconcile's
-    /// drift gate (D9), so the refusal belongs where files become models.
+    /// drift gate, so the refusal belongs where files become models.
     #[test]
     fn no_journal_line_can_name_a_path_under_telos() {
         let path = RepoPath::new("telos/changes/CHG-0001.tel");
@@ -1110,7 +1100,7 @@ mod tests {
         }
     }
 
-    // --- journal_bindings (D2) -------------------------------------------
+    // --- journal_bindings -------------------------------------------
 
     fn implements(path: &str, intent: u32) -> Binding {
         Binding::Implements {
@@ -1206,7 +1196,7 @@ mod tests {
 
     #[test]
     fn a_change_with_no_journal_has_no_journal_binding() {
-        assert_eq!(annex_c_change().journal_bindings(), vec![]);
+        assert_eq!(example_change().journal_bindings(), vec![]);
     }
 
     // --- runs_for --------------------------------------------------------
@@ -1238,7 +1228,7 @@ mod tests {
     // --- obligations -----------------------------------------------------
 
     #[test]
-    fn obligations_are_the_frozen_strings_of_annex_e() {
+    fn obligations_are_the_frozen_strings_of_public_result() {
         let for_status = |status| {
             let mut change = empty_change();
             change.status = status;

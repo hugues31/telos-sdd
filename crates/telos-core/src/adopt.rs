@@ -1,4 +1,4 @@
-//! The two exits from drift (spec §6, D7): capture it, or throw it away.
+//! The two exits from drift: capture the current bytes or restore the seal.
 //!
 //! Drift is the one thing this system treats as illegitimate -- a sealed file
 //! edited outside the protocol -- and it is also unavoidable: an editor, a
@@ -69,7 +69,7 @@ pub const ADOPT_PARSE_HINT: &str = "fix the file or run `telos revert`";
 /// The two vectors are parallel by construction -- every drift entry yields
 /// exactly one op -- but they answer different questions, so both are
 /// carried: `ops` is what goes into the change, `paths` is what the caller
-/// reports (Annex E).
+/// reports.
 #[derive(Debug)]
 pub struct AdoptPlan {
     pub ops: Vec<StagedOp>,
@@ -78,7 +78,7 @@ pub struct AdoptPlan {
     pub paths: Vec<RepoPath>,
 }
 
-/// Turns drift into staged ops (D7).
+/// Turns drift into staged ops.
 ///
 /// One entry, one op, decided by *where the path is* and *how it drifted*:
 ///
@@ -153,7 +153,7 @@ pub struct RevertOutcome {
     pub deleted: Vec<RepoPath>,
 }
 
-/// Restores the sealed state of every drifted path (D7).
+/// Restores the sealed state of every drifted path.
 ///
 /// `Modified` and `Missing` are one case: both are sealed paths whose bytes
 /// must come back, and both come back the same way -- [`GitRepo::cat_blob`]

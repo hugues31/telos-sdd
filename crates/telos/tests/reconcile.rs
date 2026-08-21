@@ -1,20 +1,20 @@
 //! End-to-end tests for `telos change reconcile`: the transaction that turns
 //! a reviewed delta into spec files on disk and a fresh seal (`CHG-NNNN`),
 //! and the delta-less reseal that proves a whole project from scratch
-//! (`--full`, D12 -- last section).
+//! (`--full`, full reconciliation -- last section).
 //!
 //! The shape of this file follows the frozen gate order of the module docs
-//! -- drift, status, digest, accept OIDs, overlay, rule 5, the sealed code
-//! coverage, the red witness, constraint checks, tests, and only then the
-//! writes (D6). Each gate gets a test that proves it refuses *and* that the
-//! refusal cost nothing: no `.tel` file appeared, the lock did not move, the
-//! change file is still there.
+//! -- drift, status, digest, accept OIDs, overlay, the unbound-code gate,
+//! sealed code coverage, the red witness, sealable structure, constraint
+//! checks, tests, and only then the writes. Each gate gets a test that proves
+//! it refuses *and* that the refusal cost nothing: no `.tel` file appeared,
+//! the lock did not move, and the change file is still there.
 //!
 //! Two fixtures are used, deliberately: a freshly `init`ed repository (empty
 //! globs, no constraint, no `[test] cmd`) for the pure transaction, and the
 //! sealed `billing` corpus for everything that needs bindings, a global
 //! constraint, or a scenario to run a test for. The corpus' commands are
-//! `git` invocations (D9/D13) so the suite runs identically on the three
+//! `git` invocations so the suite runs identically on the three
 //! supported OSes.
 
 mod common;
@@ -116,7 +116,7 @@ fn reconcile_err(dir: &Path) -> Value {
     envelope["error"].clone()
 }
 
-// --- the payloads of the happy path (Annex D) -------------------------------
+// --- the payloads of the happy path -------------------------------
 
 fn invoice_payload() -> String {
     json!({
@@ -208,7 +208,7 @@ fn approved_active_three_op_change() -> tempfile::TempDir {
 
 /// The corpus with one approved, one-op change: `INT-0042`'s `telos`
 /// reworded. What makes it the interesting case is what the edit *reaches* --
-/// SCN-0107, the corpus' only proved scenario (D10).
+/// SCN-0107, the corpus' only proved scenario.
 fn approved_int_0042_edit(fixture: tempfile::TempDir) -> tempfile::TempDir {
     open_change(fixture.path());
     stage(
@@ -224,7 +224,7 @@ fn approved_int_0042_edit(fixture: tempfile::TempDir) -> tempfile::TempDir {
 
 // --- the happy path ---------------------------------------------------------
 
-/// The golden envelope of Annex E, on a fresh project with nothing to check
+/// The golden envelope of the result schema, on a fresh project with nothing to check
 /// and no runner configured.
 #[test]
 fn reconcile_json_matches_the_golden_envelope() {
@@ -300,7 +300,7 @@ fn reconcile_writes_the_canonical_spec_files_byte_for_byte() {
     );
 }
 
-/// The change file is gone (D16: reconciled is deletion, the audit trail is
+/// The change file is gone after reconciliation; the audit trail is
 /// git) and `counters.toml` -- which is not a change -- stays.
 #[test]
 fn reconcile_leaves_only_the_counters_in_the_changes_directory() {
@@ -314,7 +314,7 @@ fn reconcile_leaves_only_the_counters_in_the_changes_directory() {
         .collect();
     names.sort();
     assert_eq!(names, vec!["counters.toml".to_string()]);
-    // D4: the ids this transaction burnt are never handed out again.
+    // The ids this transaction consumed are never handed out again.
     assert_eq!(
         read(tmp.path(), "telos/changes/counters.toml"),
         "intent = 1\nscenario = 1\nconstraint = 0\nchange = 1\n"
@@ -352,7 +352,7 @@ fn reconcile_seals_the_lock_with_the_change_that_produced_it() {
 
 // --- gate 1: drift -----------------------------------------------------------
 
-/// D17: unclaimed drift refuses the reconcile, and the message names the
+/// Unclaimed drift refuses reconcile, and the message names the
 /// path so a caller does not have to run `status` to find out which.
 #[test]
 fn reconcile_refuses_unclaimed_drift() {
@@ -378,7 +378,7 @@ fn reconcile_refuses_unclaimed_drift() {
     );
 }
 
-/// D5's other half: a path *this* change claims is the change in progress,
+/// A path *this* change claims is the change in progress,
 /// not damage -- the reconcile goes through and overwrites it with the op's
 /// canonical post-state, whatever the working tree had made of it.
 #[test]
@@ -435,7 +435,7 @@ fn reconcile_refuses_an_unapproved_change() {
 
 // --- gate 3: digest ----------------------------------------------------------
 
-/// D3: staging into an approved change is allowed, reconciling the result is
+/// Staging into an approved change is allowed; reconciling the result is
 /// not -- the approval was taken against a delta that has since moved.
 #[test]
 fn reconcile_refuses_a_change_staged_into_after_its_approval() {
@@ -458,14 +458,14 @@ fn reconcile_refuses_a_change_staged_into_after_its_approval() {
     );
     assert!(!tmp.path().join("telos/notions/Invoice.tel").exists());
 
-    // Re-approving is idempotent (D16) and unblocks the same delta.
+    // Re-approving is idempotent and unblocks the same delta.
     approve(tmp.path());
     assert_eq!(reconcile_ok(tmp.path())["ops_applied"], json!(4));
 }
 
-// --- gate 6: rule 5, no code without telos -----------------------------------
+// --- gate 6: the unbound-code gate, no code without telos -----------------------------------
 
-/// D8: a file the `[code]` globs match and no `implements` binding covers
+/// code coverage: a file the `[code]` globs match and no `implements` binding covers
 /// stops the transaction, with the frozen message and hint.
 #[test]
 fn reconcile_refuses_code_no_binding_covers() {
@@ -510,7 +510,7 @@ fn open_and_approve_edit(dir: &Path, intent: &str, telos_text: &str) -> String {
 /// unrelated reconcile is not held hostage to it.
 ///
 /// And the exemption dies with the claim: abandon that change and the very
-/// same file is rule 5's business again, with the frozen wording.
+/// same file is the unbound-code gate's business again, with the frozen wording.
 #[test]
 fn code_another_open_change_claims_is_no_orphan_until_that_change_is_gone() {
     let tmp = with_fixture();
@@ -549,14 +549,14 @@ fn code_another_open_change_claims_is_no_orphan_until_that_change_is_gone() {
 /// own **journal** declares -- never the paths its own ops target. This is
 /// the sharpest case of that: a delta `adopt` built from a hand-edited
 /// `bindings.tel` *and* from the very code file that edit orphaned, so the
-/// orphan is one of the change's own `accept` targets. Rule 5 still refuses
-/// it -- adopting a code file without binding it is an orphan, as in M2.
+/// orphan is one of the change's own `accept` targets. The unbound-code gate refuses
+/// it -- adopting a code file without binding it is an orphan.
 #[test]
 fn a_code_file_this_changes_own_accept_op_targets_is_still_an_orphan() {
     let tmp = with_fixture();
     drop_the_implements_line(tmp.path());
     // The bound file drifts too, so `adopt` captures both: unlike the ledger
-    // attack, the `[code]` globs stay, so rule 5 has something to say -- and
+    // attack, the `[code]` globs stay, so the unbound-code gate has something to say -- and
     // it says it about a path this very delta stages.
     fs::write(
         tmp.path().join("src/billing/invoice.rs"),
@@ -583,9 +583,9 @@ fn a_code_file_this_changes_own_accept_op_targets_is_still_an_orphan() {
     );
 }
 
-// --- gate 7: the sealed code coverage (D9) -----------------------------------
+// --- gate 7: the sealed code coverage -----------------------------------
 
-/// The frozen `TELOS_INTEGRITY_VIOLATION` hint of Annex F, gate 7's row.
+/// The stable `TELOS_INTEGRITY_VIOLATION` hint for sealed coverage loss.
 const COVERAGE_HINT: &str = "the bindings shrank outside this change; reconcile or abandon the change that claims telos/bindings.tel, or restore them with `telos revert`";
 
 /// Hand-edits `telos/bindings.tel` down to its `proves` line, out of
@@ -639,9 +639,9 @@ fn ledger_attack() -> (tempfile::TempDir, String, String) {
     (tmp, a, b)
 }
 
-/// D9, the M2 residual: B never touched the bindings, but sealing its delta
-/// would quietly drop a code path the previous seal held -- so it is refused,
-/// with the frozen wording naming the path.
+/// B never touched the bindings, but sealing its delta would quietly drop a
+/// code path held by the previous seal. The coverage-shrink gate refuses it
+/// and names the path.
 #[test]
 fn reconcile_refuses_a_shrink_of_the_sealed_code_coverage() {
     let (tmp, _a, b) = ledger_attack();
@@ -680,7 +680,7 @@ fn the_change_that_stages_the_bindings_file_may_shrink_the_coverage() {
     assert_eq!(reconcile_id_ok(tmp.path(), &b)["ops_applied"], json!(1));
 }
 
-/// §7.4: `--full` is total proof of the tree on disk and reads no previous
+/// full reconciliation: `--full` is total proof of the tree on disk and reads no previous
 /// lock at all, so there is no coverage to compare against and nothing for
 /// this gate to refuse -- on the very tree that refuses B.
 #[test]
@@ -696,7 +696,7 @@ fn a_full_reseal_is_exempt_from_the_coverage_gate() {
     );
 }
 
-// --- gate 9: constraint checks (D11) -----------------------------------------
+// --- gate 10: constraint checks --------------------------------------------
 
 /// A constraint staged by this very change is in scope for its own reconcile:
 /// the check runs, fails, and names both the constraint and the command.
@@ -747,7 +747,7 @@ fn a_failing_constraint_check_refuses_the_reconcile_until_it_passes() {
     );
 }
 
-// --- gate 10: tests (D10) -----------------------------------------------------
+// --- gate 11: tests ---------------------------------------------------------
 
 /// `{filter}` is substituted with the `proves` binding's test *name*, one
 /// invocation per distinct `TestRef` of the impacted scenarios. The corpus'
@@ -817,7 +817,7 @@ fn a_failing_test_run_refuses_the_reconcile_and_reports_the_substituted_command(
     );
 }
 
-/// The corpus ships `[test] cmd = ""` (D13); this puts a real, cross-OS
+/// The corpus ships `[test] cmd = ""`; this puts a real, cross-OS
 /// runner in its place before the fixture is sealed.
 ///
 /// `git hash-object {filter}` is chosen so that both invocations the suite
@@ -859,7 +859,7 @@ fn install_snapshot_mutation_runner(root: &Path) {
     fs::set_permissions(&runner, permissions).unwrap();
 }
 
-// --- `reconcile --full` (D12) ------------------------------------------------
+// --- `reconcile --full` ------------------------------------------------
 //
 // The lock-merge exit, and the one legitimate way to seal a spec tree that
 // exists but was never sealed. It re-proves everything from the files on
@@ -885,7 +885,7 @@ fn reconcile_full_ok(dir: &Path) -> Value {
 
 /// The golden envelope of a full reseal over the corpus, unsealed: no id, no
 /// op, the corpus' one global constraint checked (`git --version`), and no
-/// test run at all since the corpus ships `[test] cmd = ""` (D13).
+/// test run at all since the corpus ships `[test] cmd = ""`.
 #[test]
 fn full_reconcile_seals_an_unsealed_project() {
     let tmp = unsealed_fixture();
@@ -923,7 +923,7 @@ fn full_reconcile_seals_an_unsealed_project() {
         })
     );
 
-    // D12: a full reseal is nobody's change, so the lock records none.
+    // full reconciliation: a full reseal is nobody's change, so the lock records none.
     let lock = read(tmp.path(), LOCK);
     assert!(
         !lock.contains("sealed_by"),
@@ -936,7 +936,7 @@ fn full_reconcile_seals_an_unsealed_project() {
     assert_eq!(envelope["result"]["state"], json!("coherent"));
 }
 
-/// The whole point of D12: the existing lock is treated as unreliable and
+/// The whole point of full reconciliation: the existing lock is treated as unreliable and
 /// never read, so the merge conflict a `git merge` left in it is not an
 /// obstacle -- it is the very reason to run this.
 #[test]
@@ -1145,7 +1145,7 @@ fn full_reconcile_does_not_invoke_a_configured_runner_for_draft_only_intents() {
     assert_eq!(result["tests_run"], json!(0));
 }
 
-/// D10's `--full` half: one invocation of `[test] cmd` with `{filter}`
+/// A full reconcile invokes `[test] cmd` once with `{filter}`
 /// substituted by nothing -- the whole suite, once -- however many scenarios
 /// the spec proves.
 #[test]
@@ -1165,7 +1165,7 @@ fn full_reconcile_runs_the_whole_suite_once() {
     );
 }
 
-/// D12: open changes are tolerated rather than reconciled or refused. They
+/// full reconciliation: open changes are tolerated rather than reconciled or refused. They
 /// stay open, their files untouched -- a full reseal is about the spec on
 /// disk, not about anybody's staged delta.
 #[test]
@@ -1181,8 +1181,8 @@ fn full_reconcile_leaves_open_changes_alone() {
     assert_eq!(envelope["result"]["state"], json!("changing"));
 }
 
-/// `--full` reseals *everything*; a change id says «this delta, and only
-/// it». Asking for both is a contradiction clap refuses before any command
+/// `--full` reseals *everything*; a change id says “this delta, and only
+/// it”. Asking for both is a contradiction clap refuses before any command
 /// runs (exit 2, usage error -- not a domain error in the envelope).
 #[test]
 fn an_id_and_full_together_are_a_usage_error() {
@@ -1199,15 +1199,15 @@ fn an_id_and_full_together_are_a_usage_error() {
 }
 
 // =============================================================================
-// M3: the folded journal (D2), the sealed-witness gate (D7), and the advisory
+// The folded journal, the sealed-witness gate, and the advisory
 // warnings.
 //
 // These drive the real feature loop end to end -- `open`, `add`, `approve`,
 // `test` red, `test` green, `bind`, `reconcile` -- on a project that starts
-// as a bare `telos init`. What they assert about reconcile is the M3 half of
-// it: `telos/bindings.tel` is *derived* from the journal at reconcile and
-// never written before it (D2), the witness discipline is a static gate over
-// that journal (D7), and under `tdd = "advisory"` the same verdicts come back
+// as a bare `telos init`. They assert that `telos/bindings.tel` is *derived*
+// from the journal at reconcile and
+// never written before it, the witness discipline is a static gate over
+// that journal, and under `tdd = "advisory"` the same verdicts come back
 // as warnings instead of refusals.
 // =============================================================================
 
@@ -1220,12 +1220,12 @@ const RUNNER: &str = "git hash-object .fake-green";
 /// The file [`RUNNER`] hashes -- its absence is what makes a run red.
 const MARKER: &str = ".fake-green";
 
-/// The test file the witness protocol discovers by convention (D4), and the
+/// The test file the witness protocol discovers by convention, and the
 /// code file the implementation is bound through.
 const TEST_FILE: &str = "tests/billing.rs";
 const CODE_FILE: &str = "src/billing.rs";
 
-/// The derived bindings table (D2): written by reconcile, claimed by nobody.
+/// The derived bindings table: written by reconcile, claimed by nobody.
 const BINDINGS: &str = "telos/bindings.tel";
 
 /// The ids the allocator mints for the delta [`approved_feature`] stages.
@@ -1344,13 +1344,13 @@ fn scenario_payload(title: &str) -> Value {
     })
 }
 
-/// Stages the delta every M3 test works from -- the two notions and the
+/// Stages the delta every journal test works from -- the two notions and the
 /// intent carrying `scenarios` -- into a fresh change, and approves it.
 ///
 /// `Feature.scenarios` is `result.scenario_ids` verbatim, in payload order,
 /// so a caller that stages three reads all three from the envelope. No id is
-/// hardcoded anywhere, and none is *computed* from another either -- the
-/// allocator's answers are read back as they come (§14's anti-goal).
+/// hardcoded or computed from another; allocator results are read directly
+/// from command envelopes so callers never need counter knowledge.
 fn approved_feature(dir: &Path, scenarios: Vec<Value>) -> Feature {
     let change = ok_result(dir, &["change", "open", MOTIVATION, "--json"])["id"]
         .as_str()
@@ -1399,7 +1399,7 @@ fn approved_feature(dir: &Path, scenarios: Vec<Value>) -> Feature {
     feature
 }
 
-/// The test function one scenario's witness is discovered through (D4).
+/// The test function one scenario's witness is discovered through.
 fn test_fn(scenario: &str) -> String {
     format!(
         "scn_{}_a_full_payment_settles_the_invoice",
@@ -1467,9 +1467,9 @@ fn implemented() -> (tempfile::TempDir, Feature) {
 // --- the happy path: the journal becomes the spec ---------------------------
 
 /// The golden envelope of the whole feature loop: three ops applied, and the
-/// one test the *folded* journal made visible actually run (D8's gate 10 over
-/// the folded model -- without the fold there would be no `proves` binding,
-/// hence no target, hence a dishonest `tests_run: 0`).
+/// one test made visible by the *folded* journal actually run at gate 11.
+/// Without that fold there would be no `proves` binding, hence no target and
+/// a dishonest `tests_run: 0`.
 #[test]
 fn reconciling_an_implemented_change_folds_its_journal_and_runs_its_test() {
     let (tmp, feature) = implemented();
@@ -1532,7 +1532,7 @@ fn ordinary_reconcile_refuses_code_bytes_changed_by_its_runner() {
     );
 }
 
-/// D2, byte for byte: `bindings.tel` is written by the reconcile, from the
+/// `bindings.tel` is written byte for byte by reconcile from the
 /// journal, in the emitter's canonical order (`implements` first, then
 /// `proves`) -- and it did not exist in that state one command earlier.
 #[test]
@@ -1541,7 +1541,7 @@ fn reconcile_derives_the_bindings_file_from_the_journal() {
     assert_eq!(
         read(tmp.path(), BINDINGS),
         "",
-        "`bindings.tel` stays empty for the whole life of the change (D2)"
+        "`bindings.tel` stays empty for the whole life of the change"
     );
 
     reconcile_id_ok(tmp.path(), &feature.change);
@@ -1581,8 +1581,8 @@ fn reconcile_seals_the_bound_code_and_test_files_and_leaves_it_coherent() {
 /// no journal at all derives exactly what was already there.
 ///
 /// Every reconcile now re-emits `bindings.tel` from the folded model, so
-/// this is what keeps that from being a change of behaviour for the M1/M2
-/// projects that have no journal: the model holds what the sealed file said,
+/// this preserves behavior for projects that have no journal: the model
+/// holds what the sealed file said,
 /// the emitter is what wrote that file in the first place, and the bytes come
 /// back identical -- the lock included.
 #[test]
@@ -1595,10 +1595,10 @@ fn a_reconcile_with_no_journal_leaves_the_bindings_file_byte_identical() {
     assert_eq!(read(tmp.path(), BINDINGS), before);
 }
 
-// --- gate 8: the sealed red witness (D7), strict ----------------------------
+// --- gate 8: the sealed red witness, strict ----------------------------
 
-/// The scenario is brand new and nothing was ever run for it: the frozen
-/// `TELOS_SCENARIO_RED_EXPECTED` of Annex F, and not one byte written.
+/// A brand-new scenario with no run is refused with
+/// `TELOS_SCENARIO_RED_EXPECTED`, without writing a byte.
 #[test]
 fn a_scenario_with_no_run_at_all_is_refused_and_nothing_is_written() {
     let tmp = configured("strict");
@@ -1633,11 +1633,11 @@ fn a_scenario_with_no_run_at_all_is_refused_and_nothing_is_written() {
 ///
 /// A change that has journalled a red run and nothing else owns a test file
 /// under the `[tests]` globs that no `proves` binding covers yet -- a red run
-/// asserts none, by construction (D2). Rule 5 would call that an orphan and
+/// asserts none, by construction. The unbound-code gate calls that an orphan and
 /// send the caller off to `telos bind`, which is exactly the wrong next step:
 /// the honest verdict is the witness gate's, one gate later, and it names the
 /// green that is missing. So a path this change's own journal declares is
-/// exempt from rule 5, and the refusal is the one the caller can act on.
+/// exempt from the unbound-code gate, and the refusal is the one the caller can act on.
 #[test]
 fn a_red_only_change_is_told_about_its_missing_green_not_about_an_orphan() {
     let tmp = configured("strict");
@@ -1671,7 +1671,7 @@ fn a_red_only_change_is_told_about_its_missing_green_not_about_an_orphan() {
 ///
 /// So the very red-only state the test above gets a witness verdict for is
 /// refused by a full reseal of the same tree, one command apart -- `--full`
-/// is *stricter* here than a per-change reconcile, deliberately (§7.4). The
+/// is *stricter* here than a per-change reconcile, deliberately. The
 /// remedy is to finish or abandon the change, not to reach for `--full`.
 #[test]
 fn a_full_reseal_refuses_the_in_flight_file_a_change_reconcile_exempts() {
@@ -1705,7 +1705,7 @@ fn a_full_reseal_refuses_the_in_flight_file_a_change_reconcile_exempts() {
 /// Three scenarios, each playing a distinct part:
 ///
 /// - the **first** is witnessed red *and* green, so it is `Intact` -- and its
-///   `proves`, folded from the green, is what keeps rule 5 (gate 6) from
+///   `proves`, folded from the green, is what keeps the unbound-code gate (gate 6) from
 ///   firing on `tests/billing.rs` before this gate is reached at all;
 /// - the **second** has a red and no green: `MissingGreen`, the verdict this
 ///   test is named for;
@@ -1810,7 +1810,7 @@ fn a_test_edited_after_its_green_is_refused_as_sealed() {
     );
 }
 
-// --- advisory (D7): the same verdicts, as warnings ---------------------------
+// --- advisory: the same verdicts, as warnings ---------------------------
 
 /// Advisory relaxes red-witness discipline, never the structural requirement
 /// that an active scenario have a proof before it can be sealed.
@@ -2105,7 +2105,7 @@ fn advisory_prints_the_structural_refusal_in_human_mode() {
 
 // --- the fold is idempotent across reconciles -------------------------------
 
-/// D2's deduplication, end to end: re-binding a pair the sealed
+/// Binding deduplication end to end: re-binding a pair the sealed
 /// `bindings.tel` already holds folds to the same one line, so the derived
 /// file comes back byte-identical -- and the scenario, re-staged unchanged,
 /// owes no second witness (the fragment exemption `loop_merge` rests on).

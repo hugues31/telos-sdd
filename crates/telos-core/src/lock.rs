@@ -1,4 +1,4 @@
-//! `telos.lock` (spec §5): the content-addressed seal over the spec and
+//! `telos.lock`: the content-addressed seal over the spec and
 //! the code its bindings reference.
 //!
 //! Writing is hand-rendered TOML, deterministic to the byte -- fixed key
@@ -13,7 +13,7 @@
 //! that than it needs to be.
 //!
 //! `seal()` -- computing a `Lock` from a live `Workspace` / `TelosModel` /
-//! [`crate::git::GitRepo`] -- also lives here (Task 11).
+//! [`crate::git::GitRepo`] -- also lives here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -38,7 +38,7 @@ pub struct Lock {
     /// The tool that produced this lock, e.g. `"telos 0.7.0"`.
     pub tool: String,
     /// The change that produced this seal, if any. `None` for the seal
-    /// `telos init` writes; `Some` from M2 onward.
+    /// `telos init` writes `None`; a reconciled change writes `Some`.
     pub sealed_by: Option<ChangeId>,
     /// `"sha256:<hex>"`, over `spec` -- see [`Lock::compute_digest`].
     pub spec_digest: String,

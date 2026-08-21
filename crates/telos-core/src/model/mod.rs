@@ -48,7 +48,7 @@ pub enum TelFile {
 
 /// Which entity a spec file declared.
 ///
-/// One file declares exactly one entity (Annex C.4.2), `bindings.tel`
+/// One file declares exactly one entity, `bindings.tel`
 /// excepted -- it declares a list, so it names no entity. Recorded per file
 /// so that diagnostics can point at the file a duplicate came from, and so
 /// that the seal knows what each sealed path stands for.
@@ -87,8 +87,8 @@ impl TelosModel {
     /// Turns a `show`/`impact` argument into the graph node it names, or
     /// `None` when the spec holds no such entity.
     ///
-    /// `EntityRef::Change` always resolves to `None` in M1: changes are not
-    /// part of the model yet, and `NodeRef` has no variant for them.
+    /// `EntityRef::Change` always resolves to `None`: changes are transaction
+    /// records rather than model nodes, and `NodeRef` has no variant for them.
     pub fn resolve(&self, r: &EntityRef) -> Option<NodeRef> {
         match r {
             EntityRef::Notion(name) => self
@@ -245,8 +245,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_never_resolves_a_change_in_m1() {
-        // `NodeRef` has no change variant: changes join the graph in M2.
+    fn resolve_never_resolves_a_change() {
+        // `NodeRef` has no change variant: transaction records stay outside
+        // the specification graph.
         let model = model_with_one_of_each();
         assert_eq!(
             model.resolve(&EntityRef::Change(crate::ids::ChangeId(7))),

@@ -1,5 +1,5 @@
 //! End-to-end tests for `telos adopt` and `telos revert`: the two exits from
-//! drift (spec §6, D7).
+//! drift by either capturing current bytes or restoring the seal.
 //!
 //! Both commands start from the same place -- a project whose working tree no
 //! longer matches its seal -- and go opposite ways. `adopt` keeps the bytes
@@ -19,7 +19,7 @@
 //!   the file, which proves the exact refusal a caller gets when they did
 //!   not.
 //! - **After `adopt` the project is `changing`, not `coherent`.** The drift
-//!   is claimed by the change that adopted it (D5), so it stops being drift
+//!   is claimed by the change that adopted it, so it stops being drift
 //!   and becomes the change in progress. It is the reconcile, not the adopt,
 //!   that reseals.
 //! - **Only the change that adopted a drift may seal it.** Some *other*
@@ -60,7 +60,7 @@ const ROGUE_TEL: &str = "notion Rogue entity {\n  \
 }\n";
 
 /// The exact `TELOS_PARSE_ERROR` hint `adopt` attaches to a drifted file it
-/// cannot read (D7).
+/// cannot read.
 const PARSE_HINT: &str = "fix the file or run `telos revert`";
 
 /// The exact `TELOS_GIT_ERROR` hint `revert` attaches when the sealed blob is
@@ -221,7 +221,7 @@ fn approve_and_reconcile(dir: &Path, id: &str) {
 
 // --- adopt: a modified entity file ------------------------------------------
 
-/// The golden of Annex E, and the canonicalization proof: a byte appended to
+/// The golden of the result schema, and the canonicalization proof: a byte appended to
 /// a sealed notion is adopted as an `edit` op carrying the *parsed* entity,
 /// so what the reconcile writes back is the canonical form -- the stray
 /// newline is gone, not sealed.
@@ -236,7 +236,7 @@ fn adopting_a_modified_notion_stages_an_edit_and_reconcile_canonicalizes_it() {
 
     let envelope = run_ok(dir, &["adopt", "--json"]);
 
-    // The whole envelope of Annex E: the command names itself, the result is
+    // The whole envelope of the result schema: the command names itself, the result is
     // the golden shape, the next actions are the loop that follows.
     assert_eq!(envelope["command"], json!("adopt"));
     assert_eq!(
@@ -250,7 +250,7 @@ fn adopting_a_modified_notion_stages_an_edit_and_reconcile_canonicalizes_it() {
             "telos change approve CHG-0001"
         ])
     );
-    // D5: the adopted path is claimed now, so it is no longer drift.
+    // The adopted path is claimed now, so it is no longer drift.
     assert_eq!(state(dir)["state"], json!("changing"));
     assert_eq!(
         diff_ops(dir, "CHG-0001"),
@@ -339,7 +339,7 @@ fn adopting_an_untracked_notion_stages_an_add() {
 
 /// `telos.toml` is spec, but not an entity: it is adopted as an `accept` of
 /// its current bytes, and the reconcile's fourth gate re-hashes them before
-/// sealing them (D7).
+/// sealing them.
 #[test]
 fn adopting_a_modified_telos_toml_stages_an_accept_and_reconcile_seals_it() {
     let tmp = with_fixture();
@@ -491,7 +491,7 @@ fn adopting_a_file_that_declares_another_entity_is_refused() {
     );
 }
 
-/// The safety net under the idempotent overlay (D7), end to end: `adopt`
+/// The safety net under the idempotent overlay, end to end: `adopt`
 /// plans a `remove` for any deleted entity file without complaint, so what
 /// stops a deletion the rest of the spec still depends on is the *post-state
 /// model* -- and it does, on both routes into the command.
@@ -738,12 +738,12 @@ fn refund_payload() -> String {
 /// seal by the reconcile of some *other*, unrelated change.
 ///
 /// Gate 1 admits drift any open change claims -- deliberately, so that a
-/// concurrent change (M3's implementing changes drift their code files for
+/// concurrent change (implementing changes drift their code files for
 /// their whole life) never holds an unrelated transaction hostage. What must
 /// not follow is that CHG-0002's seal records CHG-0001's never-approved
 /// bytes: it would leave the project `coherent` the moment CHG-0001 was
 /// abandoned, with an edit nobody ever reviewed permanently sealed -- exactly
-/// the invariant §4.1 and §5 exist to hold.
+/// the invariant enforced by canonical emission and sealing.
 ///
 /// So the drifted path is carried over at its previously sealed OID, and the
 /// drift outlives the reconcile: still claimed (hence `changing`), still
@@ -861,11 +861,10 @@ fn a_concurrent_reconcile_leaves_another_changes_untracked_file_unsealed() {
     assert_eq!(abandoned["drift"]["paths"], json!([ROGUE]));
 }
 
-/// D12/§7.4's deliberate exception, pinned so nobody "fixes" it into the
-/// carry-over: `--full` re-proves the whole tree from disk and seals what it
-/// finds, open adopt-changes included. It is total proof, not a bypass --
-/// the drift it seals has been through every gate a spec can be held to,
-/// which is more than the per-change path asks of anything.
+/// Full reconciliation deliberately re-proves the whole tree from disk and
+/// seals what it finds, including open adopt-changes. It is total proof, not a
+/// bypass: the drift it seals has passed every applicable gate, which is more
+/// than the per-change path asks of anything.
 #[test]
 fn a_full_reseal_seals_disk_truth_even_under_an_open_adopt_change() {
     let tmp = with_fixture();
@@ -882,7 +881,7 @@ fn a_full_reseal_seals_disk_truth_even_under_an_open_adopt_change() {
     run_ok(dir, &["change", "reconcile", "--full", "--json"]);
 
     assert_eq!(lock_oid(dir, INVOICE), Some(drifted_oid));
-    // The change is still open and still claims the path (D12 leaves open
+    // The change is still open and still claims the path (full reconciliation leaves open
     // changes alone), so the project is `changing` -- but its op is now a
     // no-op against a seal that already holds those bytes.
     assert_eq!(state(dir)["state"], json!("changing"));
@@ -890,7 +889,7 @@ fn a_full_reseal_seals_disk_truth_even_under_an_open_adopt_change() {
 
 // --- revert -----------------------------------------------------------------
 
-/// The golden of Annex E: what was sealed comes back, what was never sealed
+/// The golden of the result schema: what was sealed comes back, what was never sealed
 /// goes away, and the project is coherent again -- byte for byte.
 #[test]
 fn revert_restores_a_modified_file_and_deletes_an_untracked_one() {

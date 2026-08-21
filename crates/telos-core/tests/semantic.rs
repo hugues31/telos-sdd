@@ -1,4 +1,4 @@
-//! The semantic pass, end to end on the Annex D corpus.
+//! The semantic pass, end to end on the Billing corpus.
 //!
 //! Every case is the shared `telos/` fixture tree, parsed as the workspace
 //! would parse it, with at most one line rewritten -- so what a test asserts
@@ -44,7 +44,7 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Parses one file with the rule its location calls for (Annex C.4.2).
+/// Parses one file with the rule its location calls for.
 fn parse(rel: &str, src: &str) -> TelFile {
     fn ok<T, E>(rel: &str, result: Result<T, Vec<E>>) -> T {
         match result {
@@ -820,7 +820,7 @@ fn the_value_of_a_set_action_is_checked_against_its_attribute() {
 
 #[test]
 fn a_comparison_between_two_attributes_only_checks_that_both_exist() {
-    // Cross-attribute type agreement is deliberately out of M1's scope: the
+    // Cross-attribute type agreement is deliberately out of scope: the
     // two sides must resolve, nothing more.
     let model = model_of(edited(
         "telos/intents/INT-0042.tel",

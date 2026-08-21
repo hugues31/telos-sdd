@@ -1,18 +1,17 @@
-//! The three **acceptance loops** from spec §14: the product's executable
-//! roadmap. Each scripts a full product loop — `change open`, `add`, `test`,
+//! End-to-end acceptance loops for the public product workflows. Each
+//! exercises a full loop — `change open`, `add`, `test`,
 //! `bind`, `adopt`, `reconcile --full`, and friends — by spawning the `telos`
 //! binary. They have no compile-time coupling to the command implementation.
 //!
-//! All three specification loops now run in the ordinary suite. `loop_feature` proves M3
-//! end to end, including a discoverable scenario test and sealed red/green
+//! All three specification loops run in the ordinary suite. `loop_feature`
+//! covers a discoverable scenario test and sealed red/green
 //! witnesses; `loop_drift` proves an out-of-protocol edit can be adopted and
 //! reconciled; and `loop_merge` proves a lock-only merge conflict is resolved
-//! by `reconcile --full`. Together they are the roadmap's executable
-//! done-criterion. `loop_projection` adds the one M4 acceptance projection
-//! without duplicating the M5 reconstruction owned by `rebuild_demo`.
+//! by `reconcile --full`. `loop_projection` covers the shared read-only
+//! projection without duplicating the reconstruction owned by `rebuild_demo`.
 //!
-//! Payload JSON shapes fed to `add`/`edit` on stdin follow Annex D, frozen
-//! by T13 into `docs/contracts.md`. `loop_feature` uses the real,
+//! Payload JSON shapes fed to `add`/`edit` on stdin follow the schemas frozen
+//! in `docs/contracts.md`. `loop_feature` uses the real,
 //! agent-facing shape rather than an invented one.
 mod common;
 
@@ -41,9 +40,9 @@ impl Drop for ProjectionServer {
 //
 // Every `telos` invocation in these loops goes through `run_ok`/`run_err`
 // (or the stdin-carrying `run_ok_stdin`) rather than being spawned loose --
-// that's what turns "the loop compiles" into "the loop asserts something"
-// once its commands exist, and it's also where the §14 anti-goal lives: none
-// of these loops may ever need to put a hash or a digest in a CLI argument,
+// that's what turns "the loop compiles" into "the loop asserts something",
+// and it also enforces that none of these loops need to put a hash or a digest
+// in a CLI argument,
 // so every argument list passed through here is checked for one on the way
 // in, loop_feature included.
 
@@ -57,21 +56,19 @@ fn json_stdout(out: &std::process::Output) -> Value {
     })
 }
 
-/// Spec §14's anti-goal, checked mechanically: "if daily usage requires
-/// thinking about hashes or the lock, the abstraction has failed and a test
-/// must show it." No argument passed to `telos` anywhere in these loops may
-/// contain the substring `sha` or a run of 40 hex characters (a sha1, which
-/// is what a git blob OID -- the only kind of hash this system has -- looks
-/// like).
+/// Verifies that ordinary workflow arguments never expose lock hashes. No
+/// argument passed to `telos` anywhere in these loops may contain the substring
+/// `sha` or a run of 40 hex characters (a SHA-1, which is what a Git blob OID
+/// looks like).
 fn assert_args_never_mention_a_hash(args: &[&str]) {
     for arg in args {
         assert!(
             !arg.to_ascii_lowercase().contains("sha"),
-            "a loop's CLI arguments must never mention a hash (spec §14 anti-goal): {arg:?}"
+            "a loop's CLI arguments must never mention a hash: {arg:?}"
         );
         assert!(
             !contains_forty_hex_run(arg),
-            "a loop's CLI arguments must never mention a hash (spec §14 anti-goal): {arg:?}"
+            "a loop's CLI arguments must never mention a hash: {arg:?}"
         );
     }
 }
@@ -156,8 +153,7 @@ fn run_err(dir: &Path, args: &[&str], code: &str) -> Value {
 // Only `loop_merge` needs to script git directly (creating two diverging
 // branches and resolving their merge conflict). `common/mod.rs` already has
 // a private helper exactly like this one for its own fixtures -- it isn't
-// exported, and per the task brief `common/mod.rs` stays untouched for these
-// acceptance loops, so this is a small local copy rather than a shared export.
+// exported, so this is a small local copy rather than a shared export.
 
 /// Runs `git <args>` in `dir` and asserts it succeeded.
 fn git(dir: &Path, args: &[&str]) {
@@ -232,15 +228,15 @@ fn current_branch(dir: &Path) -> String {
 
 // --- loop_feature: open -> challenge -> approve -> red/green -> reconcile --
 
-/// The **feature loop** (spec §7.2's five phases, run start to finish): the
+/// The **feature loop**, run start to finish: the
 /// full path from a bare git repository to a `COHERENT` project with one
 /// proved scenario, driven exactly the way an agent following the
 /// `telos-challenger`/`telos-implementer` skills would drive it -- CLI
 /// commands and JSON payloads, never a hand-edited `.tel` file, never a
 /// hash.
 ///
-/// M3's `test`/`bind` surface and sealed red/green witness protocol make this
-/// loop executable end to end in the ordinary suite.
+/// The `test`/`bind` surface and sealed red/green witness protocol make this
+/// loop executable end to end.
 #[test]
 fn loop_feature() {
     let tmp = repo();
@@ -272,7 +268,7 @@ fn loop_feature() {
     let adopted_toml = run_ok(dir, &["adopt", "--json"]);
     let toml_change_id = adopted_toml["result"]["change"]
         .as_str()
-        .expect("`adopt` answers with the id of the change capturing the drift (M2)")
+        .expect("`adopt` answers with the id of the change capturing the drift")
         .to_string();
     run_ok(dir, &["change", "diff", &toml_change_id, "--json"]);
     run_ok(dir, &["change", "approve", &toml_change_id, "--json"]);
@@ -289,13 +285,13 @@ fn loop_feature() {
     );
     let change_id = opened["result"]["id"]
         .as_str()
-        .expect("`change open` answers with the new change's id (M2)")
+        .expect("`change open` answers with the new change's id")
         .to_string();
 
-    // Payload shapes are Annex D's frozen `add` shape (docs/contracts.md):
+    // Payloads use the documented `add` shape from docs/contracts.md:
     // a notion's identity is its `name`, an `add` never carries an id of
     // its own, and `given`/`when` steps carry their state under `fields`.
-    // These mirror the spec's canonical example (§4.5): the `Invoice`
+    // These mirror the spec's canonical example: the `Invoice`
     // notion, the `PaymentReceived` event it reacts to, and the intent +
     // scenario that ties them together.
     run_ok_stdin(
@@ -342,22 +338,22 @@ fn loop_feature() {
             ]
         }"#,
     );
-    // `add` never carries an id (Annex D): the intent's id and its
+    // `add` never carries an id: the intent's id and its
     // scenario's id are both allocated by the CLI and captured from
     // `result` here, never hardcoded.
     let intent_id = added_intent["result"]["id"]
         .as_str()
-        .expect("`add intent` answers with the allocated intent id (M2)")
+        .expect("`add intent` answers with the allocated intent id")
         .to_string();
     let scenario_id = added_intent["result"]["scenario_ids"][0]
         .as_str()
-        .expect("`add intent` reports the allocated scenario id(s) (M2)")
+        .expect("`add intent` reports the allocated scenario id(s)")
         .to_string();
 
     // --- Approve -------------------------------------------------------
     // `diff` renders the staged delta for human review; `approve` locks the
     // approval to that delta's digest -- editing it afterward invalidates
-    // the approval (M2, `TELOS_APPROVAL_STALE`), but this loop never edits
+    // the approval (`TELOS_APPROVAL_STALE`), but this loop never edits
     // after approving.
     run_ok(dir, &["change", "diff", &change_id, "--json"]);
     run_ok(dir, &["change", "approve", &change_id, "--json"]);
@@ -373,7 +369,7 @@ fn loop_feature() {
     .expect("failed to write scenario test source");
 
     // --- Implement -------------------------------------------------------
-    // Red witness before green, per §7.2.4.
+    // Record a red witness before the green run.
     let red = run_ok(dir, &["test", &scenario_id, "--json"]);
     assert_eq!(red["result"]["witness"], json!("red"));
 
@@ -399,7 +395,7 @@ fn loop_feature() {
     run_ok(dir, &["bind", "src/billing.rs", &intent_id, "--json"]);
 
     // --- Reconcile -------------------------------------------------------
-    // Applies the staged delta atomically, revalidates every §3.3 rule,
+    // Applies the staged delta atomically, revalidates every integrity rule,
     // reruns the impacted scenarios, checks constraints, requires no
     // orphan code, and re-seals -- closing the change.
     run_ok(dir, &["change", "reconcile", &change_id, "--json"]);
@@ -411,15 +407,14 @@ fn loop_feature() {
 
 // --- loop_drift: out-of-protocol edit -> DRIFTED -> adopt -> coherent ------
 
-/// The **drift loop** (spec §6): an edit outside the CLI's protocol -- a
+/// The **drift loop**: an edit outside the CLI's protocol -- a
 /// hand-edited `.tel` file, the only kind of write this system considers
 /// illegitimate -- blocks forward progress (`change open` refused) until
 /// `adopt` captures it as a real change, after which the ordinary loop
 /// finishes it the same way `loop_feature` does.
 ///
-/// This M3 acceptance loop runs in the ordinary suite. It proves that the
-/// adoption path restores a coherent repository through the same lifecycle
-/// commands used by the feature loop.
+/// The adoption path restores a coherent repository through the same
+/// lifecycle commands used by the feature loop.
 #[test]
 fn loop_drift() {
     let tmp = with_fixture();
@@ -430,7 +425,7 @@ fn loop_drift() {
     assert_eq!(status["result"]["state"], json!("coherent"));
 
     // Out-of-protocol edit: appending a byte to a sealed spec file directly
-    // on disk, bypassing the CLI entirely -- the same drift M1's own
+    // on disk, bypassing the CLI entirely -- the same drift the
     // `status`/`check` tests (`status_check.rs`) exercise.
     let invoice_tel = dir.join("telos/notions/Invoice.tel");
     let mut content = fs::read_to_string(&invoice_tel).unwrap();
@@ -441,7 +436,7 @@ fn loop_drift() {
     assert_eq!(status["result"]["state"], json!("drifted"));
 
     // --- Challenge, refused -------------------------------------------------------
-    // §6: every forward-progress operation is gated on drift, `open`
+    // Every forward-progress operation is gated on drift; `open`
     // included.
     run_err(
         dir,
@@ -482,99 +477,18 @@ fn loop_drift() {
 
 // --- loop_merge: two sealed branches -> lock conflict -> reconcile --full -
 
-/// The **merge loop** (spec §7.4): two branches, each sealed independently
+/// The **merge loop**: two branches, each sealed independently
 /// off the same starting point, diverge and conflict on `telos.lock` when
-/// merged. The spec files themselves merge cleanly -- §5's promise that
-/// conflicts stay "rare and localized" -- so `check` is green the moment the
+/// merged. The spec files themselves merge cleanly, so `check` is green the
+/// moment the
 /// merge stops; but `check --sealed` stays red, because the *seal* is what
-/// conflicted, until `telos change reconcile --full` re-validates every §3.3
-/// rule, re-runs the impacted proof obligations, and re-seals. Proof, not a
+/// conflicted, until `telos change reconcile --full` re-validates referential
+/// integrity, re-runs the impacted proof obligations, and re-seals. Proof, not a
 /// bypass.
 ///
-/// This loop runs in the ordinary suite: its M2 transaction surface and M3
-/// witness-aware reconciliation remain an executable merge criterion.
-///
-/// # Amendments made when this loop was un-ignored (T14)
-///
-/// The loop was committed at M1 as a prediction of M2's behaviour. Its spine
-/// -- diverge, merge, conflict on the lock alone, `--full` as the way out --
-/// held exactly as predicted when it was first run for real. Three of its
-/// *comments*, though, described steps that never happen; the amendments
-/// below correct those and write down the assertions the loop had so far
-/// only implied. No assertion was weakened.
-///
-/// 1. **`#[ignore = "un-ignored at M2"]` removed.** M2 landed every command
-///    this loop calls.
-/// 2. **The two `git checkout --ours/--theirs` calls and their `git add`
-///    are gone.** They claimed to "resolve the two `.tel` conflicts by
-///    hand"; there are none. Each branch edits a *different* intent file, so
-///    git auto-merges both edits -- `git diff --name-only --diff-filter=U`
-///    after the merge lists exactly `telos/telos.lock`, and the working tree
-///    holds branch A's `INT-0017` wording *and* branch B's `INT-0042`
-///    wording. `git checkout --ours <path>` needs a stage-2 entry to pick
-///    from; with none, git 2.55 (the version this was verified against)
-///    makes it a silent no-op -- "0 paths updated from the index" -- and
-///    nothing promises it stays silent. Either way the call asserted a
-///    hand-resolution that never happens. The two assertions that replace it
-///    (the conflict set is exactly the lock; both wordings survive) are what
-///    §5's promise actually means.
-/// 3. **Branch B's comment corrected.** It said the two locks conflict
-///    because each carries a "new sealing change id". They do not: change
-///    ids are allocated per branch from that branch's own counters (D4), so
-///    both branches seal their own `CHG-0001` and the `sealed_by` line
-///    merges cleanly. What conflicts is `spec_digest` plus the two
-///    `[spec]` OID lines around the touched intents.
-/// 4. **State assertions added at every phase** (`status --json`): coherent
-///    fixture -> `changing` while each branch's transaction is open ->
-///    coherent after each branch reconciles -> coherent after the merge is
-///    resolved by `--full`. Plus the `--full` envelope itself
-///    (`id: null`, `ops_applied: 0`, `checks_run: 1` -- D11's *total*
-///    constraint revalidation, not the impacted subset) and a green
-///    `check --sealed` at the end, which is the only real proof the re-seal
-///    happened.
-/// 5. **No `status` assertion in the conflicted phase, deliberately.**
-///    `status` reports the tree *against its seal*, and here the seal is the
-///    thing carrying git's conflict markers: it answers `TELOS_PARSE_ERROR`
-///    (contracts.md's `TELOS_PARSE_ERROR` row covers `telos.lock`). That
-///    phase is therefore asserted through `check`/`check --sealed`, which is
-///    also exactly the pair §7.4 talks about.
-/// 6. **"reruns the whole test suite" softened to the truth in the doc
-///    comment.** The `billing` corpus ships `[test] cmd = ""` (D13), so D10
-///    skips the run and `tests_run` is `0`. What `--full` re-proves *here*
-///    is the whole §3.3 rule set and every constraint; asserting a suite the
-///    corpus does not configure would be asserting a fiction.
-/// 7. **The merge is now committed at the end.** The loop used to stop with
-///    `telos.lock` still unmerged in git's index; a merge nobody can commit
-///    is not a merge resolved. `git commit` after `--full` is the last step
-///    of §7.4's story, and it is what proves the re-derived lock is a real
-///    resolution and not just a file on disk.
-///
-/// # The one M3 amendment (T5), and what this loop does *not* prove
-///
-/// The pinned `--full` result gained a `"witness_warnings": []` line, and
-/// nothing else in this loop moved. The field is M3's, additive, and always
-/// present (D7): a `--full` reseal belongs to no change, hence to no
-/// journal, hence to no witness verdict -- `[]` is the only value it can
-/// take here, and pinning it is one more thing asserted rather than one
-/// fewer.
-///
-/// This loop is **inert on the witness gate**, and deliberately left that
-/// way. The `billing` corpus ships `[test] cmd = ""` (D13), and a project
-/// with no runner owes no witness -- `check_witnesses` returns at that
-/// carve-out before it ever asks who owes one. So the two branch reconciles
-/// here would pass whatever D7's scope rule said, and nothing about that
-/// rule may be inferred from this loop being green. Wiring a runner in just
-/// to make it say something would move the `--full` envelope this loop
-/// pins, for a property it is not the right place to assert.
-///
-/// The scope rule -- an intent edited without touching its scenarios owes no
-/// new witness, because the emitted fragments are identical -- is pinned
-/// where it can actually fail: `crates/telos/tests/reconcile.rs`, by
-/// `rebinding_a_pair_the_sealed_file_already_holds_leaves_it_unchanged` (a
-/// no-op `edit intent`, under `strict`, *with* a runner configured) and by
-/// the strict-mode family around it, which prove the gate refuses when a
-/// witness really is owed. `required_witnesses`' own unit tests
-/// (`telos-core/src/witness.rs`) pin the fragment comparison itself.
+/// This loop is intentionally inert on the witness gate because the Billing
+/// corpus has no configured runner. Witness scope is covered separately by
+/// the strict-mode reconcile tests and `required_witnesses` unit tests.
 #[test]
 fn loop_merge() {
     let tmp = with_fixture();
@@ -623,7 +537,7 @@ fn loop_merge() {
     );
 
     // --- Branch B: touch INT-0042 the same way, from the same starting
-    // point. Change ids are per-branch (D4), so branch B seals its own
+    // point. Change ids are per-branch, so branch B seals its own
     // `CHG-0001` too and `sealed_by` merges cleanly; what makes the two
     // `telos.lock`s conflict is `spec_digest` -- rewritten wholesale by
     // every reconcile -- plus the `[spec]` OID lines of the touched
@@ -668,7 +582,7 @@ fn loop_merge() {
         "expected `git merge branch-b` to conflict on telos.lock"
     );
 
-    // §5, checked rather than asserted in prose: the spec files are ordinary
+    // The spec files are ordinary files, checked rather than asserted in prose:
     // text files that merge like any other, so a conflict on them is rare and
     // local. Here there is none at all -- each branch edited a different
     // intent -- and the only unmerged path is the derived one.
@@ -701,7 +615,7 @@ fn loop_merge() {
     run_err(dir, &["check", "--sealed", "--json"], "TELOS_PARSE_ERROR");
 
     // --- Reconcile --full -------------------------------------------------------
-    // §7.4: total integrity revalidation, every constraint re-checked, every
+    // full reconciliation: total integrity revalidation, every constraint re-checked, every
     // impacted proof obligation re-run, then re-seal. Not a bypass -- it
     // demands full proof, and it is the only way out of a conflicted lock.
     let reconciled = run_ok(dir, &["change", "reconcile", "--full", "--json"]);
@@ -737,11 +651,10 @@ fn loop_merge() {
     assert_state(dir, "coherent");
 }
 
-/// M4 closes the observe step of the roadmap with one shared projection.
 /// Starting from the same coherent project, static export and every live page
-/// must expose that projection without changing project state. The separate
-/// `rebuild_demo` acceptance remains the sole owner of the much longer M5
-/// spec-only reconstruction lifecycle.
+/// must expose one shared projection without changing project state. The
+/// separate `rebuild_demo` acceptance owns the longer spec-only reconstruction
+/// lifecycle.
 #[test]
 fn loop_projection() {
     let tmp = with_fixture();

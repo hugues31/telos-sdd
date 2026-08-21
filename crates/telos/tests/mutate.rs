@@ -1,7 +1,7 @@
 //! End-to-end tests for `telos add|edit|remove`: the three staging verbs,
-//! their frozen result shapes (Annex E), the exact bytes they leave in a
+//! their frozen result shapes, the exact bytes they leave in a
 //! change file, and the four gates that stand between a payload and those
-//! bytes -- drift (D17), file claims (D5), rule 2 of §3.3, and the full
+//! bytes -- drift, file claims, referential deletion safety, and the full
 //! semantic validation of the overlay.
 //!
 //! The invariant every failure case here asserts is the same one: a refused
@@ -81,14 +81,14 @@ fn read(dir: &Path, rel: &str) -> String {
     fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-// --- the payloads (Annex D) -------------------------------------------------
+// --- the payloads -------------------------------------------------
 
 fn customer_payload() -> String {
     json!({"name": "Customer", "kind": "actor", "def": "A party that receives invoices."})
         .to_string()
 }
 
-/// Annex D's own `add notion` example, verbatim.
+/// The documented `add notion` example, verbatim.
 fn invoice_payload() -> String {
     json!({
         "name": "Invoice", "kind": "entity",
@@ -122,7 +122,7 @@ fn payment_received_payload() -> String {
     .to_string()
 }
 
-/// Annex D's own `add intent` example, with `requires` emptied: `INT-0017`
+/// The documented `add intent` example, with `requires` emptied: `INT-0017`
 /// exists in the corpus, not in a freshly initialized project.
 fn settle_intent_payload(on: &str) -> String {
     json!({
@@ -161,7 +161,7 @@ fn project_with_two_notions() -> tempfile::TempDir {
 // --- add notion -------------------------------------------------------------
 
 #[test]
-fn add_notion_answers_with_the_annex_e_result() {
+fn add_notion_answers_with_the_public_result_result() {
     let tmp = fresh();
     open_change(tmp.path());
 
@@ -184,7 +184,7 @@ fn add_notion_answers_with_the_annex_e_result() {
             "result": {
                 "change": "CHG-0001",
                 "entity": "notion",
-                // A notion's natural key is its name (Annex D), so that is
+                // A notion's natural key is its name, so that is
                 // what `id` carries for one.
                 "id": "Customer",
                 "scenario_ids": [],
@@ -196,9 +196,9 @@ fn add_notion_answers_with_the_annex_e_result() {
     );
 }
 
-/// The first staged op takes the change from `open` to `drafted` (D16), and
+/// The first staged op takes the change from `open` to `drafted`, and
 /// the op block is the entity's whole canonical form -- `emit_notion`'s
-/// output, shifted one level right (Annex C).
+/// output, shifted one level right.
 #[test]
 fn add_notion_writes_the_canonical_change_file_byte_for_byte() {
     let tmp = fresh();
@@ -223,7 +223,7 @@ fn add_notion_writes_the_canonical_change_file_byte_for_byte() {
 }
 
 /// Two ops, in staged order, each its own block -- and the second one is
-/// Annex D's full `add notion` payload, `ref` attribute and `rel` included,
+/// The full `add notion` payload, `ref` attribute and `rel` included,
 /// which only validates because the first op staged `Customer`.
 #[test]
 fn a_second_op_appends_a_block_and_resolves_against_the_first() {
@@ -296,7 +296,7 @@ fn add_notion_refuses_a_name_the_base_already_holds() {
 
 // --- add intent -------------------------------------------------------------
 
-/// The ids come from the allocator, not from the payload (Annex D): a fresh
+/// The ids come from the allocator, not from the payload: a fresh
 /// project starts at `INT-0001` / `SCN-0001`.
 #[test]
 fn add_intent_allocates_the_intent_and_its_scenario_ids() {
@@ -370,7 +370,7 @@ fn an_unknown_reference_writes_neither_the_change_nor_the_counters() {
     assert_eq!(read(tmp.path(), COUNTERS), counters_before);
 }
 
-/// The lexeme check T6's review asked for, end to end: a JSON payload is
+/// End-to-end lexeme validation: a JSON payload is
 /// the one way a malformed `date` can reach the model, and the semantic
 /// pass is where it is caught.
 #[test]
@@ -420,7 +420,7 @@ fn a_date_field_that_is_not_a_date_lexeme_is_refused() {
 
 // --- add constraint ---------------------------------------------------------
 
-/// Annex D's own `add constraint` example: the id is allocated past the
+/// The documented `add constraint` example: the id is allocated past the
 /// corpus' `CON-0003`, and the op block is the constraint's canonical form.
 #[test]
 fn add_constraint_allocates_its_id_past_the_corpus_floor() {
@@ -623,7 +623,7 @@ fn remove_constraint_stages_a_single_line() {
     );
 }
 
-/// Rule 2 of §3.3, through the CLI: the referrer is named, and nothing is
+/// Referential deletion safety through the CLI: the referrer is named, and nothing is
 /// written.
 #[test]
 fn remove_of_a_still_referenced_intent_names_the_referrer() {
@@ -651,7 +651,7 @@ fn remove_of_a_still_referenced_intent_names_the_referrer() {
     assert_eq!(read(tmp.path(), CHG_0001), before);
 }
 
-// --- D5: file claims --------------------------------------------------------
+// --- file claims -------------------------------------------------------------
 
 #[test]
 fn a_second_change_cannot_stage_a_file_the_first_one_claims() {
@@ -711,7 +711,7 @@ fn a_change_may_stage_the_same_file_twice() {
     assert!(text.contains("Reworded twice."));
 }
 
-// --- D17: the drift gate ----------------------------------------------------
+// --- drift gate --------------------------------------------------------------
 
 #[test]
 fn add_on_a_drifted_project_is_refused() {

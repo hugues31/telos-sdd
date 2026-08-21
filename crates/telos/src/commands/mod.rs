@@ -69,31 +69,31 @@ fn require_lock(ws: &Workspace) -> Result<Lock, TelosError> {
 // --- the state-aware commands' shared preamble and gates --------------------
 
 /// A discovered, sealed project and the state it is in: what `status`,
-/// `check --sealed` and `change open` (and, from T7 on, every staging
+/// `check --sealed`, `change open`, and every staging
 /// command) all start from, computed once, the same way, in the same order.
 ///
 /// Holding the workspace and its [`StateReport`] together is what keeps the
 /// gates below cheap and honest: a command that has a `Project` has already
-/// paid for its state, so asking «may I mutate?» costs nothing more and can
+/// paid for its state, so asking “may I mutate?” costs nothing more and can
 /// never be answered from a second, independently computed state that has
 /// since moved.
 pub(crate) struct Project {
     pub ws: Workspace,
     pub lock: Lock,
     /// The repository the workspace lives in, kept rather than dropped
-    /// because `change reconcile` (T10) needs it to re-hash the tree it is
+    /// because `change reconcile` needs it to re-hash the tree it is
     /// about to seal -- and re-discovering it there would be a second,
     /// independent answer to "which repository is this".
     pub git: GitRepo,
-    /// Every open change, best-effort per D15 -- an unparseable change file
-    /// is reported here, never an error. Kept alongside the state it was
+    /// Every open change, scanned best-effort: an unparseable change file is
+    /// reported here, never returned as an error. Kept alongside the state it was
     /// computed from because it carries what the state does not: each
-    /// change's `claims`, which is what the D5 gate reads.
+    /// change's `claims`, which the claim gate reads.
     pub changes: Vec<OpenChangeInfo>,
-    /// The same scan's parsed half (D14): every change whose file really
-    /// parsed, in ascending id order. What the commands that have to look
-    /// *inside* a change read -- `test` (T3) resolving which change owns a
-    /// scenario, `bind` (T4) which one owns an intent -- rather than
+    /// The same scan's parsed half: every change whose file parsed, in
+    /// ascending id order. Commands that have to look
+    /// *inside* a change read -- `test` resolving which change owns a
+    /// scenario, `bind` resolving which one owns an intent -- rather than
     /// re-reading the store a second time and risking a second answer.
     /// Shorter than `changes` exactly when a file failed to parse.
     pub parsed: Vec<Change>,
@@ -179,8 +179,7 @@ pub(crate) fn approved_config_workspace(project: &Project) -> Result<Workspace, 
     })
 }
 
-/// The allocator for a fresh id: `max(persisted counters, scanned floors)`
-/// (D4).
+/// The allocator for a fresh id: `max(persisted counters, scanned floors)`.
 ///
 /// The floor scan needs the *sealed model* (its highest intent, scenario and
 /// constraint ids), every open change's ops, and the change that produced
@@ -214,16 +213,16 @@ pub(crate) fn allocator(ws: &Workspace, lock: &Lock) -> Result<Alloc, TelosError
     Ok(Alloc::new(read_counters(ws)?, floor))
 }
 
-/// D17's gate: refuses to go on while drift nobody claimed is on disk.
+/// Refuses to proceed while unclaimed drift is on disk.
 ///
 /// "Unclaimed" is the whole subtlety, and it is [`compute_state`] that
 /// resolves it: a path an open change claims is that change in progress,
-/// not damage (D5), so it never reaches `state.drift` and never trips this.
+/// not damage, so it never reaches `state.drift` and never trips this.
 /// What trips it is a sealed file edited outside the protocol -- staging
 /// more spec on top of that would seal a base nobody reviewed.
 ///
-/// Used by `change open` here, and by `add`/`edit`/`remove` (T7),
-/// `change approve` (T8) and `change reconcile` without `--full` (T10).
+/// Used by `change open`, `add`/`edit`/`remove`, `change approve`, and
+/// `change reconcile` without `--full`.
 /// `change diff|list|abandon`, `status`, `check` and `show` deliberately do
 /// not call it: they read, or they clean up, and a drifted project is
 /// exactly when a caller most needs them.
@@ -239,7 +238,7 @@ pub(crate) fn require_no_unclaimed_drift(project: &Project) -> Result<(), TelosE
 }
 
 /// The exact opposite gate, and the one `adopt` and `revert` open with
-/// (T12): both commands exist to *leave* the drifted state, so being asked
+/// Both commands exist to *leave* the drifted state, so being asked
 /// to run in any other one is a caller mistake, not damage.
 ///
 /// `TELOS_CHANGE_STATE_INVALID` rather than a drift code, for the reason
@@ -262,15 +261,15 @@ pub(crate) fn require_drift(project: &Project, verb: &str) -> Result<(), TelosEr
 //
 // A run and a bind are the same shape of thing where ownership and review
 // are concerned: both are journal entries written into a change that must
-// already have been reviewed, and both have to break the same deadlock (D6)
+// already have been reviewed, and both have to break the same deadlock
 // -- claiming a path is what legitimizes the very drift that claiming it
-// causes. `test` (T3) and `bind` (T4) share the three functions below rather
+// causes. `test` and `bind` share the three functions below rather
 // than each keeping its own copy, so the two commands can never quietly
 // diverge on what "approved" or "admissible drift" means.
 
 /// Whether a change is far enough along to have a journal line written
 /// against it: `approved` outright, or `implementing` -- already implemented
-/// in part, so idempotently still approved (D5, D13).
+/// in part, so idempotently still approved.
 pub(crate) fn is_approved(change: &Change) -> bool {
     matches!(
         change.status,
@@ -278,10 +277,9 @@ pub(crate) fn is_approved(change: &Change) -> bool {
     )
 }
 
-/// A run or a bind may only be journalled against a delta someone reviewed
-/// (D5).
+/// A run or bind may only be journalled against a reviewed delta.
 ///
-/// The message is `reconcile`'s own, word for word (M2): the caller is in
+/// The message is `reconcile`'s own, word for word: the caller is in
 /// the same situation -- an unapproved change they asked the engine to act
 /// on -- and one situation deserves one wording. It is restated here rather
 /// than shared because `telos-core`'s copy is private to the reconcile
@@ -301,12 +299,12 @@ pub(crate) fn require_approved(change: &Change) -> Result<(), TelosError> {
     )))
 }
 
-/// D17's drift gate, with D6's carve-out.
+/// The drift gate with the carve-out required for atomic journal writes.
 ///
 /// The deadlock this exists to break: a sealed file has to be *edited* --
 /// the test file a scenario's witness will be taken on, or the source file a
 /// bind is about to attach to an intent -- before the journal line that
-/// would claim it (D3) can be written, and that line cannot be written until
+/// would claim it can be written, and that line cannot be written until
 /// the edit is already in place. So the gate admits drift whose paths all
 /// lie within `claimed`, the files this very invocation is about to record
 /// journal entries against: the act of claiming them is what legitimizes
@@ -317,7 +315,7 @@ pub(crate) fn require_approved(change: &Change) -> Result<(), TelosError> {
 /// whichever command raises it.
 ///
 /// Note that `project.state.drift` has *already* had every open change's
-/// claims filtered out (`compute_state`, D5): what reaches here is the
+/// claims filtered out by `compute_state`: what reaches here is the
 /// unclaimed remainder, which is the only thing the carve-out has to widen.
 pub(crate) fn require_no_foreign_drift(
     project: &Project,
@@ -341,13 +339,13 @@ pub(crate) fn require_no_foreign_drift(
     .hint(DRIFT_HINT))
 }
 
-/// D15's addition to `check --sealed`: "sealed and unmodified" cannot be
+/// `check --sealed` also refuses open changes: "sealed and unmodified" cannot be
 /// true while a change is still open, so `changing` is refused with its own
 /// code rather than folded into `TELOS_DRIFT_DETECTED` -- the two states
 /// have different remedies, and only one of them is damage.
 ///
 /// Called *after* [`require_no_unclaimed_drift`], which mirrors the state
-/// priority of D15: unclaimed drift outranks an open change, so a project
+/// project-state priority: unclaimed drift outranks an open change, so a project
 /// that is both reports the drift.
 pub(crate) fn require_no_open_changes(project: &Project) -> Result<(), TelosError> {
     if project.state.state == ProjectStateKind::Changing {
@@ -384,13 +382,13 @@ pub fn version() -> CmdResult {
 /// `code` and `hint` are the first diagnostic's -- the frozen error body
 /// has room for exactly one of each, so a command that can find several
 /// problems in one pass (`check`, but also `show`/`list` loading the same
-/// model) surfaces the first (Annex B). The *message* stays multi-line when
+/// model) surfaces the first. The *message* stays multi-line when
 /// there is more than one diagnostic: every diagnostic gets its own `file:
 /// message` line (via the same `From<Diagnostic>` conversion, applied to
 /// each), so a human reading stderr sees everything the load found in this
 /// run. In `--json` mode this means `error.message` can itself carry more
 /// than one line -- an agent that only reads the first line still gets the
-/// primary diagnosis; this M1 limitation (no `result.diagnostics` array on
+/// primary diagnosis; this envelope limitation (no `result.diagnostics` array on
 /// failure) is documented in `docs/contracts.md`.
 pub(crate) fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
     let mut iter = diagnostics.into_iter();
@@ -418,7 +416,7 @@ pub(crate) fn diagnostics_to_error(diagnostics: Vec<Diagnostic>) -> TelosError {
 // `impact`'s argument resolution reuse them rather than reimplementing
 // either.
 
-/// «cannot parse `foo-bar` as an id or notion name» -- the diagnosis for an
+/// “cannot parse `foo-bar` as an id or notion name” -- the diagnosis for an
 /// argument `EntityRef::from_str` rejects outright, replacing whatever error
 /// the fallback `NotionName::new` produced (a parse error about a notion
 /// name specifically, since a bare word is the fallback every unprefixed
@@ -431,7 +429,7 @@ pub(crate) fn unparsable(target: &str) -> TelosError {
     )
 }
 
-/// «unknown intent `INT-9999`» and friends, with `hint` attached only when
+/// “unknown intent `INT-9999`” and friends, with `hint` attached only when
 /// one was found.
 pub(crate) fn unknown(noun: &str, id: impl std::fmt::Display, hint: Option<String>) -> TelosError {
     let error = TelosError::new(
@@ -457,7 +455,7 @@ pub(crate) fn nearest_id(
 }
 
 /// Turns a `show`/`impact` argument into the graph node it names, or the
-/// same «unknown ...» error (with the appropriate suggestion) `show` reports
+/// same “unknown ...” error (with the appropriate suggestion) `show` reports
 /// for the same argument -- `impact` needs only the node, not the entity's
 /// full data `show` also prints, so it resolves through this rather than
 /// through `show`'s own per-type lookups.

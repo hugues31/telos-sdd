@@ -1,5 +1,5 @@
 //! End-to-end contract tests for `telos view --export`: it publishes the
-//! same sealed snapshot Task 3 renders, but only after every byte has been
+//! same sealed snapshot the renderer uses, but only after every byte has been
 //! prepared and without ever replacing a caller-owned destination.
 
 mod common;

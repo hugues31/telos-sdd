@@ -1,12 +1,11 @@
 //! The semantic pass: folds parsed `.tel` files into a `TelosModel`, checks
-//! the integrity rules of spec 3.3 that hold at read time, and derives the
-//! relation graph.
+//! the integrity conditions that hold at read time, and derives the relation
+//! graph.
 //!
-//! Three rules of 3.3 apply here -- every reference resolves (rule 1), an
-//! `active` intent is verified by at least one scenario and a `when` step
-//! names an event (rule 3), and literals agree with the attribute types they
-//! meet (rule 4). Rules 2 and 5 govern *writing* and reconciling a spec, so
-//! they belong to M2's change flow, not to loading a model.
+//! Every reference must resolve; an `active` intent must be verified by at
+//! least one scenario; a `when` step must name an event; and literals must
+//! agree with the attribute types they meet. Referential deletion safety and
+//! code coverage belong to the change flow, not to model loading.
 //!
 //! Two properties are deliberate:
 //!
@@ -15,7 +14,7 @@
 //!   constraints, then bindings, then cycles), never "the first error".
 //! - **No I/O.** Files arrive already parsed; this module never reads a
 //!   path, which is what lets the same pass serve the CLI, the tests and
-//!   (in M2) an in-memory spec that exists nowhere on disk.
+//!   an in-memory spec that exists nowhere on disk.
 //!
 //! One consequence of the second point: a `Diagnostic` from here carries the
 //! file it came from but no line or column. Positions are byte offsets
@@ -180,7 +179,7 @@ fn claim_scenarios(
     }
 }
 
-/// « <entity> is declared twice: <first file> and <second file> ».
+/// “ <entity> is declared twice: <first file> and <second file> ”.
 fn duplicate(entity: String, first: &RepoPath, second: &RepoPath) -> Diagnostic {
     Diagnostic {
         code: ErrorCode::TelosIntegrityViolation,
@@ -345,10 +344,10 @@ impl<'a> Checker<'a> {
     /// `decimal` attribute -- with five types that are more than a variant
     /// match: `money`, `date` and `datetime` are strings of a fixed lexical
     /// form, `enum` admits only its declared symbols, and `ref(...)` has no
-    /// literal form at all in M1 (nothing to check).
+    /// literal form at all (nothing to check).
     ///
     /// The three lexeme checks are not redundant with the lexer, which only
-    /// ever produces well-formed ones: since M2, a literal can also come
+    /// ever produces well-formed ones: a literal can also come
     /// from a JSON payload ([`crate::payload`]), which copies the string
     /// verbatim because it has no attribute type in hand at that point. This
     /// is where that string finally meets its type.
@@ -536,7 +535,7 @@ impl<'a> Checker<'a> {
 /// This is the single traversal of an `Expr` in the engine: the checker uses
 /// it to resolve references and type literals, the `uses` derivation uses it
 /// to collect notions. A comparison between two references yields both, each
-/// without a literal -- M1 does not check that two attributes have
+/// without a literal -- the semantic pass does not check that two attributes have
 /// compatible types, only that both exist.
 fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&AttrRef, Option<&Literal>)) {
     match expr {
@@ -572,7 +571,7 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&AttrRef, Option<&Literal>)) {
 ///
 /// `pub(crate)` for [`crate::overlay`], which answers the same question in
 /// the other direction: not "what does this entity use?" but "does anything
-/// still use the notion this op removes?" (rule 2 of §3.3).
+/// still use the notion this op removes?" (the referential-deletion check).
 pub(crate) fn expr_notions(expr: &Expr, out: &mut BTreeSet<NotionName>) {
     walk_expr(expr, &mut |r, _| {
         out.insert(r.notion.node.clone());
@@ -631,8 +630,7 @@ pub(crate) fn scenario_notions(scenario: &Scenario) -> BTreeSet<NotionName> {
 
 // --- phase 3: the relation graph -----------------------------------------
 
-/// Builds the graph of spec 3.2: the declared relations, plus the derived
-/// `uses` edges.
+/// Builds the graph from declared relations plus derived `uses` edges.
 fn relation_graph(model: &TelosModel) -> Graph {
     let mut graph = Graph::default();
 
@@ -719,7 +717,7 @@ fn check_cycles(model: &TelosModel, origins: &Origins, diagnostics: &mut Vec<Dia
 
 // --- message helpers -----------------------------------------------------
 
-/// Appends « ; closest is `x` » when one of `candidates` is close enough to
+/// Appends “ ; closest is `x` ” when one of `candidates` is close enough to
 /// `word` -- the shape every corrective message in the engine shares with
 /// the parser's.
 fn with_suggestion(message: String, word: &str, candidates: &[&str]) -> String {
@@ -765,7 +763,7 @@ fn literal_kind(literal: &Literal) -> &'static str {
     }
 }
 
-/// `^\d+\.\d{2} [A-Z]{3}$` -- the money lexeme of Annex B, checked by hand
+/// `^\d+\.\d{2} [A-Z]{3}$` -- the canonical money lexeme, checked by hand
 /// rather than by a regex engine the crate does not depend on.
 fn is_money(s: &str) -> bool {
     let Some((amount, currency)) = s.split_once(' ') else {
@@ -783,7 +781,7 @@ fn is_money(s: &str) -> bool {
         && cents.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// `^\d{4}-\d{2}-\d{2}$` -- the `date-lit` lexeme of Annex C.1.
+/// `^\d{4}-\d{2}-\d{2}$` -- the canonical `date-lit` lexeme
 ///
 /// A *shape*, not a calendar: `2026-13-99` passes, exactly as it does
 /// through the lexer, which reads the same positional shape. Rejecting an
@@ -793,8 +791,8 @@ fn is_date(s: &str) -> bool {
     matches_shape(s, "dddd-dd-dd")
 }
 
-/// `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?$` -- the `datetime-lit` lexeme of
-/// Annex C.1, whose trailing `Z` is optional.
+/// `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?$` -- the canonical
+/// `datetime-lit` lexeme, whose trailing `Z` is optional.
 fn is_datetime(s: &str) -> bool {
     matches_shape(s.strip_suffix('Z').unwrap_or(s), "dddd-dd-ddTdd:dd:dd")
 }
@@ -841,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn money_accepts_the_annex_b_lexeme_only() {
+    fn money_accepts_the_public_schema_lexeme_only() {
         assert!(is_money("120.00 EUR"));
         assert!(is_money("0.99 USD"));
         assert!(is_money("1234567.89 CHF"));
@@ -860,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn date_accepts_the_annex_c_lexeme_only() {
+    fn date_accepts_the_canonical_lexeme_only() {
         assert!(is_date("2026-08-19"));
         // A shape, not a calendar -- the same reading the lexer makes.
         assert!(is_date("2026-13-99"));
@@ -875,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn datetime_accepts_the_annex_c_lexeme_only() {
+    fn datetime_accepts_the_canonical_lexeme_only() {
         assert!(is_datetime("2026-08-19T12:00:00Z"));
         assert!(is_datetime("2026-08-19T12:00:00"), "the `Z` is optional");
 

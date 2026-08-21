@@ -1,22 +1,21 @@
 //! `telos test <SCN-id | --all>`: run one scenario's test and seal the
-//! verdict as a witness in the change that owns it (D5, D6).
+//! verdict as a witness in the change that owns it.
 //!
 //! The command is *mutating* -- it appends a `run` line to a change file --
-//! so it runs the gates in the order D6 freezes, and writes nothing until
-//! every one of them has passed:
+//! so it runs every gate before writing anything:
 //!
 //! 1. the preamble ([`project`]: workspace, lock, repository, one store
 //!    scan, state);
 //! 2. the argument, parsed and resolved against every scenario id the spec
 //!    or any open change declares;
-//! 3. the **owner** (D5): the open change whose delta stages the scenario --
+//! 3. the **owner**: the open change whose delta stages the scenario --
 //!    a witness belongs to the transaction that introduced what it
 //!    witnesses, never to the project at large;
 //! 4. that owner's status: `approved` or `implementing`, never a delta
 //!    nobody has reviewed;
 //! 5. a configured runner (`[test] cmd`);
-//! 6. **discovery** (D4): the `scn_NNNN` convention, or `--file`;
-//! 7. the **drift gate with its carve-out** (D6) -- see
+//! 6. **discovery**: the `scn_NNNN` convention, or `--file`;
+//! 7. the **drift gate with its carve-out** -- see
 //!    [`require_no_foreign_drift`];
 //! 8. the run itself, then the journal line and the `approved` →
 //!    `implementing` transition, written together.
@@ -26,15 +25,16 @@
 //!
 //! - **`TELOS_FILE_CLAIMED` does not apply to journal writes.** Two changes
 //!   may record runs against the same shared test file. A journal claim
-//!   exists to make the drift of that file admissible (D3/D6), not to lock
+//!   exists to make the drift of that file admissible, not to lock
 //!   it: `add`/`edit`'s one-file-one-change gate is about *staging spec*,
 //!   and reconcile's carry-over is what resolves an overlap. So nothing here
 //!   calls `require_unclaimed`.
 //! - **Nothing detects a run that executed zero tests.** The runner is an
 //!   arbitrary shell command whose output telos deliberately does not parse,
 //!   so a `{filter}` that matches nothing exits 0 and reads as green. The
-//!   identifier-boundary discovery of D4 is what keeps the filter honest in
-//!   practice; the residual hazard is a documented M3 limitation.
+//!   exact `scn_NNNN` naming convention reduces accidental mismatches, but a
+//!   runner that exits 0 without executing tests remains a documented
+//!   limitation.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,7 +97,7 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
 // --- the --all flow ---------------------------------------------------------
 
 /// `telos test --all`: every scenario the open, approved changes owe a
-/// witness for (D7's scope, [`required_witnesses`]), ascending by id.
+/// witness for (as computed by [`required_witnesses`]), ascending by id.
 ///
 /// Discovery for *every* target runs before the first shell command, so the
 /// carve-out is judged once, against the whole set of test files this
@@ -173,7 +173,7 @@ fn every(project: &Project, file: Option<&RepoPath>) -> CmdResult {
 /// Every `(scenario, owning change)` pair `--all` has to run, ascending by
 /// scenario id.
 ///
-/// The scope is D7's, per change: a scenario absent from the sealed base, or
+/// Per change, a scenario needs a witness when absent from the sealed base or
 /// present but whose canonical fragment the delta moved. That is exactly
 /// what a change owes a red/green pair for at reconcile, so `--all` and the
 /// reconcile gate can never disagree about which scenarios are in play.
@@ -199,9 +199,9 @@ fn required_runs(project: &Project) -> Result<Vec<(ScenarioId, ChangeId)>, Telos
 ///
 /// Only `intents` is populated, because that is the only field
 /// `required_witnesses` looks at -- it asks each staged intent for its post
-/// status and its scenarios, both of which an `add`/`edit` op carries whole
-/// (Annex C: an op is the complete post-state, not a patch). Building the
-/// *whole* folded model instead would mean applying the delta and running
+/// status and scenarios. An `add`/`edit` op carries both as a complete
+/// post-state, not a patch. Building the *whole* folded model would mean
+/// applying the delta and running
 /// the semantic pass, which can fail for reasons that have nothing to do
 /// with which scenarios owe a witness.
 fn staged_intents(change: &Change) -> TelosModel {
@@ -240,7 +240,7 @@ fn parse_scenario_id(arg: &str) -> Result<ScenarioId, TelosError> {
 /// disk, and the deltas of the open changes -- a scenario staged an hour ago
 /// exists as far as its author is concerned, and is precisely the one
 /// `telos test` is about to be pointed at. Judging it against the sealed
-/// spec alone would answer «unknown scenario» about an id the caller just
+/// spec alone would answer “unknown scenario” about an id the caller just
 /// watched `edit intent` allocate.
 fn require_known(project: &Project, scenario: ScenarioId) -> Result<(), TelosError> {
     let known = known_scenarios(project)?;
@@ -274,7 +274,7 @@ fn known_scenarios(project: &Project) -> Result<BTreeSet<ScenarioId>, TelosError
     Ok(known)
 }
 
-/// D5's ownership rule: the open change whose delta stages `scenario`.
+/// The open change whose delta stages `scenario` owns the file.
 ///
 /// Only `add`/`edit intent` can own a scenario -- a scenario exists inside
 /// an intent, so an op that carries no intent carries no scenario either
@@ -293,7 +293,7 @@ fn owner_of(project: &Project, scenario: ScenarioId) -> Option<&Change> {
     })
 }
 
-/// The frozen wording for a scenario no open change stages (Annex F).
+/// The frozen wording for a scenario no open change stages.
 fn no_owner(scenario: ScenarioId) -> TelosError {
     TelosError::new(
         ErrorCode::TelosChangeStateInvalid,
@@ -303,7 +303,7 @@ fn no_owner(scenario: ScenarioId) -> TelosError {
 }
 
 /// `[test] cmd`, or the frozen `TELOS_TEST_NOT_FOUND` for a project that
-/// never wired a runner up (Annex F).
+/// never wired a runner up.
 ///
 /// Trimmed, so that a `cmd = "   "` is the same "no runner" as `cmd = ""`:
 /// both would run the shell on nothing and report a meaningless verdict.
@@ -327,13 +327,13 @@ struct RunReport {
     witness: Witness,
     test: TestRef,
     change: ChangeId,
-    /// D10's display form, with `{filter}` literally substituted. Execution
+    /// The runner template's display form, with `{filter}` literally substituted. Execution
     /// uses the validated direct-process argv; this display is not a shell
     /// replay contract.
     command: String,
 }
 
-/// Runs the scenario's test and writes the verdict into `change` (D1, D5).
+/// Runs the scenario's test and writes the verdict into its owning change.
 ///
 /// The filter is the discovered test's `name` when there is one and its path
 /// otherwise, the same rule `reconcile` uses to filter a `proves` target:
@@ -343,15 +343,15 @@ struct RunReport {
 ///
 /// The oid is re-hashed here rather than carried from anywhere earlier: it
 /// must be the bytes the run just saw, and the same git filters the seal
-/// applies (D1). The file existing is discovery's guarantee, so its absence
+/// applies. The file existing is discovery's guarantee, so its absence
 /// here is a filesystem race, reported as internal rather than as a
 /// modelling question.
 ///
-/// The `approved` → `implementing` transition rides along with the write
-/// (D5): the grammar requires a journalled change to be `implementing`, so
+/// The `approved` → `implementing` transition rides along with the write:
+/// the grammar requires a journalled change to be `implementing`, so
 /// the line and the status can never be written apart. Idempotent -- a
 /// change already `implementing` stays so, and its frozen digest is left
-/// untouched (the journal is digest-inert, D1).
+/// untouched because journal entries are digest-inert.
 fn journal_run(
     project: &Project,
     change: &mut Change,
@@ -410,7 +410,7 @@ fn journal_run(
     })
 }
 
-/// One run's result object (Annex C), shared by both shapes: `test SCN-…`
+/// One run's result object, shared by both shapes: `test SCN-…`
 /// answers with it directly, `test --all` with an array of them.
 fn run_result(run: &RunReport) -> Value {
     json!({
@@ -433,7 +433,7 @@ fn human_line(run: &RunReport) -> String {
 }
 
 /// What to do next about one verdict: a red witness asks to be turned green,
-/// a green one closes the loop and points at the reconcile (Annex C).
+/// a green one closes the loop and points at the reconcile.
 ///
 /// `--all` suggests nothing at all rather than a list of these: several runs
 /// with several verdicts have no single next step, and inventing one would

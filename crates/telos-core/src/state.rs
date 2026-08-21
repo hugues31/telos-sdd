@@ -1,4 +1,4 @@
-//! Project state (spec §6): comparing a sealed [`Lock`] against the live
+//! Project state: comparing a sealed [`Lock`] against the live
 //! working tree, and a coverage summary of the spec itself.
 //!
 //! [`compute_state`] itself never parses a `.tel` file -- it compares git
@@ -23,22 +23,22 @@ use crate::model::{Binding, IntentStatus, TelosModel};
 use crate::workspace::Workspace;
 
 /// The hint carried by every `TELOS_DRIFT_DETECTED`, frozen by
-/// `docs/contracts.md` -- an M3 skill matches on this string.
+/// `docs/contracts.md` and consumed by agent tooling.
 ///
 /// It lives next to the module that *computes* drift so that the two places
-/// that raise the code -- the CLI's D17 gate on the staging commands, and
+/// that raise the code -- the CLI drift gate on staging commands, and
 /// [`crate::reconcile::reconcile_change`]'s own first gate -- can never
 /// drift apart from one another.
 pub const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
 
-/// The project's overall state, per spec §6.
+/// The project's overall state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectStateKind {
     /// Nothing has drifted and no change is open.
     Coherent,
     /// At least one change is open and every current drift is claimed by
-    /// one of them (D15) -- the paths it owns are expected to differ from
+    /// one of them -- the paths it owns are expected to differ from
     /// what was sealed, so that is not drift, it is the change in
     /// progress.
     Changing,
@@ -67,7 +67,7 @@ pub enum DriftKind {
     Untracked,
 }
 
-/// One open change, as reported in a [`StateReport`] (Annex B).
+/// One open change, as reported in a [`StateReport`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChangeSummary {
     pub id: ChangeId,
@@ -80,7 +80,7 @@ pub struct ChangeSummary {
 pub struct StateReport {
     pub state: ProjectStateKind,
     /// Sorted by path. Never includes a path claimed by an open change
-    /// (D15) -- see [`compute_state`].
+    /// -- see [`compute_state`].
     pub drift: Vec<DriftEntry>,
     pub open_changes: Vec<ChangeSummary>,
 }
@@ -133,7 +133,7 @@ pub fn drift_token(
 }
 
 /// Compares `lock` against the live working tree, by OID only, then folds
-/// in `open_changes` per D15's claim rule.
+/// in `open_changes` while tolerating unreadable change files.
 ///
 /// Re-hashes, in one [`GitRepo::blob_oids`] batch, the union of the
 /// workspace's current [`Workspace::spec_files`] and every path `lock.spec`
@@ -144,14 +144,14 @@ pub fn drift_token(
 /// - A sealed path present with a different OID is [`DriftKind::Modified`].
 /// - A *current* spec file not present in `lock.spec` is
 ///   [`DriftKind::Untracked`].
-/// - A code file not in `lock.code` is never drift: unlinked code is free in
-///   M1 -- reconciling it against `telos.toml`'s globs is rule 5, an M2
-///   reconcile-time concern, not checked here.
+/// - A code file not in `lock.code` is never drift: reconciling unlinked code
+///   against `telos.toml`'s globs is a reconcile-time concern, not checked
+///   here.
 ///
 /// That raw drift is then filtered: a path claimed by *any* entry of
-/// `open_changes` is dropped, because the change owns it (D5) -- what looks
+/// `open_changes` is dropped, because the change owns it -- what looks
 /// like drift there is really the change in progress, not damage. `state`
-/// follows the priority D15 sets: unclaimed drift still present wins
+/// follows this priority: unclaimed drift still present wins
 /// (`Drifted`), else at least one open change wins (`Changing`), else
 /// `Coherent`.
 ///
@@ -213,7 +213,7 @@ pub fn compute_state(
         }
     }
 
-    // D5: a path an open change claims is not drift, the change owns it.
+    // A path claimed by an open change is work in progress, not drift.
     let claimed: BTreeSet<&RepoPath> = open_changes.iter().flat_map(|c| c.claims.iter()).collect();
     drift.retain(|entry| !claimed.contains(&entry.path));
 
@@ -244,8 +244,8 @@ pub fn compute_state(
 }
 
 /// A snapshot of how much of the spec has scenarios proved and intents
-/// implemented -- the `coverage` object of the `status --json` schema
-/// (Annex B). Every count is exact, computed directly off `model`.
+/// implemented -- the `coverage` object of the `status --json` schema. Every
+/// count is exact, computed directly from `model`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Coverage {
     pub notions: u32,

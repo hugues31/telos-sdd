@@ -1,12 +1,12 @@
-//! The witness protocol: `scn_NNNN` test discovery (D4), and the two
-//! verdicts M3 builds on top of the journal (D7) -- whether one scenario's
+//! The witness protocol: `scn_NNNN` test discovery, and the two
+//! verdicts built on top of the journal -- whether one scenario's
 //! red/green pair is still valid against the current bytes
 //! ([`witness_verdict`]), and which scenarios a change's post-model owes a
 //! witness to in the first place ([`required_witnesses`]).
 //!
 //! Both verdict functions are pure: neither touches the filesystem or git.
 //! [`witness_verdict`] is handed the journal it must read and the current
-//! OIDs it must compare against (the caller -- T5's reconcile gate -- is the
+//! OIDs it must compare against (the reconcile gate is the
 //! one that knows how to compute those); [`required_witnesses`] is handed
 //! the base and post spec state directly. [`find_test_for`] is the one
 //! function here that does I/O, since discovering a test file is
@@ -26,11 +26,10 @@ use crate::model::{
 };
 use crate::workspace::Workspace;
 
-/// Whether one scenario's witness is still trustworthy at reconcile time
-/// (D7). Read by reconcile's witness gate; the message
-/// [`WitnessVerdict::Sealed`] carries
-/// is the frozen wording of Annex F, minus the hint (which is fixed and
-/// belongs to the caller that turns this into a [`TelosError`]).
+/// Whether one scenario's witness is still trustworthy at reconcile time.
+/// Reconcile reads this verdict; [`WitnessVerdict::Sealed`] carries the
+/// stable error message, while the caller adds the fixed hint when converting
+/// it into a [`TelosError`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WitnessVerdict {
     /// A red witness at the current oid, followed by a green run at the
@@ -47,29 +46,28 @@ pub enum WitnessVerdict {
     Sealed(String),
 }
 
-/// `format!("scn_{:04}", id.0)` -- the D4 naming convention a scenario's
-/// test is discovered by. Grows past four digits rather than truncating,
+/// The `scn_NNNN` naming convention used to discover a scenario's test.
+/// Grows past four digits rather than truncating,
 /// matching the id types' own `Display` (`ids.rs`'s `entity_id!`).
 pub fn scenario_pattern(id: ScenarioId) -> String {
     format!("scn_{:04}", id.0)
 }
 
 /// Discovers the test file (and, when found by scanning, the test function)
-/// for one scenario (D4).
+/// for one scenario.
 ///
 /// `file` explicit wins outright: it must exist, and is scanned only to
 /// pick up a `name` if the pattern happens to appear in it -- its absence
 /// from an explicit file is not an error, since `--file` *is* the filter
-/// (Annex F names this "the whole file is the filter"). Without `file`,
-/// every path [`glob_matches`] returns for `[tests] globs` is scanned for
+/// ("the whole file is the filter"). Without `file`, every path
+/// [`glob_matches`] returns for `[tests] globs` is scanned for
 /// the scenario's `scn_NNNN` pattern as a raw byte substring (CRLF-
 /// insensitive by construction, since the pattern itself holds no `\r` or
 /// `\n`) that starts an identifier -- `descn_0001x` does not count, only an
 /// occurrence not itself preceded by an `[A-Za-z0-9_]` byte does (see
-/// [`identifier_at`]); zero or more than one match is `TelosTestNotFound`,
-/// worded exactly as Annex F freezes it. Note that a configured runner is
-/// *not* checked here -- that gate belongs to the caller (`telos test`,
-/// T3).
+/// [`identifier_at`]); zero or more than one match is `TelosTestNotFound`
+/// with stable wording. A configured runner is *not* checked here -- that
+/// gate belongs to the caller (`telos test`).
 pub fn find_test_for(
     ws: &Workspace,
     id: ScenarioId,
@@ -158,8 +156,7 @@ fn is_identifier_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// The frozen `TELOS_TEST_NOT_FOUND` message and hint for zero matches
-/// (Annex F).
+/// The stable `TELOS_TEST_NOT_FOUND` message and hint for zero matches.
 fn no_match_error(pattern: &str) -> TelosError {
     TelosError::new(
         ErrorCode::TelosTestNotFound,
@@ -172,7 +169,7 @@ fn no_match_error(pattern: &str) -> TelosError {
 }
 
 /// The frozen `TELOS_TEST_NOT_FOUND` message and hint for more than one
-/// match (Annex F): the files are listed backtick-quoted, in the order
+/// match: the files are listed backtick-quoted, in the order
 /// [`glob_matches`] returned them (already sorted).
 fn multiple_match_error(pattern: &str, hits: &[(RepoPath, String)]) -> TelosError {
     let list: Vec<String> = hits.iter().map(|(path, _)| format!("`{path}`")).collect();
@@ -187,7 +184,7 @@ fn multiple_match_error(pattern: &str, hits: &[(RepoPath, String)]) -> TelosErro
 }
 
 /// Whether scenario `scenario`'s witness (all its runs, in journal order) is
-/// still valid against `current` (D7).
+/// still valid against `current`.
 ///
 /// The read is: find the *last* red run whose recorded oid still matches
 /// `current`'s oid for its test path (an absent path means the file is
@@ -259,7 +256,7 @@ pub fn witness_verdict(
     }
 }
 
-/// The frozen `TELOS_TEST_SEALED` message (Annex F), chosen by whether
+/// The frozen `TELOS_TEST_SEALED` message, chosen by whether
 /// `path` is still present in `current`: absent means the file is gone,
 /// present with a different oid means it changed.
 fn sealed_message(
@@ -274,7 +271,7 @@ fn sealed_message(
     }
 }
 
-/// Which scenarios a change's post-model owes a witness to (D7 scope).
+/// Which scenarios in a change's post-model require a witness.
 ///
 /// Only `add`/`edit intent` ops contribute, and only when the *post* status
 /// of the intent they target (read from `post`, the folded model) is

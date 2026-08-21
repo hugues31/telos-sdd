@@ -1,6 +1,6 @@
-//! The change store: filesystem operations over `telos/changes/*.tel`
-//! (Annex B), and [`open_change_infos`], the best-effort scan every
-//! claim-aware caller (`compute_state`, T5's `change` commands, T6's
+//! The change store: filesystem operations over `telos/changes/*.tel`, plus
+//! [`open_change_infos`], the best-effort scan every
+//! claim-aware caller (`compute_state`, the `change` commands, and
 //! `reconcile`) starts from.
 //!
 //! [`emit_change`] is the *only* writer of a change file's bytes -- see its
@@ -72,7 +72,7 @@ pub fn list_change_ids(ws: &Workspace) -> Result<Vec<ChangeId>, TelosError> {
 
 /// Reads and parses `telos/changes/<id>.tel`.
 ///
-/// A missing file is `TelosReferenceUnknown`, «unknown change `CHG-9999`» --
+/// A missing file is `TelosReferenceUnknown`, “unknown change `CHG-9999`” --
 /// with a `closest is CHG-NNNN` hint when at least one other change exists,
 /// by numeric distance to `id`, the same policy `show`/`impact` use for an
 /// unknown intent id. A present but unparsable file is reported through
@@ -100,7 +100,7 @@ pub fn write_change(ws: &Workspace, c: &Change) -> Result<(), TelosError> {
 }
 
 /// Deletes `telos/changes/<id>.tel` -- the terminal step of both a
-/// reconcile and an abandon (D16): both outcomes are "the file is gone",
+/// reconcile and an abandon: both outcomes are "the file is gone",
 /// never a stored status. A missing file is the same `TelosReferenceUnknown`
 /// [`read_change`] reports: deleting an id the store does not hold is a
 /// caller bug, not a no-op to swallow silently.
@@ -118,7 +118,7 @@ pub fn delete_change(ws: &Workspace, id: ChangeId) -> Result<(), TelosError> {
 ///
 /// The two halves are deliberately *not* the same length. `infos` covers
 /// every id [`list_change_ids`] returned, a file that failed to parse
-/// included (as the D15 stub -- see [`open_change_infos`]); `parsed` holds
+/// included (as a repairable stub -- see [`open_change_infos`]); `parsed` holds
 /// only the changes that really parsed, so a caller reading ops or a journal
 /// never has to wonder whether what it is holding is trustworthy. Both are
 /// in ascending id order, and `infos[i]` describes `parsed[i]` only while no
@@ -129,7 +129,7 @@ pub struct ChangeScan {
     pub infos: Vec<OpenChangeInfo>,
 }
 
-/// Reads and summarizes the whole change store in one pass (D14).
+/// Reads and summarizes the whole change store in one pass.
 ///
 /// Every caller that needs both the parsed changes and their claim-aware
 /// summaries -- the CLI's `Project`, above all -- goes through this rather
@@ -164,7 +164,7 @@ pub fn scan_changes(ws: &Workspace) -> Result<ChangeScan, TelosError> {
     Ok(ChangeScan { parsed, infos })
 }
 
-/// Every open change, as [`OpenChangeInfo`] -- best-effort, per D15.
+/// Every open change as [`OpenChangeInfo`], scanned best-effort.
 ///
 /// The `infos` half of [`scan_changes`], for the callers that need nothing
 /// else (`compute_state`, `change list`).
@@ -182,7 +182,7 @@ pub fn scan_changes(ws: &Workspace) -> Result<ChangeScan, TelosError> {
 /// "Fails to parse" is read broadly here, on purpose: bytes that are not
 /// valid UTF-8 (a truncated write, binary corruption) can never reach
 /// [`parse_change_file`] (it takes `&str`) and are exactly the kind of
-/// on-disk damage D15 exists to survive, so they get the same repair
+/// on-disk damage this scan exists to survive, so they get the same repair
 /// obligation as a syntax error rather than aborting the whole scan -- the
 /// same is true of any other I/O failure reading an individual file (a
 /// permission error, say) once its id has already been confirmed present
@@ -239,7 +239,7 @@ fn read_scanned(ws: &Workspace, id: ChangeId) -> Scanned {
 
 /// The best-effort [`OpenChangeInfo`] for a change file that could not be
 /// read as canonical `.tel` source at all -- invalid UTF-8, a parse
-/// failure, or any other per-file I/O error -- per D15.
+/// failure, or any other per-file I/O error.
 fn unparseable_info(id: ChangeId) -> OpenChangeInfo {
     OpenChangeInfo {
         id,
@@ -270,7 +270,7 @@ fn io_err(path: &Path, e: std::io::Error) -> TelosError {
     )
 }
 
-/// «unknown change `CHG-9999`», with a numeric-nearest-id hint when at
+/// “unknown change `CHG-9999`”, with a numeric-nearest-id hint when at
 /// least one other change exists -- the same shape and algorithm as the
 /// CLI's `nearest_id` for an unknown intent/scenario/constraint id, kept
 /// here rather than shared because it is `telos-core` that owns the change

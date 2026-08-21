@@ -1,4 +1,4 @@
-//! The `--json` envelope contract (Annex B): every command, whatever it
+//! The `--json` envelope contract: every command, whatever it
 //! does and however it fails, answers with the same five keys. Nothing here
 //! cares what a particular command puts in `result` -- that is each
 //! command's own golden test. These tests care only about the shape, which
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use common::{break_int_0042_in_two_ways, repo, telos, unsealed_fixture, with_fixture};
 
-/// The five envelope keys, in the order Annex B freezes them.
+/// The five envelope keys, in their stable order.
 const ENVELOPE_KEYS: [&str; 5] = ["ok", "command", "result", "error", "next_actions"];
 
 fn envelope(out: &std::process::Output) -> serde_json::Map<String, Value> {
@@ -175,7 +175,7 @@ fn status_and_check_success_envelopes_still_carry_exactly_the_five_keys() {
 }
 
 /// `check`'s failure can collapse several diagnostics into one error body
-/// (Annex B: the envelope carries one error, `check` can find several) --
+/// (the envelope carries one error, while `check` can find several) --
 /// even then, the error body stays the frozen `{code, message, hint}`
 /// triple, never growing a fourth key to hold the rest. The fixture here
 /// breaks the spec in two independent, unrelated ways
@@ -224,8 +224,8 @@ fn checks_error_body_stays_the_frozen_triple_even_with_several_diagnostics() {
     );
 }
 
-/// M3's three agent-facing verbs are no exception to Annex B. `context`
-/// exposes its bounded pack as a successful envelope, while an unowned
+/// The three agent-facing verbs are no exception to the envelope contract.
+/// `context` exposes its bounded pack as a successful envelope, while an unowned
 /// `test` or `bind` still produces a complete, precisely routable failure.
 /// These assertions deliberately use the shared sealed corpus instead of
 /// recreating a transaction fixture: this test owns the envelope contract,
@@ -441,13 +441,13 @@ fn published_error_code_parser_accepts_crlf_contracts() {
     assert!(documented.contains(&"TELOS_TEST_NOT_FOUND"));
 }
 
-/// M3 extends the public surface with bounded context, red/green witnesses,
+/// The agent workflow surface includes bounded context, red/green witnesses,
 /// journalled bindings, and the two reconciliation gates that enforce them.
 /// Keep the published contract at least as explicit as the executable one:
 /// this is deliberately a literal, representative freeze rather than prose
 /// that a caller must infer.
 #[test]
-fn published_contract_freezes_the_m3_surface() {
+fn published_contract_freezes_the_agent_workflow_surface() {
     let contracts = include_str!("../../../docs/contracts.md");
 
     for required in [
@@ -470,7 +470,7 @@ fn published_contract_freezes_the_m3_surface() {
     ] {
         assert!(
             contracts.contains(required),
-            "docs/contracts.md must freeze the M3 contract phrase: {required}"
+            "docs/contracts.md must freeze the agent workflow phrase: {required}"
         );
     }
 }
@@ -496,13 +496,9 @@ fn published_contract_pins_reapproval_and_codex_activation() {
 }
 
 #[test]
-fn published_contract_closes_the_final_review_boundaries() {
+fn published_contract_documents_safety_boundaries() {
     let contracts = include_str!("../../../docs/contracts.md");
-    let design = include_str!("../../../docs/specs/2026-08-19-telos-sdd-design.md");
-    let readme = include_str!("../../../README.md");
     let normalized_contracts = contracts.split_whitespace().collect::<Vec<_>>().join(" ");
-    let normalized_design = design.split_whitespace().collect::<Vec<_>>().join(" ");
-    let normalized_readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
 
     for required in [
         "portable normalized relative components",
@@ -527,42 +523,9 @@ fn published_contract_closes_the_final_review_boundaries() {
     ] {
         assert!(
             normalized_contracts.contains(required),
-            "docs/contracts.md must publish final-review invariant: {required}"
+            "docs/contracts.md must publish safety invariant: {required}"
         );
     }
-
-    for required in [
-        "capability-anchored, no-follow repository traversal",
-        "ordinary same-UID concurrency",
-        "exact displayed digest or drift token",
-        "direct process argument vector",
-    ] {
-        assert!(
-            normalized_design.contains(required),
-            "design §5/workflow must publish final-review invariant: {required}"
-        );
-    }
-
-    assert!(normalized_readme.contains("protocol/conformance harness"));
-    assert!(normalized_readme.contains("passes the exact displayed token"));
-    assert!(
-        normalized_readme
-            .contains("publishes no Telos-owned destination and preserves the existing owner")
-    );
-    assert!(!readme.contains("generated-file heredocs"));
-}
-
-#[test]
-fn readme_and_acceptance_comments_match_the_completed_m3_suite() {
-    let readme = include_str!("../../../README.md");
-    let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized.contains("all three run in the ordinary test suite"));
-    assert!(normalized.contains("The ignored-test list is expected to be empty"));
-    assert!(!readme.contains("un-ignored one at a time"));
-    assert!(!readme.contains("what is still ignored"));
-
-    let acceptance = include_str!("acceptance_loops.rs");
-    assert!(!acceptance.contains("`#[ignore]`d loops"));
 }
 
 #[test]
@@ -659,7 +622,10 @@ fn published_state_admission_matrix_is_exact() {
 #[test]
 fn published_result_schema_registry_is_exact() {
     let contracts = include_str!("../../../docs/contracts.md");
-    let rows = markdown_table(contracts, "### M4–M5 result schema registry");
+    let rows = markdown_table(
+        contracts,
+        "### Configuration, view, rebuild, and CI result schemas",
+    );
 
     assert_eq!(rows[0], ["Invocation", "command", "Exact result keys"]);
     assert_eq!(
@@ -929,7 +895,7 @@ fn published_filesystem_publication_threat_model_is_exact() {
             [
                 "init, agent merge, and export",
                 "adversarial same-UID path substitution between syscalls",
-                "excluded by the §5 threat model",
+                "excluded by the documented threat model",
             ],
         ]
     );

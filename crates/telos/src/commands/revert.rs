@@ -1,4 +1,4 @@
-//! `telos revert`: the exit from drift that keeps the seal (spec §6, D7).
+//! `telos revert`: leave drift by restoring the bytes recorded in the seal.
 //!
 //! The mirror image of [`crate::commands::adopt`]. Where `adopt` decides the
 //! working tree is right and the seal has to catch up, `revert` decides the
@@ -18,7 +18,7 @@
 //!   than silently restoring nothing.
 //!
 //! Like `adopt`, it acts on *unclaimed* drift only: a path an open change
-//! claims is that change in progress (D5), and throwing it away is
+//! claims is that change in progress, and throwing it away is
 //! `change abandon`'s business, not this command's.
 
 use serde_json::json;

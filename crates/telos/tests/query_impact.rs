@@ -335,13 +335,10 @@ fn query_notion_human_mode_prints_bare_names() {
 /// distance 2; the qualified proof of SCN-0107 sits one hop further out, at
 /// distance 3.
 ///
-/// The task brief's illustrative golden for this exact query omits the
-/// `SCN-0091` entry; the five-entry list here was verified against the
-/// running binary and against `relation_graph`/`reverse_closure`'s own
-/// logic (every intent's nested scenario gets a `verifies` edge straight to
-/// it, so INT-0017's own SCN-0091 is a distance-1 neighbor like INT-0042
-/// is) rather than adjusted to match the brief silently -- see the task-15
-/// report for the full trace.
+/// The five-entry list is verified against `relation_graph` and
+/// `reverse_closure`: every intent's nested scenario gets a `verifies` edge
+/// straight to it, so INT-0017's own SCN-0091 is a distance-1 neighbor like
+/// INT-0042.
 #[test]
 fn impact_int_0017_matches_the_exact_reverse_closure() {
     let tmp = with_fixture();

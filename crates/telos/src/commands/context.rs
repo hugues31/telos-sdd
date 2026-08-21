@@ -1,5 +1,5 @@
-//! `telos context <INT-id | SCN-id>`: the bounded work pack of one intent
-//! (spec §7.3, D10) -- the unit an agent is fed, never the whole spec.
+//! `telos context <INT-id | SCN-id>`: the bounded work pack for one intent --
+//! the unit an agent receives, never the whole spec.
 //!
 //! The pack is the intent's own canonical block plus everything an
 //! implementer needs to act on it without walking the graph by hand: its
@@ -8,9 +8,9 @@
 //! ones and any scoped to it), its own bindings, and its 1-hop
 //! intent-to-intent neighbours. A scenario argument resolves to the intent
 //! that owns it -- there is no scenario-shaped pack, only an intent-shaped
-//! one (Annex C).
+//! one.
 //!
-//! # Which model the pack is read from (D10)
+//! # Which model the pack is read from
 //!
 //! `context` never requires an open change -- most calls are against the
 //! coherent, sealed project, and the disk model answers those directly. But
@@ -21,9 +21,9 @@
 //! first and only falls back to a change's overlay when [`owner_of`] finds
 //! one: the open change whose delta adds or edits the resolved intent, the
 //! same ownership rule `telos bind` and `telos test` already apply one level
-//! down (D5). When it does, the pack is built on that change's *post*
+//! down. When it does, the pack is built on that change's *post*
 //! model -- ops replayed idempotently, the journal folded into bindings,
-//! then the semantic pass -- exactly what `reconcile` itself builds (D2),
+//! then the semantic pass -- exactly what `reconcile` itself builds,
 //! so a pack an implementer reads mid-change never disagrees with what
 //! reconciling it would seal.
 //!
@@ -120,8 +120,8 @@ fn resolved_pack(
     }
 }
 
-/// «`context` applies to intents and scenarios» -- the frozen refusal for a
-/// notion or a change argument (D10). Unlike `show`/`impact`, `context` has
+/// “`context` applies to intents and scenarios” -- the frozen refusal for a
+/// notion or a change argument. Unlike `show`/`impact`, `context` has
 /// exactly two shapes of target, so a third kind of well-formed reference is
 /// not "not found", it is out of scope; there is nothing to suggest instead.
 fn not_applicable() -> TelosError {
@@ -256,7 +256,7 @@ fn unknown_scenario(project: &Project, disk: &TelosModel, id: ScenarioId) -> Tel
     unknown("scenario", id, hint)
 }
 
-// --- which model the pack is built on (D10) ---------------------------------
+// --- which model the pack is built on ---------------------------------
 
 /// The change that controls an intent's effective existence. A final
 /// `RemoveIntent` masks the disk copy just as an `AddIntent` or `EditIntent`
@@ -286,7 +286,7 @@ fn touched_intent_ids(change: &Change) -> BTreeSet<IntentId> {
 
 /// The change's post model: its ops replayed idempotently over the sealed
 /// base, its journal folded into bindings, then the semantic pass -- the
-/// exact construction `reconcile` itself builds (D2), so a pack read
+/// exact construction `reconcile` itself builds, so a pack read
 /// mid-change never disagrees with what reconciling it would seal.
 fn post_model(project: &Project, change: &Change) -> Result<TelosModel, TelosError> {
     let base = parse_base(&project.ws).map_err(diagnostics_to_error)?;
@@ -325,7 +325,7 @@ struct NeighborEntry {
     direction: &'static str,
 }
 
-/// The whole pack of Annex C, already sorted and filtered per its rules --
+/// The complete context pack, already sorted and filtered --
 /// `to_json` and `to_human` each render the same data, once computed here.
 pub(crate) struct Pack {
     id: IntentId,
@@ -366,7 +366,7 @@ pub(crate) fn build_pack(model: &TelosModel, intent: &Intent, change: Option<Cha
     }
 }
 
-/// Scenarios in the intent's own order (Annex C: not sorted, since an
+/// Scenarios in the intent's own order (not sorted, since an
 /// `Intent`'s own `scenarios` already are, by id). `proved` is whether the
 /// pack's own model -- journal folded, for an overlay pack -- holds a
 /// `Proves` binding for it.
@@ -386,7 +386,7 @@ fn scenario_entries(model: &TelosModel, intent: &Intent) -> Vec<ScenarioEntry> {
 }
 
 /// The notions the intent's statement or any of its scenarios use, sorted
-/// by name (Annex C) -- read straight off the graph's derived `uses` edges
+/// by name -- read straight off the graph's derived `uses` edges
 /// rather than re-walking the statement/scenario notion-collectors
 /// `overlay.rs`'s referrer scan does: the semantic pass already built
 /// exactly this set, once, for both the intent's own node and each
@@ -423,7 +423,7 @@ fn collect_uses(model: &TelosModel, node: &NodeRef, out: &mut BTreeSet<NotionNam
 }
 
 /// The intent's 1-hop intent-to-intent neighbours over `refines`/`requires`/
-/// `excludes`, both directions, sorted by `(relation, id)` (Annex C).
+/// `excludes`, both directions, sorted by `(relation, id)`.
 ///
 /// `constrains`, `uses`, `implements` and `proves` edges also touch this
 /// node in the graph, which is exactly why this filters by relation rather
@@ -506,7 +506,7 @@ pub(crate) fn to_json(pack: &Pack) -> Value {
 
 /// Readable sections, terse, reusing the same canonical blocks `show`
 /// prints byte for byte: the intent, which change (if any) the pack came
-/// from, then one heading per Annex C list.
+/// from, then one heading per list.
 fn to_human(pack: &Pack) -> String {
     let mut lines = vec![pack.canonical.clone()];
     lines.push(match pack.change {

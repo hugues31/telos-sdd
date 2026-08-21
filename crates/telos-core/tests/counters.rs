@@ -1,7 +1,7 @@
 //! `counters.rs`, end to end against a copy of the `billing` corpus and
 //! real filesystem I/O: `read_counters`/`write_counters`'s exact bytes and
 //! roundtrip, `floors` over the real corpus, and the corpus-derived `Alloc`
-//! sequence the task brief pins.
+//! sequence derived from the corpus.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn intent_id_parses_from_its_display_form() {
         // `Result<_, TelosError>` isn't `PartialEq` (`TelosError` deliberately
-        // has no `PartialEq`, per Task 2's frozen `error.rs` derive list), so
+        // has no `PartialEq`, by design), so
         // the `Ok` side is compared directly rather than the whole `Result`.
         assert_eq!("INT-0042".parse::<IntentId>().unwrap(), IntentId(42));
     }

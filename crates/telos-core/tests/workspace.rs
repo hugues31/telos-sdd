@@ -1,5 +1,5 @@
 //! `Workspace` discovery and model loading, end to end against a copy of
-//! the Annex D corpus in a tempdir -- so every test exercises real
+//! the Billing corpus in a tempdir -- so every test exercises real
 //! filesystem I/O, not an in-memory stand-in.
 
 use std::fs;

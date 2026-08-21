@@ -1,5 +1,5 @@
 //! Git blob OIDs: the bridge between the working tree and content-addressed
-//! sealing (spec §5).
+//! sealing.
 //!
 //! [`GitRepo::blob_oids`] is deliberately a *single* `git hash-object
 //! --stdin-paths` process: no `-w` (it never writes objects -- read only),
@@ -15,8 +15,8 @@
 //! symlinked route to the same place -- e.g. macOS's `/tmp` -- still
 //! compares equal). The check itself lives here, but the *calling* is done
 //! by [`crate::lock::seal`] and [`crate::state::compute_state`] -- every
-//! command built on either (`init`, `status`, `check --sealed`, and, from
-//! M2, the rest) inherits it from there rather than needing to remember to
+//! command built on either (`init`, `status`, `check --sealed`, and the
+//! transaction commands) inherits it from there rather than needing to
 //! call it itself. Without it, a `Workspace` and a `GitRepo` discovered
 //! independently from `cwd` (as `status` and `check --sealed` do) can
 //! silently name two different repositories -- a nested git repo under an

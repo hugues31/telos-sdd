@@ -1,4 +1,4 @@
-//! Frozen JSON payload schemas (Annex D): the `stdin` shape `add`/`edit`
+//! Frozen JSON payload schemas: the `stdin` shape `add`/`edit`
 //! read, translated into the typed model of [`crate::model`].
 //!
 //! This module sits at the same altitude as [`crate::syntax`]'s parser --
@@ -10,16 +10,16 @@
 //! its notion resolved for the same reason) and leaves referential
 //! integrity that does not gate typing -- whether a `refines` id exists,
 //! whether an event notion really has kind `event` -- to the semantic pass
-//! that runs once the whole model is assembled (T7 and later).
+//! that runs once the whole model is assembled.
 //!
-//! Two exceptions to that line are spelled out by Annex D itself, because
+//! Two exceptions are handled here because
 //! resolving a `fields` literal is impossible without them: an unknown
 //! notion named in `given`/`when`, and an unknown attribute named in
 //! `fields`, are both reported here as `TELOS_REFERENCE_UNKNOWN` with a
 //! `closest`-match suggestion.
 //!
 //! `add`/`edit` share one schema per entity kind, differing only in which
-//! keys are mandatory (Annex D: "edit ... mêmes clés, toutes optionnelles").
+//! keys are mandatory: edits accept the same keys, all optional.
 //! [`resolve`] captures that once: a key present in the JSON always wins, a
 //! key absent falls back to the base entity's current value (`edit`) or a
 //! per-field default (`add`), and a field with neither is a missing-field
@@ -69,14 +69,14 @@ const ATTR_TYPE_WORDS: [&str; 9] = [
     "string", "int", "decimal", "money", "bool", "date", "datetime", "enum", "ref",
 ];
 
-/// Builds a `Notion` from an `add notion` payload (Annex D).
+/// Builds a `Notion` from an `add notion` payload.
 pub fn notion_from_json(v: &Value) -> Result<Notion, TelosError> {
     let obj = as_object(v, "a notion payload")?;
     check_unknown_keys(obj, NOTION_KEYS, "notion")?;
     notion_from_obj(obj, None)
 }
 
-/// Applies an `edit notion` payload on top of `base` (Annex D): every key is
+/// Applies an `edit notion` payload on top of `base`: every key is
 /// optional, and a key present replaces that field wholesale.
 pub fn patch_notion(base: &Notion, v: &Value) -> Result<Notion, TelosError> {
     let obj = as_object(v, "a notion payload")?;
@@ -206,10 +206,10 @@ const INTENT_STATUS_WORDS: [(&str, IntentStatus); 3] = [
     ("deprecated", IntentStatus::Deprecated),
 ];
 
-/// Builds an `(Intent, Vec<ScenarioId>)` from an `add intent` payload
-/// (Annex D): the intent id and every scenario id are freshly allocated
-/// from `alloc`, since an `add` payload never carries one (Annex D, general
-/// rule). `notions` resolves the attribute types `given`/`when` field
+/// Builds an `(Intent, Vec<ScenarioId>)` from an `add intent` payload. The
+/// intent id and every scenario id are freshly allocated
+/// from `alloc`, since an `add` payload never carries one. `notions` resolves
+/// the attribute types `given`/`when` field
 /// literals are typed against.
 pub fn intent_from_json(
     v: &Value,
@@ -253,7 +253,7 @@ pub fn intent_from_json(
     Ok((intent, allocated))
 }
 
-/// Applies an `edit intent` payload on top of `base` (Annex D): every key is
+/// Applies an `edit intent` payload on top of `base`: every key is
 /// optional and replaces its field wholesale when present; `scenarios`,
 /// when present, replaces the whole list -- entries with an `id` replace
 /// the scenario of that id, entries without one are newly allocated, and
@@ -429,7 +429,7 @@ fn statement_from_json(v: &Value) -> Result<Statement, TelosError> {
 }
 
 /// The `while` expression of a `state-driven` statement must parse to
-/// exactly `Notion.attr == literal` (Annex D): any other shape -- a
+/// exactly `Notion.attr == literal`: any other shape -- a
 /// different operator, a bare literal on the left, `and`/`or`/`not` -- is a
 /// clear, dedicated error rather than a silent `_ => unreachable` mismatch.
 fn state_driven_shape(expr: Expr) -> Result<(AttrRef, Literal), TelosError> {
@@ -449,7 +449,7 @@ fn action_from_json(obj: &Map<String, Value>) -> Result<Action, TelosError> {
     parse_action(as_str(required(obj, "action", "statement")?, "action")?)
 }
 
-/// Parses a bare action string (Annex D): `set <Notion>.<attr> = <literal>`
+/// Parses a bare action string: `set <Notion>.<attr> = <literal>`
 /// when it starts with `"set "`, a free clause otherwise. See the module
 /// doc comment for why this rebuilds the grammar instead of reusing
 /// `syntax::parser::P::action`.
@@ -600,8 +600,7 @@ fn scenario_fields_from_json(
 }
 
 /// A `given`/`when` step: `{"notion": "Invoice", "fields": {...}}`. The
-/// notion must be known (Annex D: unknown notion is
-/// `TELOS_REFERENCE_UNKNOWN` with a suggestion) since resolving each
+/// notion must be known since resolving each
 /// field's literal needs its declared attribute type.
 fn instance_step_from_json(
     v: &Value,
@@ -640,8 +639,8 @@ fn instance_step_from_json(
     })
 }
 
-/// Types one `fields` entry against the target attribute's declared type
-/// (Annex D). Structural typing only -- membership of an `enum` symbol
+/// Types one `fields` entry against the target attribute's declared type.
+/// Structural typing only -- membership of an `enum` symbol
 /// among its declared values, the `^\d+\.\d{2} [A-Z]{3}$` shape of a
 /// `money` amount -- is the semantic pass's job, once the whole model
 /// exists to check it against; this boundary only ever needs to decide,
@@ -674,7 +673,7 @@ fn literal_from_field_json(
         AttrType::Enum(_) => Ok(Literal::Symbol(sp(as_str(v, field.as_str())?.to_string()))),
         AttrType::Ref(_) => Err(TelosError::new(
             ErrorCode::TelosParseError,
-            "ref attributes cannot be set from payloads in M2".to_string(),
+            "ref attributes cannot be set from payloads".to_string(),
         )),
     }
 }
@@ -711,7 +710,7 @@ const CONSTRAINT_KIND_WORDS: [(&str, ConstraintKind); 5] = [
     ("convention", ConstraintKind::Convention),
 ];
 
-/// Builds a `Constraint` from an `add constraint` payload (Annex D),
+/// Builds a `Constraint` from an `add constraint` payload,
 /// allocating its id from `alloc`.
 pub fn constraint_from_json(v: &Value, alloc: &mut Alloc) -> Result<Constraint, TelosError> {
     let obj = as_object(v, "a constraint payload")?;
@@ -737,7 +736,7 @@ pub fn constraint_from_json(v: &Value, alloc: &mut Alloc) -> Result<Constraint, 
     })
 }
 
-/// Applies an `edit constraint` payload on top of `base` (Annex D): every
+/// Applies an `edit constraint` payload on top of `base`: every
 /// key is optional and replaces its field wholesale when present;
 /// `"check": null` explicitly clears it, while an absent `check` leaves it
 /// untouched.
@@ -831,8 +830,8 @@ fn scope_from_json(v: &Value) -> Result<Scope, TelosError> {
 /// A "shape" error: the payload does not match the schema at all (wrong
 /// JSON type for a key, a required key missing, `rule` naming neither
 /// `text` nor `expr`...). Always `TELOS_PARSE_ERROR`, prefixed `"payload:
-/// "` per Annex B -- distinct from the handful of exact messages Annex D
-/// freezes verbatim (unknown attribute type, the decimal-as-number refusal,
+/// "` per the public schema -- distinct from the handful of exact messages
+/// frozen for unknown attribute types, the decimal-as-number refusal,
 /// a malformed `set` action, an unknown key), none of which carry this
 /// prefix.
 fn shape_err(msg: impl Into<String>) -> TelosError {
@@ -846,7 +845,7 @@ fn missing_field_err(key: &str, kind: &str) -> TelosError {
     shape_err(format!("missing required field `{key}` in {kind} payload"))
 }
 
-/// The one exact wording Annex D freezes for an unknown key: no `"payload:
+/// The exact wording for an unknown key: no `"payload:
 /// "` prefix, `{kind}` names the payload ("notion", "intent", "scenario"...).
 fn unknown_key_err(key: &str, kind: &str) -> TelosError {
     TelosError::new(
@@ -856,9 +855,8 @@ fn unknown_key_err(key: &str, kind: &str) -> TelosError {
 }
 
 /// `unknown {noun} \`{word}\`; expected one of {options}` -- the shape
-/// Annex D's own attribute-type message freezes, reused for every other
-/// closed-set field (notion kind, intent status, constraint kind, statement
-/// template).
+/// used for attribute-type errors and every other closed-set field (notion
+/// kind, intent status, constraint kind, statement template).
 fn closed_set_err(noun: &str, word: &str, options: &[&str]) -> TelosError {
     TelosError::new(
         ErrorCode::TelosParseError,
@@ -1020,7 +1018,7 @@ mod tests {
     // --- notion_from_json ----------------------------------------------
 
     #[test]
-    fn notion_from_json_parses_the_full_annex_d_example() {
+    fn notion_from_json_parses_the_full_payload_schema_example() {
         let json = serde_json::json!({
             "name": "Invoice", "kind": "entity",
             "def": "A bill issued to a Customer for delivered work.",
@@ -1535,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn given_field_ref_attribute_is_refused_in_m2() {
+    fn given_field_ref_attribute_is_refused() {
         let mut notions = BTreeMap::new();
         notions.insert(
             name("Invoice"),
@@ -1552,10 +1550,7 @@ mod tests {
         );
         let json = serde_json::json!({"notion": "Invoice", "fields": {"customer": "Customer/1"}});
         let err = instance_step_from_json(&json, &notions).unwrap_err();
-        assert_eq!(
-            err.message,
-            "ref attributes cannot be set from payloads in M2"
-        );
+        assert_eq!(err.message, "ref attributes cannot be set from payloads");
     }
 
     // --- action -----------------------------------------------------------
@@ -1704,7 +1699,7 @@ mod tests {
     // --- constraint_from_json / patch_constraint --------------------------
 
     #[test]
-    fn constraint_from_json_parses_the_annex_d_example() {
+    fn constraint_from_json_parses_the_payload_schema_example() {
         let mut alloc = Alloc::new(
             Counters::default(),
             Counters {

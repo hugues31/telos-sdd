@@ -20,7 +20,7 @@ pub struct Sp<T> {
 impl<T: Serialize> Serialize for Sp<T> {
     /// Serializes as the bare `node`, dropping `span`: a `Span` is parse-time
     /// position metadata for diagnostics, not part of a node's semantic
-    /// (JSON) shape. This lets model types (Annex B `model/*.rs`) that wrap
+    /// (JSON) shape. This lets model types that wrap
     /// referential leaves in `Sp<T>` derive `Serialize` in turn.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

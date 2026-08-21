@@ -30,6 +30,276 @@ const CONSTRAINT: &str = "CON-0003";
 const CONSTRAINT_CHECK: &str =
     "cargo test --test invoice_issued domain_does_not_import_adapter_modules -- --exact";
 
+// These bytes model an external implementer. They deliberately live in the
+// conformance harness, never in the public spec-only demo tree.
+const APPLICATION_MANIFEST: &str = r#"[package]
+name = "billing-rebuild"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+syn = { version = "=3.0.3", features = ["full", "visit"] }
+"#;
+
+const RED_SOURCE: &str = "// The scenario test must fail before the first implementation exists.\n";
+
+const INVOICE_ISSUED_TEST: &str = r#"use std::fs;
+use std::path::{Path, PathBuf};
+
+use billing_rebuild::{Invoice, InvoiceState};
+use syn::visit::Visit;
+use syn::{ItemUse, UseTree};
+
+#[test]
+fn scn_0091_new_invoice_is_open() {
+    let invoice = Invoice::issued_to("ACME", 12_000);
+    assert_eq!(invoice.state(), InvoiceState::Open);
+}
+
+fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.expect("read source entry").path();
+        if path.is_dir() {
+            rust_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn is_adapter_path(path: &[String]) -> bool {
+    path.first().is_some_and(|segment| segment == "adapters")
+        || path.windows(2).any(|segments| {
+            matches!(segments[0].as_str(), "crate" | "self" | "super")
+                && segments[1] == "adapters"
+        })
+}
+
+fn imports_adapters(tree: &UseTree, path: &mut Vec<String>) -> bool {
+    match tree {
+        UseTree::Path(node) => {
+            path.push(node.ident.to_string());
+            let forbidden = is_adapter_path(path) || imports_adapters(&node.tree, path);
+            path.pop();
+            forbidden
+        }
+        UseTree::Name(node) => {
+            path.push(node.ident.to_string());
+            let forbidden = is_adapter_path(path);
+            path.pop();
+            forbidden
+        }
+        UseTree::Rename(node) => {
+            path.push(node.ident.to_string());
+            let forbidden = is_adapter_path(path);
+            path.pop();
+            forbidden
+        }
+        UseTree::Glob(_) => is_adapter_path(path),
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|tree| imports_adapters(tree, path)),
+    }
+}
+
+#[derive(Default)]
+struct LayerVisitor {
+    adapter_imports: usize,
+}
+
+impl<'ast> Visit<'ast> for LayerVisitor {
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        if imports_adapters(&item.tree, &mut Vec::new()) {
+            self.adapter_imports += 1;
+        }
+    }
+}
+
+#[test]
+fn domain_does_not_import_adapter_modules() {
+    let mut files = Vec::new();
+    rust_files(Path::new("src"), &mut files);
+    files.sort();
+    for path in files {
+        let source = fs::read_to_string(&path).expect("read domain source");
+        let syntax = syn::parse_file(&source).expect("parse domain source");
+        let mut visitor = LayerVisitor::default();
+        visitor.visit_file(&syntax);
+        assert_eq!(
+            visitor.adapter_imports,
+            0,
+            "{} imports the adapters layer",
+            path.display()
+        );
+    }
+}
+"#;
+
+const FIRST_IMPLEMENTATION: &str = r#"#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceState {
+    Open,
+    Settled,
+}
+
+pub mod adapters_v2 {
+    pub struct LedgerAdapterV2;
+}
+
+// Documentation only: `use crate::adapters::LedgerAdapter;` is forbidden.
+const FORBIDDEN_IMPORT_EXAMPLE: &str = "use crate::adapters::LedgerAdapter;";
+
+pub struct Invoice {
+    customer: String,
+    balance_cents: u64,
+    state: InvoiceState,
+}
+
+impl Invoice {
+    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
+        Self {
+            customer: customer.to_owned(),
+            balance_cents,
+            state: InvoiceState::Open,
+        }
+    }
+
+    pub fn state(&self) -> InvoiceState {
+        self.state
+    }
+
+    pub fn customer(&self) -> &str {
+        &self.customer
+    }
+
+    pub fn balance_cents(&self) -> u64 {
+        self.balance_cents
+    }
+
+    pub fn harmless_adapter_references(&self) -> (&'static str, &'static str) {
+        (
+            FORBIDDEN_IMPORT_EXAMPLE,
+            std::any::type_name::<adapters_v2::LedgerAdapterV2>(),
+        )
+    }
+}
+"#;
+
+const PAYMENT_RECEIVED_TEST: &str = r#"use billing_rebuild::{Invoice, InvoiceState};
+
+#[test]
+fn scn_0107_full_payment_settles_invoice() {
+    let mut invoice = Invoice::issued_to("ACME", 12_000);
+    invoice.receive_payment(12_000);
+    assert_eq!(invoice.state(), InvoiceState::Settled);
+}
+"#;
+
+const CONSTRAINT_VIOLATING_IMPLEMENTATION: &str = r#"pub mod adapters {
+    pub struct LedgerAdapter;
+    pub struct MailAdapter;
+}
+
+use crate :: adapters::LedgerAdapter;
+use crate::{adapters::MailAdapter};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceState {
+    Open,
+    Settled,
+}
+
+pub struct Invoice {
+    customer: String,
+    balance_cents: u64,
+    state: InvoiceState,
+}
+
+impl Invoice {
+    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
+        Self {
+            customer: customer.to_owned(),
+            balance_cents,
+            state: InvoiceState::Open,
+        }
+    }
+
+    pub fn receive_payment(&mut self, amount_cents: u64) {
+        if amount_cents >= self.balance_cents {
+            self.balance_cents = 0;
+            self.state = InvoiceState::Settled;
+        }
+    }
+
+    pub fn state(&self) -> InvoiceState {
+        self.state
+    }
+
+    pub fn customer(&self) -> &str {
+        &self.customer
+    }
+
+    pub fn balance_cents(&self) -> u64 {
+        self.balance_cents
+    }
+
+    pub fn adapter_type_names(&self) -> (&'static str, &'static str) {
+        (
+            std::any::type_name::<LedgerAdapter>(),
+            std::any::type_name::<MailAdapter>(),
+        )
+    }
+}
+"#;
+
+const FINAL_IMPLEMENTATION: &str = r#"#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceState {
+    Open,
+    Settled,
+}
+
+pub struct Invoice {
+    customer: String,
+    balance_cents: u64,
+    state: InvoiceState,
+}
+
+impl Invoice {
+    pub fn issued_to(customer: &str, balance_cents: u64) -> Self {
+        Self {
+            customer: customer.to_owned(),
+            balance_cents,
+            state: InvoiceState::Open,
+        }
+    }
+
+    pub fn receive_payment(&mut self, amount_cents: u64) {
+        if amount_cents >= self.balance_cents {
+            self.balance_cents = 0;
+            self.state = InvoiceState::Settled;
+        }
+    }
+
+    pub fn state(&self) -> InvoiceState {
+        self.state
+    }
+
+    pub fn customer(&self) -> &str {
+        &self.customer
+    }
+
+    pub fn balance_cents(&self) -> u64 {
+        self.balance_cents
+    }
+}
+"#;
+
 #[derive(Debug, PartialEq)]
 struct Observations {
     plan: Value,
@@ -55,16 +325,6 @@ fn documented_block(root: &Path, marker: &str, language: &str) -> String {
         .split_once(&end)
         .unwrap_or_else(|| panic!("README is missing executable `{marker}` end marker"));
     format!("{block}\n")
-}
-
-fn documented_heredoc(root: &Path, marker: &str, target: &str) -> String {
-    let command = documented_block(root, marker, "sh");
-    let prefix = format!("cat > {target} <<'TELOS_EOF'\n");
-    command
-        .strip_prefix(&prefix)
-        .and_then(|body| body.strip_suffix("TELOS_EOF\n"))
-        .unwrap_or_else(|| panic!("README `{marker}` is not an executable heredoc for `{target}`"))
-        .to_owned()
 }
 
 fn documented_json(root: &Path, marker: &str) -> Value {
@@ -162,8 +422,8 @@ struct Batch<'a> {
     scenario: &'a str,
     test_path: &'a str,
     test_name: &'a str,
-    test_marker: &'a str,
-    implementation_marker: &'a str,
+    test_bytes: &'a str,
+    implementation_bytes: &'a str,
     expected_green: u64,
 }
 
@@ -265,7 +525,19 @@ fn implement_batch(
         assert_ne!(before, after, "the machine check must be staged");
     }
 
-    let approved = result(root, target_dir, &["change", "approve", &change, "--json"]);
+    let digest = diff["digest"].as_str().expect("diff digest");
+    let approved = result(
+        root,
+        target_dir,
+        &[
+            "change",
+            "approve",
+            &change,
+            "--expected-digest",
+            digest,
+            "--json",
+        ],
+    );
     assert_eq!(approved["digest"], diff["digest"]);
 
     let progress_before = result(root, target_dir, &["rebuild", "status", "--json"]);
@@ -276,24 +548,12 @@ fn implement_batch(
     assert_eq!(progress_before["scenarios_total"], json!(2));
 
     if batch.intent == INT_0017 {
-        fs::write(
-            root.join(CARGO_MANIFEST),
-            documented_heredoc(root, "application-manifest", "Cargo.toml"),
-        )
-        .unwrap();
+        fs::write(root.join(CARGO_MANIFEST), APPLICATION_MANIFEST).unwrap();
         fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(
-            root.join(CODE),
-            documented_heredoc(root, "red-source", CODE),
-        )
-        .unwrap();
+        fs::write(root.join(CODE), RED_SOURCE).unwrap();
     }
     fs::create_dir_all(root.join("tests")).unwrap();
-    fs::write(
-        root.join(batch.test_path),
-        documented_heredoc(root, batch.test_marker, batch.test_path),
-    )
-    .unwrap();
+    fs::write(root.join(batch.test_path), batch.test_bytes).unwrap();
     let test_bytes = fs::read(root.join(batch.test_path)).unwrap();
 
     let red = result(root, target_dir, &["test", batch.scenario, "--json"]);
@@ -306,11 +566,7 @@ fn implement_batch(
         assert!(root.join(CARGO_LOCK).exists(), "Cargo generated its lock");
     }
 
-    fs::write(
-        root.join(CODE),
-        documented_heredoc(root, batch.implementation_marker, CODE),
-    )
-    .unwrap();
+    fs::write(root.join(CODE), batch.implementation_bytes).unwrap();
     let paths = if batch.intent == INT_0017 {
         vec![CARGO_LOCK, CARGO_MANIFEST, CODE]
     } else {
@@ -347,11 +603,7 @@ fn implement_batch(
             })
         );
         assert!(root.join(format!("telos/changes/{change}.tel")).exists());
-        fs::write(
-            root.join(CODE),
-            documented_heredoc(root, "final-implementation", CODE),
-        )
-        .unwrap();
+        fs::write(root.join(CODE), FINAL_IMPLEMENTATION).unwrap();
     }
 
     let reconciled = result(
@@ -540,9 +792,48 @@ fn relative_files(root: &Path) -> BTreeSet<String> {
     files
 }
 
+fn assert_public_demo_is_solution_free(root: &Path) {
+    let expected = BTreeSet::from([
+        "README.md".to_owned(),
+        "telos/bindings.tel".to_owned(),
+        "telos/constraints/CON-0003.tel".to_owned(),
+        "telos/intents/INT-0017.tel".to_owned(),
+        "telos/intents/INT-0042.tel".to_owned(),
+        "telos/notions/Customer.tel".to_owned(),
+        "telos/notions/Invoice.tel".to_owned(),
+        "telos/notions/InvoiceIssued.tel".to_owned(),
+        "telos/notions/PaymentReceived.tel".to_owned(),
+        "telos/telos.toml".to_owned(),
+    ]);
+    assert_eq!(
+        relative_files(root),
+        expected,
+        "the public demo must contain only documentation and Telos spec owners"
+    );
+
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    for solution_fragment in [
+        "name = \"billing-rebuild\"",
+        "pub struct Invoice",
+        "use billing_rebuild::",
+        "fn scn_0091_new_invoice_is_open",
+        "fn scn_0107_full_payment_settles_invoice",
+        "cat > Cargo.toml",
+        "cat > src/",
+        "cat > tests/",
+    ] {
+        assert!(
+            !readme.contains(solution_fragment),
+            "README leaks fixture bytes through `{solution_fragment}`"
+        );
+    }
+}
+
 fn reconstruct(target_dir: &Path) -> Observations {
     let tmp = fresh_demo();
     let root = tmp.path();
+
+    assert_public_demo_is_solution_free(root);
 
     assert!(!root.join("Cargo.toml").exists());
     assert!(!root.join("Cargo.lock").exists());
@@ -588,8 +879,8 @@ fn reconstruct(target_dir: &Path) -> Observations {
             scenario: SCN_0091,
             test_path: ISSUED_TEST,
             test_name: ISSUED_FN,
-            test_marker: "invoice-issued-test",
-            implementation_marker: "first-implementation",
+            test_bytes: INVOICE_ISSUED_TEST,
+            implementation_bytes: FIRST_IMPLEMENTATION,
             expected_green: 1,
         },
     );
@@ -605,8 +896,8 @@ fn reconstruct(target_dir: &Path) -> Observations {
             scenario: SCN_0107,
             test_path: PAYMENT_TEST,
             test_name: PAYMENT_FN,
-            test_marker: "payment-received-test",
-            implementation_marker: "constraint-violating-implementation",
+            test_bytes: PAYMENT_RECEIVED_TEST,
+            implementation_bytes: CONSTRAINT_VIOLATING_IMPLEMENTATION,
             expected_green: 2,
         },
     );
@@ -694,6 +985,11 @@ fn reconstruct(target_dir: &Path) -> Observations {
         progress: vec![first.3, second.3],
         final_status,
     }
+}
+
+#[test]
+fn public_billing_demo_contains_no_extractable_solution() {
+    assert_public_demo_is_solution_free(&demo_root());
 }
 
 #[test]

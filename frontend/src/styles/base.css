@@ -79,9 +79,11 @@ pre {
   outline-offset: 2px;
 }
 
-/* Minimal placeholder markup shared by the page stubs (src/pages/*.vue) and
- * the "no data" fallback in src/main.ts. Not a Vue component — the real
- * EmptyState component is left to a later task. */
+/* Minimal placeholder markup. Used directly (raw HTML, no Vue) by the "no
+ * data" fallback in src/main.ts, which renders before Vue ever mounts.
+ * src/components/EmptyState.vue reuses `.empty-state` as its own root class
+ * so every empty state — this early fallback included — shares one box
+ * style; it only adds an icon/title/text layout inside it. */
 .page {
   padding-block: 1.5rem;
 }

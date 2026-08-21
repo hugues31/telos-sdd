@@ -1,9 +1,8 @@
-//! Lexer for the `.tel` textual syntax (Annex C.1).
+//! Lexer for the `.tel` textual syntax.
 //!
-//! Produces a flat token stream for the recursive-descent parser (Tasks
-//! 5-6). Performs no parser-level disambiguation beyond what C.1's "Notes
-//! lexer" mandates: keywords are not reserved and always lex as
-//! `LowerIdent` (the parser matches them contextually); a dash inside an
+//! Produces a flat token stream for the recursive-descent parser. Keywords are
+//! not reserved and always lex as `LowerIdent` (the parser matches them
+//! contextually); a dash inside an
 //! identifier continues it only when followed by an alphanumeric (`a->b`
 //! lexes as `a`, `->`, `b`; `issued-to` lexes as one identifier). On the
 //! first lexical error, `lex` stops and returns the `Diagnostic` --
@@ -22,10 +21,10 @@ pub(crate) struct Token {
     pub span: Span,
 }
 
-/// The kind of a lexed token (Annex C.1). Identifiers and literals carry
+/// The kind of a lexed token. Identifiers and literals carry
 /// their lexeme; `Decimal`/`Date`/`Datetime` keep the source text verbatim
-/// rather than parsing to a numeric/temporal type (Annex C.4 §10:
-/// re-emitted lexeme-preserved).
+/// rather than parsing to a numeric/temporal type so re-emission preserves
+/// the original lexeme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TokKind {
     UpperIdent(String),
@@ -265,7 +264,7 @@ impl<'a> Lexer<'a> {
 
     /// A `-` is either the start of `->` (arrow), the sign of a negative
     /// number (`-` immediately followed by a digit), or -- since standalone
-    /// `-` is not in C.1's punct table -- a lexical error.
+    /// `-` is not a punctuation token -- a lexical error.
     fn lex_dash(&mut self, start: u32) -> Result<Token, Diagnostic> {
         if self.peek_at(1) == Some('>') {
             self.advance();
@@ -360,7 +359,7 @@ impl<'a> Lexer<'a> {
     // --- identifiers and id literals ---
 
     /// `lower-ident = LOWER, {LOWER|DIGIT}, { "-", (LOWER|DIGIT), {LOWER|DIGIT} }`.
-    /// The dash-continuation loop implements the C.1 notes' disambiguation:
+    /// The dash-continuation loop implements identifier disambiguation:
     /// a dash continues the identifier only when followed by an
     /// alphanumeric, so `issued-to` is one identifier but `a->b` is not.
     fn lex_lower(&mut self, start: u32) -> Token {
@@ -416,7 +415,7 @@ impl<'a> Lexer<'a> {
     ///
     /// Design decision (malformed id runs, e.g. `INT-42` with fewer than
     /// the 4 digits `digit4plus` requires): `upper-ident` cannot contain
-    /// `-` per C.1, and standalone `-` is not in the punct table, so there
+    /// `-`, and standalone `-` is not in the punctuation table, so there
     /// is no valid token split for a run like `INT-42` -- it becomes a
     /// `TelosParseError` diagnostic (reusing `EntityRef`/the typed id's
     /// `FromStr` error, which already names the expected `PREFIX-NNNN`
@@ -440,14 +439,14 @@ impl<'a> Lexer<'a> {
     // --- numbers, dates, datetimes ---
 
     /// Handles `int-lit`, `decimal-lit`, `date-lit`, and `datetime-lit`
-    /// (all of C.1's digit-starting literals), including an optional
+    /// (all digit-starting literals), including an optional
     /// leading `-` sign for `int-lit`/`decimal-lit`.
     ///
     /// Lookahead: a run of exactly 4 digits followed by `-DD-DD` is a date
     /// (extended to a datetime if `THH:MM:SS` and an optional `Z` follow);
     /// dates never carry a sign. Otherwise the digit run is `Int`, unless
     /// followed by `.` and at least one digit, which makes it `Decimal`
-    /// (lexeme kept verbatim, per Annex C.4 §10).
+    /// (lexeme kept verbatim for canonical re-emission).
     fn lex_number(&mut self, start: u32) -> Result<Token, Diagnostic> {
         let negative = self.peek() == Some('-');
         if negative {
@@ -689,7 +688,7 @@ mod tests {
     #[test]
     fn malformed_id_literal_is_a_diagnostic_not_a_token_split() {
         // `INT-42` has only 2 digits (< 4 required by `digit4plus`). An
-        // `upper-ident` cannot contain `-` (C.1), so there is no valid
+        // `upper-ident` cannot contain `-`, so there is no valid
         // token split for the trailing `-42` either (no bare `-` in the
         // punct table) -- this must be a diagnostic, not silently
         // re-lexed as separate tokens.

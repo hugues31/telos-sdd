@@ -16,7 +16,7 @@
 //! | [`apply_ops`] | the tree as the sealed spec | an op that contradicts it | `telos add\|edit\|remove`, on the **one op being staged now** |
 //! | [`apply_ops_idempotent`] (+ [`validate_ops_idempotent`]) | a tree that may already show part of the delta | nothing | `adopt` and `reconcile`, on a **whole change** |
 //!
-//! The split is D7's doing. `adopt` turns drift into ops describing a tree
+//! The split exists because `adopt` turns drift into ops describing a tree
 //! that already shows them -- `add` of a file that is already there, `remove`
 //! of one that is already gone -- so the staging preconditions would refuse
 //! the very state they exist to protect. [`apply_ops_idempotent`]'s own doc
@@ -26,16 +26,16 @@
 //!
 //! Three properties are load-bearing:
 //!
-//! - **Order is data** (D1). The ops replay sequentially against one
+//! - **Order is data**. The ops replay sequentially against one
 //!   another's output, so `add X` then `remove X` is a different transaction
-//!   from `remove X` then `add X`, and rule 2 below is judged at the point
+//!   from `remove X` then `add X`, and the referential-deletion check below is judged at the point
 //!   in the sequence where the removal happens. What order does *not* change
 //!   is the verdict of the semantic pass: [`build_model`] runs once, on the
 //!   state the last op leaves behind.
 //! - **A path is an identity** ([`StagedOp::target_path`]). The base is
 //!   keyed by repo-relative path, and an entity's path is a function of its
 //!   kind and its id, so two ops on one entity always meet on one slot.
-//! - **Rule 2 of §3.3 is enforced twice, differently.** [`apply_ops`] refuses
+//! - **Referential deletion safety is enforced twice, differently.** [`apply_ops`] refuses
 //!   a removal *naming the referrer* (`cannot remove intent INT-0017:
 //!   INT-0042 requires it`) -- the good message, produced where the mistake
 //!   was just made. [`apply_ops_idempotent`] cannot check it (the referrer
@@ -46,9 +46,9 @@
 //!   binding's `implements`/`proves` -- is a reference the semantic pass
 //!   resolves too, and `crates/telos-core/tests/overlay.rs` pins that.
 //!
-//! # The third layer: the journal (M3)
+//! # The third layer: the journal
 //!
-//! From M3 a change carries a *journal* as well as ops -- the runs `telos
+//! A change carries a *journal* as well as ops -- the runs `telos
 //! test` sealed and the binds `telos bind` recorded -- and those lines are
 //! bindings the change asserts just as surely as its ops are entities it
 //! asserts. [`fold_journal_bindings`] puts them on top of the applied ops,
@@ -57,10 +57,10 @@
 //! once, at the end, into the one file no entity owns. Every caller that
 //! needs the spec a change describes runs both, in that order, before
 //! [`build_model`] -- which is what makes a journal's `implements`/`proves`
-//! resolve, and be checked, exactly like a binding a human wrote (D2).
+//! resolve, and be checked, exactly like a binding a human wrote.
 //!
 //! The rules this module does *not* enforce are the ones that need more than
-//! the spec tree: no-code-without-telos (rule 5) needs `telos.toml`'s globs
+//! the spec tree: no-code-without-telos (the unbound-code gate) needs `telos.toml`'s globs
 //! and the working tree, and the red-witness discipline needs test runs and
 //! the current blob oids to judge them against. Both belong to reconcile.
 
@@ -118,7 +118,7 @@ pub fn find_file<'a>(base: &'a [(RepoPath, TelFile)], path: &RepoPath) -> Option
     base.iter().find(|(p, _)| p == path).map(|(_, file)| file)
 }
 
-/// « unknown intent `INT-9999` », with the `closest is …` suffix when one of
+/// “ unknown intent `INT-9999` ”, with the `closest is …` suffix when one of
 /// the base's own entities of that kind is close enough.
 ///
 /// `entity` is a [`StagedOp::entity`] word (`"notion"`, `"intent"`,
@@ -158,7 +158,7 @@ pub fn unknown_entity(base: &[(RepoPath, TelFile)], entity: &str, key: &str) -> 
 ///   `` notion `Invoice` already exists `` (`TELOS_INTEGRITY_VIOLATION`).
 /// - **edit**/**remove** of something it does not --
 ///   `` unknown intent `INT-9999` `` (`TELOS_REFERENCE_UNKNOWN`).
-/// - **remove** of something still referenced (rule 2) --
+/// - **remove** of something still referenced (the referential-deletion check) --
 ///   `cannot remove intent INT-0017: INT-0042 requires it`
 ///   (`TELOS_INTEGRITY_VIOLATION`), see [`first_referrer`].
 ///
@@ -245,8 +245,8 @@ fn edit(base: &mut [(RepoPath, TelFile)], op: &StagedOp, file: TelFile) -> Resul
     }
 }
 
-/// Drops what the base holds at `op`'s target path, then enforces rule 2 of
-/// §3.3 against the state the removal leaves behind.
+/// Drops what the base holds at `op`'s target path, then checks the state the
+/// removal leaves behind for dangling references.
 fn remove(base: &mut Vec<(RepoPath, TelFile)>, op: &StagedOp) -> Result<(), TelosError> {
     let Some(slot) = base.iter().position(|(p, _)| *p == op.target_path()) else {
         return Err(unknown_entity(base, op.entity(), &op.key()));
@@ -271,7 +271,7 @@ fn label(op: &StagedOp) -> String {
     }
 }
 
-/// Rule 2 of §3.3: the first thing in `base` that still points at `removed`,
+/// The first thing in `base` that still points at `removed`,
 /// rendered as the tail of the refusal message (`INT-0042 requires it`).
 ///
 /// `base` is the state *after* the removal, so what it finds is exactly what
@@ -390,7 +390,7 @@ fn first_intent_referrer(
 /// does), a `remove` whose slot is already empty leaves it empty, an
 /// `accept` is inert. The verdict on the result is [`build_model`]'s alone.
 ///
-/// # Why this exists (D7)
+/// # Why this exists
 ///
 /// [`apply_ops`]' three refusals -- add-what-exists, edit/remove-what-does-
 /// not, remove-what-is-referenced -- read the base as *the sealed tree*, and
@@ -409,7 +409,7 @@ fn first_intent_referrer(
 ///
 /// What survives untouched is the part that is about the *spec* rather than
 /// about the op: [`build_model`] still rejects every dangling reference, so
-/// rule 2 of §3.3 is still enforced at reconcile -- an entity removed while
+/// referential deletion safety is still enforced at reconcile -- an entity removed while
 /// something still points at it fails as an unresolvable reference instead
 /// of as a named referrer. Only the message differs, and the good message is
 /// kept where it does the most good: at staging time, where the mistake was
@@ -471,7 +471,7 @@ pub fn validate_ops_idempotent(
     build_model(apply_ops_idempotent(base, ops))
 }
 
-/// Folds a change's journal into the spec state as bindings (D2), extending
+/// Folds a change's journal into the spec state as bindings, extending
 /// -- or creating -- the `telos/bindings.tel` entry of `files`.
 ///
 /// This is what makes `bindings.tel` a *derived* file: `telos bind` and the
@@ -558,7 +558,7 @@ fn same_binding(a: &Binding, b: &Binding) -> bool {
 /// `before`: what a reviewer sees is the delta the op itself introduces, not
 /// the delta against the sealed tree.
 ///
-/// Total by construction, because `change diff` (T8) must be able to
+/// Total by construction, because `change diff` must be able to
 /// describe a change file a human hand-edited into something the overlay
 /// would refuse: an index past the end, an `accept` op (whose target is a
 /// path the model holds no entity for), and a prefix that fails to apply all
@@ -692,8 +692,8 @@ mod tests {
 
     #[test]
     fn a_binding_the_file_already_holds_is_not_folded_twice_whatever_its_span() {
-        // The case D2 turns on: `telos bind` journals a line for a pair
-        // `bindings.tel` already carries (a re-bind, or a second change
+        // `telos bind` may journal a pair that `bindings.tel` already carries
+        // (a re-bind, or a second change
         // touching the same file). The parsed binding carries the span it
         // was read at, the folded one carries the zero span -- structural
         // equality would keep both and the emitter would write the line

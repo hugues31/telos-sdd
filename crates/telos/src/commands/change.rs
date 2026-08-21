@@ -8,7 +8,7 @@
 //!   from [`write_change`] (hence from `emit_change`), its content from
 //!   [`read_change`] (hence from `parse_change_file`), and its deletion from
 //!   [`delete_change`]. Nothing here formats or decodes a change itself.
-//! - **`open` and `approve` are gated, `diff` is not (D17).** Opening a
+//! - **`open` and `approve` are gated, `diff` is not.** Opening a
 //!   change or freezing its digest both stage a review against the sealed
 //!   base, so both need that base to still be the sealed one; `list`,
 //!   `abandon` and `diff` read, or clean up, and a drifted project is
@@ -32,7 +32,7 @@ use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_no_
 use crate::envelope::{CmdResult, Outcome};
 
 /// The six verbs of `change`: `open`, `list`, `abandon`, `diff`, `approve`
-/// (T8) and `reconcile` (T10) -- the whole change lifecycle, from allocating
+/// `approve` and `reconcile` -- the complete lifecycle, from allocating
 /// an id to the transaction that spends it.
 #[derive(Debug, Clone, Subcommand)]
 pub enum ChangeCommand {
@@ -97,10 +97,10 @@ pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
 /// Allocates the next change id, writes the empty change, persists the
 /// counters.
 ///
-/// The order of the two writes is the reconcile order of D6 in miniature --
+/// The two writes use the same order as reconcile --
 /// the change file first, `counters.toml` last -- and it is the safe one:
 /// should the process die between them, the next allocation rescans the
-/// floors, sees `CHG-0001` on disk, and starts past it anyway (D4). The
+/// floors, sees `CHG-0001` on disk, and starts past it anyway. The
 /// reverse order would leave a counter claiming an id that no file backs,
 /// which is harmless too, but only by luck rather than by design.
 fn open(ctx: &Ctx, motivation: &str) -> CmdResult {
@@ -139,7 +139,7 @@ fn open(ctx: &Ctx, motivation: &str) -> CmdResult {
 /// (no claim-aware caller needs it), so it is read here, best-effort in the
 /// same spirit: an unparseable file keeps its entry, its `open` status and
 /// its repair obligation, and reports an empty motivation rather than
-/// inventing one or taking the whole listing down (D15).
+/// inventing one or taking the whole listing down.
 fn list(ctx: &Ctx) -> CmdResult {
     let ws = Workspace::discover(&ctx.cwd)?;
     let infos = open_change_infos(&ws)?;
@@ -177,9 +177,9 @@ fn list(ctx: &Ctx) -> CmdResult {
 /// Deletes a change's file, after reading it once.
 ///
 /// The read is not decoration: it is what turns an id the store does not
-/// hold into [`read_change`]'s «unknown change `CHG-9999`» (with its
+/// hold into [`read_change`]'s “unknown change `CHG-9999`” (with its
 /// nearest-id hint) *before* anything is deleted, and what refuses to
-/// silently drop a file whose id was mistyped. Not gated on drift (D17): a
+/// silently drop a file whose id was mistyped. Not gated on drift: a
 /// change is abandonable whatever the working tree looks like -- it is one
 /// of the two ways out of a mess, not more mutation of the spec.
 fn abandon(ctx: &Ctx, id: &str) -> CmdResult {
@@ -205,7 +205,7 @@ fn abandon(ctx: &Ctx, id: &str) -> CmdResult {
 /// pair per op, the current ops digest, the frozen `approved_digest` (if
 /// any), and whether the two disagree (`stale`, [`Change::is_stale`]).
 ///
-/// Read-only and never gated on drift (D17): a change's own delta is judged
+/// Read-only and never gated on drift: a change's own delta is judged
 /// against `telos/`'s spec files as they parse right now, whatever state
 /// the rest of the project is in -- exactly the moment a caller most needs
 /// to see it. [`parse_base`] only requires the base to *parse*, not to
@@ -286,12 +286,11 @@ fn op_human(n: usize, op: &StagedOp, before: &Option<String>, after: &Option<Str
 /// `change diff`'s `next_actions`: what to do about the state it just
 /// reported.
 ///
-/// `open`/`drafted` both still need a review (D16 -- `open` cannot reach
-/// here with staged ops, but the case costs nothing to cover uniformly). An
-/// `approved`/`implementing` change whose digest still matches is ready for
-/// `reconcile`; one that has gone stale (staged into after approval, D3)
-/// needs a fresh `approve` before anything else, which is also what
-/// re-approving does (idempotent, D16).
+/// `open` and `drafted` both still need review; `open` cannot normally reach
+/// here with staged ops, but covering it keeps the result total. An approved
+/// or implementing change whose digest still matches is ready for reconcile.
+/// If ops were staged after approval, the digest changed and a fresh approval
+/// is required. Re-approving an unchanged change is idempotent.
 fn diff_next_actions(change: &Change, stale: bool) -> Vec<String> {
     match change.status {
         ChangeStatus::Open | ChangeStatus::Drafted => {
@@ -320,18 +319,18 @@ fn diff_next_actions(change: &Change, stale: bool) -> Vec<String> {
 
 // --- change approve ----------------------------------------------------------
 
-/// Freezes `change`'s ops digest (D3): the review a `reconcile` will later
+/// Freezes `change`'s ops digest: the review a `reconcile` will later
 /// check its base against.
 ///
-/// Gated on drift (D17), like `open`: approving is a judgement about the
+/// Gated on drift, like `open`: approving is a judgement about the
 /// staged delta *against the sealed base*, and that judgement is void if
 /// the base is no longer the sealed one. Requires at least one staged op --
 /// there is nothing to approve otherwise, and an `open` change (zero ops)
 /// can never pass this, so `approve` only ever moves a change out of
-/// `drafted` or re-confirms one already `approved`/`implementing` (D16:
-/// idempotent, recalculating the digest every time).
+/// `drafted` or re-confirms one already `approved`/`implementing`. Approval
+/// is idempotent and recalculates the digest every time.
 ///
-/// D13: an `implementing` change re-approved *stays* `implementing`. Two
+/// An `implementing` change that is re-approved *stays* `implementing`. Two
 /// reasons, and either alone would settle it. The grammar's: a change with a
 /// journal must be `implementing` (`parse_change_file`), so writing
 /// `approved` over one would produce a file nothing can read back. The
@@ -398,11 +397,11 @@ fn require_expected_digest(id: ChangeId, current: &str, expected: &str) -> Resul
 
 /// Applies an approved change: [`reconcile_change`] runs every gate and,
 /// only if all of them pass, writes the spec files, the new seal, and the
-/// change file's deletion (D6).
+/// change file's deletion.
 ///
 /// Deliberately *not* wrapped in [`require_no_unclaimed_drift`], unlike
-/// `open` and `approve`. The drift gate is the engine's own first gate here
-/// (D5): it admits the drift of the paths this very change claims -- which
+/// `open` and `approve`. The engine's own first gate admits drift on paths
+/// this change claims -- which
 /// it is about to overwrite -- and names the offending paths when it
 /// refuses, which the shared CLI gate cannot do. Running both would only
 /// mean the same verdict reported twice, the less informative one first.
@@ -441,13 +440,13 @@ fn reconcile(ctx: &Ctx, id: &str) -> CmdResult {
 }
 
 /// Appends one `warning: …` line per advisory witness verdict to a
-/// reconcile's human output (D7).
+/// reconcile's human output.
 ///
 /// Human mode is where an `advisory` project's TDD debt has to be visible at
 /// all: `witness_warnings` carries it in `--json`, and a reconcile that
 /// printed only its counters would let the same debt accumulate silently
 /// run after run. Empty in every other case, which is the ordinary one, and
-/// then the line is exactly what M2 printed.
+/// then the line is exactly what the canonical emitter printed.
 fn with_warnings(mut human: String, warnings: &[String]) -> String {
     for warning in warnings {
         human.push_str("\nwarning: ");
@@ -457,7 +456,7 @@ fn with_warnings(mut human: String, warnings: &[String]) -> String {
 }
 
 /// `telos change reconcile --full`: re-prove the whole project and reseal
-/// it (D12), whatever the current `telos.lock` says -- or fails to say.
+/// it, whatever the current `telos.lock` says -- or fails to say.
 ///
 /// Deliberately does *not* go through [`project`]: that preamble requires a
 /// readable lock and computes a state against it, and this command exists
@@ -467,7 +466,7 @@ fn with_warnings(mut human: String, warnings: &[String]) -> String {
 /// everything it seals.
 ///
 /// `result.id` is `null` rather than absent: the envelope's `result` shape
-/// is one shape per command (Annex E), and a caller reading `id` should
+/// is one shape per command, and a caller reading `id` should
 /// find the key with nothing in it rather than have to know that this one
 /// invocation omits it.
 fn reconcile_full_project(ctx: &Ctx) -> CmdResult {
@@ -484,7 +483,7 @@ fn reconcile_full_project(ctx: &Ctx) -> CmdResult {
             "checks_run": outcome.checks_run,
             "tests_run": outcome.tests_run,
             // Always `[]` here: a full reseal belongs to no change, so there
-            // is no journal to judge (D7). Present anyway -- one command,
+            // is no journal to judge. Present anyway -- one command,
             // one result shape.
             "witness_warnings": outcome.witness_warnings,
         }),
@@ -513,12 +512,12 @@ pub(crate) fn parse_change_id(id: &str) -> Result<ChangeId, TelosError> {
     })
 }
 
-/// The `ops` array of Annex E's `show CHG-…`: one `{n, op, entity, key}`
+/// The `ops` array of the result schema's `show CHG-…`: one `{n, op, entity, key}`
 /// descriptor per staged op, `n` counting from 1 in staged order (the order
-/// *is* the transaction -- D1).
+/// *is* the transaction).
 ///
 /// Lives here rather than in `show` because it describes a change, and
-/// `change diff` (T8) reports the same descriptors with `before`/`after`
+/// `change diff` reports the same descriptors with `before`/`after`
 /// added.
 pub(crate) fn op_descriptors(change: &Change) -> Vec<Value> {
     change

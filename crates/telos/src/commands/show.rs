@@ -13,7 +13,7 @@
 //!
 //! `show CHG-...` is the one argument resolved outside the spec model
 //! entirely: a change lives in the change store, not in `spec_files`, so it
-//! is looked up there, reports the empty relations of Annex E, and -- alone
+//! is looked up there, reports the empty relations of the result schema, and -- alone
 //! among the entities -- prints the bytes of its file rather than a
 //! re-emission of them, because a change file is not sealed and may legally
 //! differ from what the emitter would write. See [`show_change`].
@@ -63,7 +63,7 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
 /// `show CHG-0001`: the change's own fields, its ops as descriptors, and
 /// the text of its file.
 ///
-/// `canonical` is the file's actual bytes (Annex E: «le texte du fichier»),
+/// `canonical` is the file's actual bytes (the result schema: "the file text"),
 /// *not* a re-emission of the parsed change -- and that is a deliberate
 /// departure from what `show` does for a notion, an intent or a constraint.
 /// The reason is that a change file is not covered by the seal
@@ -71,15 +71,15 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
 /// hand-edited but still parseable change file is legal state rather than
 /// drift, and inspecting a transaction record has to show what is really on
 /// disk. For any file telos itself wrote the two are identical anyway, by
-/// D1's round-trip invariant; the distinction only shows up exactly when it
-/// matters.
+/// the change journal's round-trip invariant; the distinction appears only
+/// when it matters.
 ///
 /// The parse is still what produces `entity`: [`read_change`] is what turns
-/// an unknown id into the store's «unknown change `CHG-9999`» and a
+/// an unknown id into the store's “unknown change `CHG-9999`” and a
 /// corrupted one into a parse error, so nothing here reports fields off a
 /// file it did not first validate.
 ///
-/// `relations` is the empty pair Annex E freezes: a change is a transaction
+/// `relations` is the empty pair the result schema freezes: a change is a transaction
 /// record, not a node of the spec graph, so it has no edge to report -- and
 /// the key is still present, so a consumer reads `show` the same way
 /// whatever it was pointed at.

@@ -1,16 +1,16 @@
 //! Change-file suite: the public `parse_change_file` seen from outside the
-//! crate (Annex C, D1).
+//! crate.
 //!
 //! Two angles:
 //!
 //! 1. **Byte-exact round-trip** -- for every canonical change source below,
 //!    `emit_change(&parse_change_file(p, s)) == s`. The emitter is the
-//!    definition of the canonical form (D1), so this is the only statement
+//!    definition of the canonical form, so this is the only statement
 //!    that keeps the parser and the emitter from drifting apart: padding,
 //!    the blank line before each op, the indentation of nested entity
 //!    blocks and the staged order of the ops are all pinned at once. The
-//!    Annex C example itself -- and the Annex A one, which adds the M3
-//!    journal -- are round-tripped in `syntax/parser.rs`'s unit tests, where
+//!    the canonical change and journal examples are round-tripped in
+//!    `syntax/parser.rs`'s unit tests, where
 //!    the single in-crate copy of each golden lives (next to the model
 //!    fixture it is paired with); the sources here cover the shapes they do
 //!    not.
@@ -64,14 +64,14 @@ fn assert_reports(diags: &[Diagnostic], needle: &str) {
 
 // --- the canonical variants ----------------------------------------------
 
-/// `telos change open` and nothing else: no op, no digest (D16).
+/// `telos change open` and nothing else: no op, no digest.
 const OPEN_EMPTY: &str = concat!(
     "change CHG-0001 \"Nothing is staged yet\" {\n",
     "  status open\n",
     "}\n",
 );
 
-/// One `add` op, so one nested `notion-file` block (Annex C `entity-decl`).
+/// One `add` op, so one nested `notion-file` block.
 const DRAFTED_ONE_ADD: &str = concat!(
     "change CHG-0002 \"Introduce the ledger\" {\n",
     "  status drafted\n",
@@ -84,7 +84,7 @@ const DRAFTED_ONE_ADD: &str = concat!(
 );
 
 /// An approved change with one op of every entity kind, each nested block a
-/// different M1 file rule -- and the intent one carrying a statement block
+/// different entity file rule -- and the intent one carrying a statement block
 /// and a scenario, so the deepest nesting the grammar admits is exercised.
 const APPROVED_MULTI: &str = concat!(
     "change CHG-0003 \"Rework the settlement rules\" {\n",
@@ -135,7 +135,8 @@ const REMOVE_AND_ACCEPT: &str = concat!(
     "}\n",
 );
 
-/// The M3 status an approved change moves on to (D16). It keeps the digest
+/// The status an approved change moves on to during implementation.
+/// It keeps the digest
 /// its approval froze -- reconcile accepts `approved` *or* `implementing`,
 /// and a change that lost its digest on the way could never be reconciled.
 const IMPLEMENTING_WITH_DIGEST: &str = concat!(
@@ -148,7 +149,7 @@ const IMPLEMENTING_WITH_DIGEST: &str = concat!(
 );
 
 /// An implementing change whose journal holds runs only: the state
-/// `telos test` leaves behind before anything is bound (D1).
+/// `telos test` leaves behind before anything is bound.
 const IMPLEMENTING_RUNS_ONLY: &str = concat!(
     "change CHG-0006 \"Settle the ledger\" {\n",
     "  status implementing\n",
@@ -224,14 +225,14 @@ fn the_digest_field_is_the_only_source_of_the_approved_digest() {
         Some("sha256:0000000000000000000000000000000000000000000000000000000000000000")
     );
     // The parser reports what the file says, and never recomputes it: a
-    // change whose delta moved since approval must stay detectable (D3).
+    // change whose delta moved since approval must stay detectable.
     assert!(change.is_stale());
     assert_eq!(parse_ok(DRAFTED_ONE_ADD).approved_digest, None);
 }
 
 #[test]
 fn ops_keep_their_staged_order() {
-    // Annex C: op order is data, never sorted -- these four are in reverse
+    // Op order is data, never sorted -- these four are in reverse
     // id order on purpose.
     let ops = parse_ok(REMOVE_AND_ACCEPT).ops;
     let shape: Vec<(&str, &str, String)> = ops
@@ -386,11 +387,11 @@ fn an_unknown_verb_names_the_four_ops() {
     );
 }
 
-// --- the journal (Annex A) ------------------------------------------------
+// --- the journal ------------------------------------------------
 
 #[test]
-fn a_change_with_no_journal_keeps_the_m2_shape_exactly() {
-    // The journal block is written only when there is one: every M2 variant
+fn a_change_with_no_journal_keeps_the_canonical_shape_exactly() {
+    // The journal block is written only when there is one: every canonical variant
     // above round-trips unchanged, and none of them grew a blank line.
     for src in [
         OPEN_EMPTY,
@@ -431,7 +432,7 @@ fn the_journal_is_read_back_in_append_order() {
 
 #[test]
 fn a_journalled_change_claims_its_test_files_and_bound_paths() {
-    // D3: the drift of a file this change is working on is legitimate work
+    // Drift on a file this change owns is legitimate work in progress.
     // in progress, admissible to *its* reconcile -- so it is claimed.
     let claims = parse_ok(IMPLEMENTING_RUNS_AND_BINDS).claims();
     for path in [
@@ -445,8 +446,8 @@ fn a_journalled_change_claims_its_test_files_and_bound_paths() {
     assert_eq!(claims.len(), 4);
 }
 
-/// D2/D9: the spec tree is written by ops and by reconcile, never
-/// journalled -- so no journal line may name a path under `telos/`, and a
+/// The spec tree is written by ops and reconcile, never by journal entries.
+/// Therefore no journal line may name a path under `telos/`, and a
 /// change file that tries does not parse.
 ///
 /// Asserting that some well-behaved fixture's `claims()` happens to exclude
@@ -497,7 +498,7 @@ fn the_journal_folds_into_bindings_greens_and_binds_only() {
 #[test]
 fn a_journal_does_not_move_the_digest_of_the_delta_it_implements() {
     // The two sources below stage the same single op; only the journal
-    // differs. D1: an approval survives its own implementation.
+    // differs. An approval survives its own implementation.
     let bare = parse_ok(IMPLEMENTING_WITH_DIGEST);
     let journalled = parse_ok(IMPLEMENTING_RUNS_AND_BINDS);
     assert_eq!(bare.ops, journalled.ops);
@@ -550,7 +551,7 @@ fn an_op_may_not_follow_a_journal_line() {
 
 #[test]
 fn a_broken_nested_block_does_not_swallow_the_ops_that_follow() {
-    // Error recovery is brace-depth aware (M1): the bad `attr` line inside
+    // Error recovery is brace-depth aware: the bad `attr` line inside
     // the nested notion is skipped, the notion's `}` closes it, and the
     // `accept` op two lines down is still checked -- two diagnostics, not
     // one.

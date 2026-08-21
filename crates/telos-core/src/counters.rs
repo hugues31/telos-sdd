@@ -1,5 +1,5 @@
 //! Persistent per-kind id counters and the never-reuse allocator built on
-//! top of them (D4).
+//! top of them.
 //!
 //! `telos/changes/counters.toml` is a CLI-managed side file: it lives under
 //! `telos/changes/`, a directory [`Workspace::spec_files`] never scans, so
@@ -13,7 +13,7 @@
 //! from the sealed model and every open change -- and [`Alloc`] starts from
 //! `max(persisted, floor)`, so the persisted file is only ever a fast path,
 //! never a single point of truth: the next allocation self-heals a stale or
-//! missing counters file for free (D4).
+//! missing counters file for free.
 
 use std::fs;
 use std::path::PathBuf;
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(alloc.next_intent(), IntentId(44));
     }
 
-    /// The brief's own sequence: from the corpus's floor, one `next_*` call
+    /// From the corpus's floor, one `next_*` call
     /// per kind, each landing exactly one past the floor.
     #[test]
     fn next_functions_each_allocate_their_own_component_past_the_corpus_floor() {

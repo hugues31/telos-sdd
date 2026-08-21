@@ -1,5 +1,5 @@
-//! Rule 5 (no code without telos): matching `[code]`/`[tests]` globs
-//! against the working tree, and finding files no binding covers (D8).
+//! The no-unbound-code check: matching `[code]`/`[tests]` globs
+//! against the working tree, and finding files no binding covers.
 //!
 //! Matching is done with `globset` (a single compiled [`GlobSet`] per glob
 //! list, so many patterns cost one pass over the tree, not one per
@@ -48,8 +48,8 @@ pub fn glob_matches(root: &Path, patterns: &[String]) -> Result<Vec<RepoPath>, T
     Ok(matches)
 }
 
-/// Rule 5: files matched by `[code]`/`[tests]` globs that no binding
-/// covers, the two families evaluated independently (D8).
+/// Files matched by `[code]`/`[tests]` globs that no binding
+/// covers, the two families evaluated independently.
 ///
 /// A file matching `[code]` must be covered by at least one
 /// `Binding::Implements` on that exact path; a file matching `[tests]` must

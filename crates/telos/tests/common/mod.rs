@@ -28,12 +28,11 @@ pub fn repo() -> TempDir {
 ///
 /// The seal is the real one, produced by running the real binary: `telos
 /// change reconcile --full` is exactly the command a user reaches for to
-/// seal a spec tree that exists but has no lock (D12/D14), so the fixture is
-/// built the way a project actually gets built rather than by calling
+/// seal a spec tree that exists but has no lock. The fixture is therefore
+/// built through the public command rather than by calling
 /// `telos_core::lock::seal` behind the CLI's back. The full flow (`init`,
-/// `change open`, `add`, `reconcile`) cannot produce this corpus in M2 --
-/// its bindings need `telos bind`, which is M3 -- and is covered by the e2e
-/// tests that do drive it end to end.
+/// `change open`, `add`, `test`, `bind`, and `reconcile`) is covered by the
+/// end-to-end tests that drive it through the public CLI.
 pub fn with_fixture() -> TempDir {
     with_fixture_mut(|_| {})
 }
@@ -44,7 +43,7 @@ pub fn with_fixture() -> TempDir {
 /// The order is the point: whatever `mutate` writes is part of what the seal
 /// records, so the fixture it hands back is coherent rather than drifted.
 /// That is what lets a test change `telos.toml`'s `[test] cmd` -- the corpus
-/// ships it empty (D13), so a reconcile there runs no test at all -- and
+/// ships it empty, so a reconcile there runs no test at all -- and
 /// still start from a `coherent` project. Note that the sealing reconcile is
 /// itself subject to whatever `mutate` did: a `[test] cmd` it installs runs
 /// once, with an empty `{filter}`, before this returns.
@@ -58,7 +57,7 @@ pub fn with_fixture_mut(mutate: impl FnOnce(&Path)) -> TempDir {
         .expect("failed to run `telos change reconcile --full`");
     // Loudly: a harness that hands back an unsealed fixture would make every
     // test built on it fail somewhere else, for reasons that look nothing
-    // like «the fixture never got sealed».
+    // like “the fixture never got sealed”.
     let ok = serde_json::from_slice::<serde_json::Value>(&out.stdout)
         .map(|envelope| envelope["ok"] == serde_json::Value::Bool(true))
         .unwrap_or(false);

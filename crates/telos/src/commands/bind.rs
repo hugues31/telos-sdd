@@ -1,8 +1,8 @@
 //! `telos bind <path> <INT-id>`: record that a code file implements an
-//! intent, journalled into the change that owns the intent (D5, D6).
+//! intent, journalled into the change that owns the intent.
 //!
 //! The command is *mutating* -- it appends a `bind` line to a change file --
-//! so, like `telos test` (T3), it runs its gates in a frozen order and
+//! so, like `telos test`, it runs its gates in a frozen order and
 //! writes nothing until every one of them has passed:
 //!
 //! 1. the preamble ([`project`]: workspace, lock, repository, one store
@@ -11,7 +11,7 @@
 //!    spec or any open change declares;
 //! 3. the path argument, parsed as a repo-relative path that does not name
 //!    anything under `telos/`;
-//! 4. the **owner** (D5): the open change whose delta adds or edits the
+//! 4. the **owner**: the open change whose delta adds or edits the
 //!    intent -- a binding belongs to the transaction that introduced what
 //!    it implements, never to the project at large, and never to a
 //!    transaction that is *removing* it (see [`owner_of`]);
@@ -19,7 +19,7 @@
 //!    nobody has reviewed;
 //! 6. the bound path must exist, at the bytes the working tree holds right
 //!    now;
-//! 7. the **drift gate with its carve-out** (D6) -- see
+//! 7. the **drift gate with its carve-out** -- see
 //!    [`require_no_foreign_drift`];
 //! 8. the journal line, and the `approved` → `implementing` transition,
 //!    written together -- or nothing at all, when an identical line is
@@ -29,15 +29,15 @@
 //! code that implements them:
 //!
 //! - **`TELOS_FILE_CLAIMED` does not apply to journal writes.** Exactly the
-//!   ruling T3 makes for `telos test`, and for the same reason: a journal
-//!   claim exists to make the drift of the bound file admissible (D3/D6),
+//!   ruling used by `telos test`, and for the same reason: a journal
+//!   claim exists to make the drift of the bound file admissible,
 //!   not to lock the file against other changes. So nothing here calls
 //!   `require_unclaimed`.
 //! - **A path under `telos/` is refused with the grammar's own wording.**
 //!   `parse_change_file` would reject a hand-written `bind` line naming one
 //!   anyway (`code_path_outside_the_spec_tree`) -- `telos/bindings.tel`
-//!   above all, since D2 rewrites it wholesale at every reconcile and D3's
-//!   claim guarantee depends on no journal line ever naming it. Answering
+//!   above all, since every reconcile rewrites it wholesale and journal
+//!   paths count as change claims. Answering
 //!   with the identical message here, before anything is written, means a
 //!   caller sees one wording for one rule regardless of which layer catches
 //!   the mistake.
@@ -119,7 +119,7 @@ fn require_known(project: &Project, intent: IntentId) -> Result<(), TelosError> 
 /// Every intent id the sealed spec or any open change's overlay declares.
 ///
 /// `add`/`edit intent` insert the id, `remove intent` withdraws it -- the
-/// post-state an op carries whole (Annex C), applied in staged order so a
+/// post-state an op carries whole, applied in staged order so a
 /// change that adds then removes the same intent within its own delta
 /// leaves it unknown, as it should.
 fn known_intents(project: &Project) -> Result<BTreeSet<IntentId>, TelosError> {
@@ -162,7 +162,7 @@ fn parse_repo_path(arg: &str) -> Result<RepoPath, TelosError> {
     })
 }
 
-/// D5's ownership rule: the open change whose delta adds or edits the
+/// The open change whose delta adds or edits the
 /// intent -- the same predicate `telos test`'s `owner_of` applies to a
 /// scenario, one level up. Only `AddIntent`/`EditIntent` can make a change
 /// the intent's *implementer*: `Change::claims()` maps `target_path` over
@@ -187,8 +187,8 @@ fn owner_of(changes: &[Change], intent: IntentId) -> Option<&Change> {
     })
 }
 
-/// The frozen wording for an intent no open change claims (Annex F, the
-/// same shape `telos test` answers with for an unowned scenario).
+/// The stable error for an intent no open change claims; `telos test` uses
+/// the same shape for an unowned scenario.
 fn no_owner(intent: IntentId) -> TelosError {
     TelosError::new(
         ErrorCode::TelosChangeStateInvalid,
@@ -204,7 +204,7 @@ fn no_owner(intent: IntentId) -> TelosError {
 /// same filter `seal` and `telos test`'s oid lookup both rely on), so a
 /// missing file is exactly the paths that come back empty -- no separate
 /// existence check duplicates that logic. The message is `seal`'s own,
-/// word for word (M2, Annex F): the two are the same integrity problem, a
+/// word for word: the two are the same integrity problem, a
 /// binding naming a file that is not there, whichever pass discovers it.
 fn require_exists(project: &Project, path: &RepoPath) -> Result<(), TelosError> {
     let oids = project.git.blob_oids(std::slice::from_ref(path))?;
@@ -226,25 +226,24 @@ struct BindReport {
     change: ChangeId,
 }
 
-/// Journals `path -> intent` into `change` (D1, D5) -- or, when an identical
-/// line is already there, writes nothing and answers with the same result
-/// anyway.
+/// Journals `path -> intent` into `change`; when an identical line is already
+/// there, writes nothing and answers with the same result anyway.
 ///
 /// That dedup is `bind`'s own addition on top of `telos test`'s journalling
 /// shape: a rerun of the exact same command -- a retried script, two agents
-/// racing -- must be idempotent (Annex C), so the check comes first and the
+/// racing -- must be idempotent, so the check comes first and the
 /// append happens only on a genuine miss. `Change::journal_bindings` folds
-/// duplicate lines too (D2), but only at reconcile; this is what keeps the
+/// duplicate lines too, but only at reconcile; this is what keeps the
 /// journal itself, the append-only evidence both commands write, from
 /// growing a line per identical retry in the meantime.
 ///
 /// The `approved` → `implementing` transition rides along with the write,
-/// exactly as it does for a run (D5): the grammar requires a journalled
+/// exactly as it does for a run: the grammar requires a journalled
 /// change to be `implementing`, so the two can never be written apart.
 /// Nothing moves when the dedup finds nothing new -- including the status,
 /// which by then is already whatever the first bind left it as -- and the
-/// frozen approval digest is untouched either way (the journal is
-/// digest-inert, D1).
+/// frozen approval digest is untouched either way because journal entries
+/// are digest-inert.
 fn journal_bind(
     project: &Project,
     change: &mut Change,
@@ -276,7 +275,7 @@ fn journal_bind(
     })
 }
 
-/// The bind's result object (Annex C).
+/// The bind's result object.
 fn bind_result(report: &BindReport) -> Value {
     json!({
         "change": report.change,

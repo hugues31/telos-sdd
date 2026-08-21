@@ -1,5 +1,5 @@
 //! Cross-OS command execution: the platform shell `check` and `[test] cmd`
-//! run through (D9), and `{filter}` substitution (D10).
+//! run through, and `{filter}` substitution.
 
 use std::path::Path;
 use std::process::Command;
@@ -11,9 +11,9 @@ use crate::error::{ErrorCode, TelosError};
 ///
 /// A non-zero `status` is *not* an error at this level -- a failing check
 /// or test run is exactly the outcome the caller needs to see and decide
-/// what to do with (D10/D11 turn it into `TELOS_INTEGRITY_VIOLATION` /
-/// `TELOS_CONSTRAINT_FAILED` one layer up); this module only runs the
-/// command and reports what happened.
+/// what to do with. The caller converts it to `TELOS_INTEGRITY_VIOLATION` or
+/// `TELOS_CONSTRAINT_FAILED`; this module only runs the command and reports
+/// what happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
     pub status: i32,
@@ -30,7 +30,7 @@ pub struct FilteredRun {
 }
 
 /// Runs `cmd` through the platform shell, with `cwd` as the working
-/// directory (D9): `sh -c "<cmd>"` on Unix, `cmd /C "<cmd>"` on Windows. The
+/// directory: `sh -c "<cmd>"` on Unix, `cmd /C "<cmd>"` on Windows. The
 /// spec calls `check`/`[test] cmd` a shell command, so this is the one
 /// place that distinction is made -- everything above it just has a string.
 ///
@@ -53,7 +53,7 @@ pub fn run_shell(cmd: &str, cwd: &Path) -> Result<RunResult, TelosError> {
     Ok(run_result(output))
 }
 
-/// Displays D10's exact literal substitution while executing a deliberately
+/// Displays the runner template's exact literal substitution while executing a deliberately
 /// restricted runner template as a direct process argv. No shell sees the
 /// filter; it remains data even in embedded words such as `module::{filter}`.
 pub fn run_shell_with_filter(
@@ -215,7 +215,7 @@ fn run_result(output: std::process::Output) -> RunResult {
     }
 }
 
-/// Builds the unspawned platform-shell [`Command`] for `cmd` (D9).
+/// Builds the unspawned platform-shell [`Command`] for `cmd`.
 fn shell_command(cmd: &str) -> Command {
     if cfg!(windows) {
         let mut command = Command::new("cmd");
@@ -229,7 +229,7 @@ fn shell_command(cmd: &str) -> Command {
 }
 
 /// Replaces every occurrence of the literal `{filter}` in `cmd` with
-/// `filter`, then `trim_end`s the whole result (D10).
+/// `filter`, then `trim_end`s the whole result.
 ///
 /// The `trim_end` runs after substitution and over the *whole* string, not
 /// just around the placeholder, so an empty filter (the `--full` case)

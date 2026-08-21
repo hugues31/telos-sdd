@@ -1,6 +1,6 @@
 //! `globs.rs` / `exec.rs`, end to end against real filesystem I/O and a
-//! real `git` invocation: rule-5 glob scanning and orphan detection (D8),
-//! `{filter}` substitution (D10), and the cross-OS shell runner (D9).
+//! real `git` invocation: the unbound-code gate glob scanning and orphan detection,
+//! `{filter}` substitution, and the cross-OS shell runner.
 
 use std::fs;
 use std::path::{Path, PathBuf};

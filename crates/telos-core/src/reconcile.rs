@@ -13,54 +13,54 @@
 //! reconcile complains about must converge, and it only converges if the
 //! complaint it gets is the *first* thing wrong rather than an arbitrary one:
 //!
-//! 1. **Drift** (D5/D17). Anything on disk that no longer matches the seal
+//! 1. **Drift**. Anything on disk that no longer matches the seal
 //!    and that no open change claims stops everything. A path *this* change
 //!    claims is the change in progress, not damage; a path *another* open
 //!    change claims is admissible too -- and is exactly what the carry-over
 //!    below exists for.
-//! 2. **Status** (D16). `approved` or `implementing`; nothing else can be
+//! 2. **Status**. `approved` or `implementing`; nothing else can be
 //!    reconciled.
-//! 3. **Digest** (D3). The delta must still be the one that was approved.
-//! 4. **Accept OIDs** (D7). Each `accept` op sealed a specific blob; the
+//! 3. **Digest**. The delta must still be the one that was approved.
+//! 4. **Accept OIDs**. Each `accept` op sealed a specific blob; the
 //!    file must still hash to it.
 //! 5. **The overlay** ([`crate::overlay::apply_ops_idempotent`], plus the
 //!    journal folded on top). The spec the delta describes must parse and
-//!    resolve -- rules 1, 3 and 4 of §3.3, and rule 2 with it, since an
-//!    entity removed while something still points at it leaves an
-//!    unresolvable reference. The *idempotent* application is what a whole
+//!    resolve references, validate active intents and events, type-check
+//!    literals, and preserve referential integrity. The *idempotent*
+//!    application is what a whole
 //!    change needs rather than the staging one: a delta `adopt` produced
-//!    describes a working tree that already shows it (D7), so the staging
+//!    describes a working tree that already shows it, so the staging
 //!    preconditions -- add-what-exists, remove-what-does-not -- would refuse
 //!    the very state they are meant to protect. The journal is folded in
 //!    ([`crate::overlay::fold_journal_bindings`]) *before* the model is
 //!    built, so the `implements` a `bind` line asserts and the `proves` a
 //!    green run asserts are resolved here like any other binding -- and
-//!    every gate below judges the model they are part of (D2).
-//! 6. **Rule 5** (D8). No code without telos, over the *post* model --
+//!    every gate below judges the model they are part of.
+//! 6. **No unbound code**, evaluated over the *post* model --
 //!    the folded one, so a file bound by a journal line is covered. A path
 //!    some open change's journal has declared in flight -- this change's
 //!    own included -- is exempt: see [`require_no_orphan_code`].
-//! 7. **The sealed code coverage** (D9). Every path the *previous* seal held
+//! 7. **The sealed code coverage**. Every path the *previous* seal held
 //!    in its `code` table must still be covered by a binding of the folded
 //!    model, unless this delta stages `telos/bindings.tel` itself -- in
 //!    which case the shrink is what was reviewed. See
 //!    [`require_no_coverage_shrink`].
-//! 8. **The sealed red witness** (D7), under `policy.tdd = "strict"`: every
+//! 8. **The sealed red witness**, under `policy.tdd = "strict"`: every
 //!    scenario this delta makes new or different owes an intact red/green
 //!    pair on the bytes its test file has right now. Under `advisory` the
 //!    same verdicts come back as [`ReconcileOutcome::witness_warnings`]
 //!    instead of refusing. See [`check_witnesses`].
-//! 9. **Sealable structure** (§3.3 rule 4). Every scenario of every active
+//! 9. **Sealable structure**. Every scenario of every active
 //!    intent has at least one `proves`, and active obligations have a runner.
 //!    This is deliberately stricter than spec-only model loading/rebuild.
-//! 10. **Constraint checks** (D11), for the constraints this delta puts in
+//! 10. **Constraint checks**, for the constraints this delta puts in
 //!     scope.
-//! 11. **Tests** (D10), one run per distinct `proves` target of the impacted
+//! 11. **Tests**, one run per distinct `proves` target of the impacted
 //!     scenarios -- the folded model's, so a scenario the journal just proved
 //!     is actually run and `tests_run` is honest.
 //!
-//! [`reconcile_full`] is the same transaction with the delta taken out
-//! (D12): no change, so no drift, status, digest or accept gate, no journal
+//! [`reconcile_full`] is the same transaction with the delta taken out: no
+//! change, so no drift, status, digest or accept gate, no journal
 //! to fold and therefore no witness gate, no previous lock and therefore no
 //! coverage gate, and no ops to apply -- only the five gates that prove a
 //! spec on its own (5, 6, 9, 10, 11) and the seal they earn. It is the exit from
@@ -69,16 +69,15 @@
 //!
 //! # The carry-over: what the seal must not launder
 //!
-//! Gate 1 admits drift another open change claims, and it has to: from M3
-//! on, an implementing change drifts its own code files for its whole life,
+//! Gate 1 admits drift claimed by another open change, and it has to: an
+//! implementing change drifts its own code files for its whole life,
 //! and a concurrent reconcile of an unrelated change cannot be held hostage
 //! to it. But the seal that reconcile writes is computed by re-hashing the
 //! *whole* tree from disk, so left alone it would fold those foreign bytes
 //! -- never reviewed, never approved -- into a fresh lock, and abandoning
 //! the change that claimed them would leave the project `coherent` with an
 //! out-of-protocol edit permanently sealed. That is precisely the invariant
-//! §4.1 and §5 exist to hold («une édition manuelle = drift», «le seal
-//! détecte la négligence»).
+//! behind CLI-only specification mutations and drift detection.
 //!
 //! So the drift of a path *another* open change claims is admissible for
 //! this transaction without being sealable by it. Every such path is
@@ -94,29 +93,29 @@
 //! and re-hashing them from disk is the whole point.
 //!
 //! The seam is deliberate. [`seal`] is left alone -- it means, and keeps
-//! meaning, «the bytes on disk right now», one honest sentence rather than
+//! meaning, “the bytes on disk right now”, one honest sentence rather than
 //! one qualified by whoever is calling it. [`reconcile_change`] applies the
 //! carry-over to the lock [`seal`] hands back, before writing it, and owns
 //! the exception in its own docs. That also keeps [`reconcile_full`]'s
 //! contract intact: `--full` re-proves everything from disk and seals disk
-//! truth, open adopt-changes included, by design (D12/§7.4). It is total
+//! truth, open adopt-changes included, by design. It is total
 //! proof, not a bypass -- a `--full` run while a change holds adopted drift
-//! seals that drift, because `--full`'s answer to «is this tree provable?»
+//! seals that drift, because `--full`'s answer to “is this tree provable?”
 //! is computed over the tree, not over anybody's claims.
 //!
-//! # Atomicity, and what stands in for a rollback (D6)
+//! # Atomicity, and what stands in for a rollback
 //!
 //! Not one byte is written before gate 11 has passed. After that, the write
 //! order is fixed: the ops' spec `.tel` files, then `telos/bindings.tel`
 //! re-emitted from the folded model (both through the emitter -- reconcile
 //! never edits text), then `telos.lock`, then the change file's deletion.
-//! `bindings.tel` before the lock, and only there, is D2: nothing writes the
-//! bindings table while a change is open, so it never references code or an
-//! intent that the spec tree does not yet hold.
+//! Writing `bindings.tel` before the lock ensures the bindings table is never
+//! updated while a change is open, so it cannot reference code or an intent
+//! that the spec tree does not yet hold.
 //! Sealing *after* writing is deliberate: [`seal`] re-hashes the spec tree
 //! from disk, so the lock records the bytes that are really there rather
 //! than the bytes we believed we wrote -- everywhere except the carried-over
-//! paths above, which are the one place where «what is really there» is not
+//! paths above, which are the one place where “what is really there” is not
 //! this transaction's to record.
 //!
 //! There is no hand-rolled rollback. If the process dies between two of
@@ -126,7 +125,7 @@
 //! transaction log the project already has.
 //!
 //! `counters.toml` is not touched: every id this transaction spends was
-//! allocated and persisted when the op was staged (D4), so there is nothing
+//! allocated and persisted when the op was staged, so there is nothing
 //! left to bump -- and the floors keep holding those ids down after the
 //! change file is gone, because the entities themselves are now in the spec.
 
@@ -159,13 +158,13 @@ pub struct ReconcileOutcome {
     /// The staged ops applied -- every op of the change, since a reconcile
     /// is all-or-nothing.
     pub ops_applied: u32,
-    /// Constraint `check` commands run (D11).
+    /// Constraint `check` commands run.
     pub checks_run: u32,
-    /// `[test] cmd` invocations run (D10). Zero when no active obligation
+    /// `[test] cmd` invocations run. Zero when no active obligation
     /// requires a runner and no impacted proof target is runnable.
     pub tests_run: u32,
     /// The witness verdicts that would have refused this reconcile under
-    /// `policy.tdd = "strict"`, as the frozen wordings of Annex F (D7).
+    /// `policy.tdd = "strict"`, using the stable wording from the error contract.
     ///
     /// Always empty except on an `advisory` project that owes a witness it
     /// does not have: under `strict` the first such verdict is an error
@@ -177,8 +176,8 @@ pub struct ReconcileOutcome {
     pub lock: Lock,
 }
 
-/// Applies one approved change: the ten gates of the module docs, then the
-/// writes of D6.
+/// Applies one approved change: the eleven gates in the module docs, followed by
+/// an atomic write phase.
 ///
 /// `others` is what the change store currently reports open. It is only read
 /// for its `claims`, to decide which drift is somebody's business and which
@@ -229,7 +228,7 @@ pub fn reconcile_change(
     let tests_run = run_tests(&effective_ws, &model, &impacted)?;
     require_unchanged_snapshot(ws, git, &proven)?;
 
-    // --- D6: everything above passed, so and only so, write. ---
+    // --- write phase: everything above passed, so and only so, write. ---
     for op in &change.ops {
         apply_op(ws, op)?;
     }
@@ -255,7 +254,7 @@ pub fn reconcile_change(
     })
 }
 
-/// Re-proves the whole project from the files on disk and reseals it (D12).
+/// Re-proves the whole project from the files on disk and reseals it.
 ///
 /// This is the exit from a lock merge conflict, and the one legitimate way
 /// to seal a spec tree that exists but was never sealed -- the two
@@ -272,26 +271,26 @@ pub fn reconcile_change(
 /// files untouched and still open -- a full reseal is about the spec on
 /// disk, not about anybody's staged delta. **The sealed code coverage**
 /// (gate 7) is a comparison against the previous seal, so it goes with the
-/// lock this function does not read: §7.4's answer to «is this tree
-/// provable?» is computed over the tree, and what an older, possibly
+/// lock this function does not read. Whether the tree is provable is computed
+/// from the tree itself; what an older, possibly
 /// worthless lock happened to cover is no part of it.
 ///
 /// That last one is an escape hatch, not a proof, and it is worth naming as
 /// such: `--full` seals disk truth, so it *is* the one remaining way a
 /// `bindings.tel` that shrank outside the protocol reaches a fresh lock
-/// with nobody having approved the shrink. Rule 5 does not close the hole
-/// on its way past -- it judges only the files the *current* globs match,
+/// with nobody having approved the shrink. The unbound-code gate does not
+/// close the hole -- it judges only the files the *current* globs match,
 /// and the same hand edit that drops an `implements` line can empty the
 /// `[code]` globs that would have caught the file it covered (the e2e
 /// `a_full_reseal_is_exempt_from_the_coverage_gate` is exactly that tree).
 /// What keeps this honest is that `--full` is a deliberate, human-invoked
 /// act with no delta behind it: the same property that makes it the exit
 /// from a `telos.lock` merge conflict makes it the operator's
-/// responsibility, which is where §7.4 puts it.
+/// responsibility, which is where full reconciliation puts it.
 ///
 /// **The witness** (gate 8) is a property of a change's
 /// *journal*, so it goes the same way, and `witness_warnings` comes back
-/// empty -- and with no change to claim anything in flight, rule 5 exempts
+/// empty -- and with no change to claim anything in flight, the unbound-code gate exempts
 /// nothing here either, so a `--full` run while some change holds a
 /// red-only journal refuses on that change's test file. `--full` is
 /// stricter than a per-change reconcile there, deliberately: it proves the
@@ -302,12 +301,11 @@ pub fn reconcile_change(
 /// journal to fold either, so `bindings.tel` is read as it stands rather
 /// than rewritten.
 ///
-/// What remains is what proves a spec on its own: the full model (rules 1,
-/// 3 and 4 of §3.3), rule 5, sealable proof/runner structure, every
-/// constraint that has a `check` (D11 --
-/// scope filters against a delta, and there is no delta), and, when the model
-/// has active obligations, one run of `[test] cmd` with an empty `{filter}`
-/// (D10 -- the whole suite, once).
+/// What remains is what proves a spec on its own: a fully parsed and resolved
+/// model, the unbound-code gate, sealable proof/runner structure, every
+/// constraint that has a `check` (there is no delta to narrow the scope),
+/// and, when the model has active obligations, one run of `[test] cmd` with
+/// an empty `{filter}` for the whole suite.
 pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome, TelosError> {
     // [`seal`] checks this too, but only after every check and test has
     // run: paying for it upfront turns "you invoked this from the wrong
@@ -344,7 +342,7 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
         tests_run,
         // No change, so no journal, so nothing to say about witnesses: the
         // field is present and empty rather than absent, because the shape
-        // of a reconcile result is one shape (Annex C).
+        // of a reconcile result is one shape.
         witness_warnings: Vec::new(),
         lock,
     })
@@ -466,7 +464,7 @@ fn lock_from_maps(
     }
 }
 
-/// The write-time half of §3.3 rule 4.
+/// The write-time sealability check for active intents.
 ///
 /// [`crate::semantic::build_model`] deliberately accepts a spec-only active
 /// intent whose scenarios do not yet have proof bindings: rebuild planning
@@ -527,7 +525,7 @@ pub fn require_sealable_structure(ws: &Workspace, model: &TelosModel) -> Result<
 // --- gate 1: drift, and the carry-over it decides ----------------------------
 
 /// Sorts the project's drift into the three kinds this transaction has to
-/// tell apart, and refuses on the only one that stops it (D5/D17).
+/// tell apart, and refuses on the only one that stops it.
 ///
 /// One [`compute_state`] pass -- over *raw* drift, hence the empty
 /// `open_changes` argument -- answers all three:
@@ -539,8 +537,8 @@ pub fn require_sealable_structure(ws: &Workspace, model: &TelosModel) -> Result<
 ///   the whole point of an open change, and this very reconcile is about to
 ///   overwrite those paths with its ops' canonical post-state. Admissible,
 ///   and sealed from disk like everything else.
-/// - **Claimed by another open change.** Admissible too (M3's implementing
-///   changes drift their code files for their whole life, and an unrelated
+/// - **Claimed by another open change.** Admissible too (implementing changes
+///   drift their code files for their whole life, and an unrelated
 ///   reconcile cannot be held hostage to that), but *not* sealable here:
 ///   these are the paths returned, for [`carry_over`] to keep at their
 ///   previously sealed state. See the module docs.
@@ -595,7 +593,7 @@ fn classify_drift(
 /// when `previous` held no record of it at all.
 ///
 /// Both tables are rewritten for each path, rather than the one it was
-/// expected in, so that «what the previous lock said about this path» is
+/// expected in, so that “what the previous lock said about this path” is
 /// reproduced whole: a path that was sealed as `code` and would now be
 /// re-hashed into `spec` (or the reverse) cannot smuggle its bytes in
 /// through the other table.
@@ -631,8 +629,8 @@ fn restore(
 
 // --- gates 2 and 3: status and digest ---------------------------------------
 
-/// D16: `approved` and `implementing` are the two states a reconcile
-/// accepts. `implementing` is an approved change in flight (M3), so it
+/// Reconcile accepts `approved` and `implementing`. The latter is an approved
+/// change in flight, so it
 /// carries the same frozen digest and passes the same gate 3.
 fn require_approved(change: &Change) -> Result<(), TelosError> {
     match change.status {
@@ -648,8 +646,8 @@ fn require_approved(change: &Change) -> Result<(), TelosError> {
     }
 }
 
-/// D3: the approval is an approval of a specific delta, and staging into an
-/// approved change is deliberately allowed -- so the digest is what stands
+/// Approval applies to a specific delta. Staging into an approved change is
+/// deliberately allowed, so the digest is what stands
 /// between "reviewed" and "reviewed, then quietly changed".
 fn require_fresh_approval(change: &Change) -> Result<(), TelosError> {
     if !change.is_stale() {
@@ -668,7 +666,7 @@ fn require_fresh_approval(change: &Change) -> Result<(), TelosError> {
 // --- gate 4: the accepted bytes ---------------------------------------------
 
 /// An `accept` op means "the bytes at this path, as they were when `adopt`
-/// saw them, are the intended bytes" (D7). If they moved since, the delta
+/// saw them, are the intended bytes". If they moved since, the delta
 /// under review is not the delta about to be sealed, so the reconcile stops
 /// rather than sealing content nobody looked at.
 ///
@@ -705,28 +703,28 @@ fn require_accepted_bytes(git: &GitRepo, change: &Change) -> Result<(), TelosErr
     Ok(())
 }
 
-// --- gate 6: rule 5, no code without telos ----------------------------------
+// --- gate 6: the unbound-code gate, no code without telos ----------------------------------
 
-/// The paths rule 5 must stay silent about because some open change has
-/// already declared them in flight (T5).
+/// The paths the unbound-code gate must stay silent about because some open change has
+/// already declared them in flight.
 ///
 /// Two sources, and the asymmetry between them is the point:
 ///
 /// - **This change's journal.** A `bind` line, or a red run's test file, is
 ///   a declaration that the path is being worked on *now*. A red run in
-///   particular asserts no binding at all -- that is what red means (D2) --
+///   particular asserts no binding at all -- that is what red means --
 ///   so its test file is uncovered by construction until the green folds a
-///   `proves` in. Left to rule 5, the only red-only reconcile there is would
-///   answer «orphan, run `telos bind`», which is the wrong next step and
+///   `proves` in. Left to the unbound-code gate, the only red-only reconcile there is would
+///   answer “orphan, run `telos bind`”, which is the wrong next step and
 ///   does not converge: the honest verdict is gate 8's, one gate later, and
-///   it names the green that is missing. Rule 5 is not weakened by this,
+///   it names the green that is missing. The unbound-code gate is not weakened,
 ///   only deferred -- at the green end state the fold turns the run into a
 ///   `proves` and the path is covered by the model itself.
-/// - **Every *other* open change's claims**, ops included. M3's implementing
+/// - **Every *other* open change's claims**, ops included. Implementing
 ///   changes write unbound code files for their whole life, and an unrelated
 ///   reconcile cannot be held hostage to that any more than gate 1 can be.
 ///   The exemption lasts exactly as long as the claim: abandon that change
-///   and the file is rule 5's business again, on the very next reconcile.
+///   and the file is the unbound-code gate's business again, on the very next reconcile.
 ///
 /// `others` may or may not contain `change` itself; its entry is filtered
 /// out either way, so the answer is the same -- exactly as in [`classify_drift`].
@@ -744,19 +742,19 @@ fn in_flight_paths(change: &Change, others: &[OpenChangeInfo]) -> BTreeSet<RepoP
         .collect()
 }
 
-/// D8, over the model the delta describes: a file the `[code]` globs match
+/// code coverage, over the model the delta describes: a file the `[code]` globs match
 /// must be covered by an `implements` binding, one the `[tests]` globs match
 /// by a `proves` one, independently.
 ///
 /// [`orphan_code`] answers *which* files are uncovered; the wording is
 /// recomputed here because the message has to name which of the two families
 /// the file failed -- they have different remedies, and an agent reading
-/// «no `implements` binding» knows what to write next.
+/// “no `implements` binding” knows what to write next.
 ///
 /// `exempt` is what some open change has declared in flight
 /// ([`in_flight_paths`]), and it is empty for a `--full` reseal: `--full`
 /// proves the tree on disk, and a journal nobody has reconciled yet is not
-/// part of that proof (§7.4).
+/// part of that proof.
 fn require_no_orphan_code(
     ws: &Workspace,
     model: &TelosModel,
@@ -791,33 +789,33 @@ fn require_no_orphan_code(
     ))
 }
 
-// --- gate 7: the sealed code coverage (D9) -----------------------------------
+// --- gate 7: the sealed code coverage -----------------------------------
 
-/// D9, the M2 residual: a reconcile may not shrink the code coverage the
-/// previous seal recorded unless the shrink is what was reviewed.
+/// A reconcile may not shrink the code coverage recorded by the previous seal
+/// unless that shrink is part of the reviewed delta.
 ///
-/// [`seal`] derives `lock.code` from the model's bindings, so «the previous
-/// lock held this path and the folded model binds nothing that reaches it»
+/// [`seal`] derives `lock.code` from the model's bindings, so “the previous
+/// lock held this path and the folded model binds nothing that reaches it”
 /// means exactly one thing: the bindings table lost a line between the two
 /// transactions. Nothing writes `bindings.tel` outside a reconcile, and no
-/// journal line may even name it (D2), so that line went missing outside the
+/// journal line may even name it, so that line went missing outside the
 /// protocol -- a hand edit, a bad merge, a truncation. Sealing over it would
 /// launder that loss into a fresh, coherent-looking lock, and the file it
 /// used to cover would silently stop being spec-governed. That is the
 /// ledger attack, and
-/// it is exactly what §4.1's «une édition manuelle = drift» forbids.
+/// it is exactly what the CLI-only mutation contract forbids.
 ///
 /// The one exemption is a delta that *stages* `telos/bindings.tel` -- the
 /// `accept` op `adopt` produces for it. What that buys is bounded, and the
 /// bound belongs in the contract rather than in a reader's optimism: the
 /// shrink was **captured** by `adopt` into a change, and somebody approved
-/// a delta one of whose ops is «take the current bytes of
-/// `telos/bindings.tel`». It is not a line-level review.
+/// a delta one of whose ops is “take the current bytes of
+/// `telos/bindings.tel`”. It is not a line-level review.
 /// [`crate::overlay::op_before_after`] renders an `accept`'s `before` from
 /// the tree as it stands -- already shrunk -- and its `after` as `None`, so
 /// `change diff` never shows the approver *which* `implements` line went
-/// missing. The exemption means «this shrink is owned by an approved
-/// delta», not «somebody read it», and that is the whole claim.
+/// missing. The exemption means “this shrink is owned by an approved
+/// delta”, not “somebody read it”, and that is the whole claim.
 ///
 /// Any op targeting the path counts, not just `accept`: what matters is
 /// that the reviewed delta is about that file.
@@ -865,9 +863,9 @@ fn require_no_coverage_shrink(
     ))
 }
 
-// --- gate 8: the sealed red witness (D7) -------------------------------------
+// --- gate 8: the sealed red witness -------------------------------------
 
-/// The witness discipline, as a static gate over the journal (D7): every
+/// The witness discipline, as a static gate over the journal: every
 /// scenario this delta makes new or different owes an intact red/green pair
 /// on the bytes its test file has *right now*.
 ///
@@ -938,7 +936,7 @@ fn check_witnesses(
                 format!("run `telos test {scenario}` again once the implementation is in place"),
             ),
             // The message is the verdict's own -- it names the test file and
-            // distinguishes "changed" from "no longer exists" (Annex F), and
+            // distinguishes "changed" from "no longer exists", and
             // only `witness_verdict` knows which red it judged.
             WitnessVerdict::Sealed(message) => (
                 ErrorCode::TelosTestSealed,
@@ -958,14 +956,15 @@ fn check_witnesses(
     Ok(warnings)
 }
 
-// --- what this delta impacts (D10/D11) --------------------------------------
+// --- what this delta impacts --------------------------------------
 
 /// The graph nodes a delta touches, plus everything that depends on them.
 ///
 /// An `add`/`edit` names an entity that exists in the *post* model, so its
 /// node and its reverse closure are read there. A `remove` names one that
 /// does not, so what depended on it can only be read from the *pre* model --
-/// which, by rule 2 of §3.3 (already enforced in gate 5), is empty for a
+/// which, because referential deletion safety is already enforced in gate 5,
+/// is empty for a
 /// legal removal, since nothing may still reference what is being removed.
 /// It is computed anyway rather than assumed: the rule and this set are
 /// enforced by different code, and the day one of them grows a legitimate
@@ -1040,7 +1039,7 @@ fn is_remove(op: &StagedOp) -> bool {
 }
 
 /// The intents among `nodes` -- what a constraint's `scope` is matched
-/// against (D11).
+/// against.
 fn impacted_intents(nodes: &BTreeSet<NodeRef>) -> BTreeSet<IntentId> {
     nodes
         .iter()
@@ -1052,7 +1051,7 @@ fn impacted_intents(nodes: &BTreeSet<NodeRef>) -> BTreeSet<IntentId> {
 }
 
 /// The scenarios among `nodes`, plus every scenario of the intents among
-/// them (D10): editing an intent impacts its own scenarios even though no
+/// them: editing an intent impacts its own scenarios even though no
 /// edge points from the intent to them -- `verifies` runs the other way.
 fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet<ScenarioId> {
     let mut scenarios = BTreeSet::new();
@@ -1072,12 +1071,12 @@ fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet
     scenarios
 }
 
-// --- gate 10: constraint checks (D11) ---------------------------------------
+// --- gate 10: constraint checks ---------------------------------------
 
 /// Runs the `check` of every global constraint and of every scoped one whose
 /// scope meets an impacted intent, at the repository root.
 ///
-/// `impacted` is `None` for a full reseal, and that is D11's other half:
+/// `impacted` is `None` for a full reseal, which runs every constraint check:
 /// a `scope` filters constraints against *a delta*, so with no delta to
 /// filter against there is nothing to narrow -- every constraint that has a
 /// `check` runs.
@@ -1085,8 +1084,8 @@ fn impacted_scenarios(model: &TelosModel, nodes: &BTreeSet<NodeRef>) -> BTreeSet
 /// A constraint with no `check` is not a failure and is not counted: the
 /// `rule` is then prose for a human, which this engine has no way to verify.
 /// A command that cannot even be spawned is folded into the same
-/// `TELOS_CONSTRAINT_FAILED` as one that exits non-zero (D11) -- from the
-/// caller's side «the check did not pass» is one outcome with one remedy.
+/// `TELOS_CONSTRAINT_FAILED` as one that exits non-zero -- from the
+/// caller's side “the check did not pass” is one outcome with one remedy.
 fn run_constraint_checks(
     ws: &Workspace,
     model: &TelosModel,
@@ -1120,8 +1119,7 @@ fn in_scope(constraint: &Constraint, impacted: &BTreeSet<IntentId>) -> bool {
     }
 }
 
-/// The one refusal a failed check produces, and it names exactly what D11
-/// says it names: the constraint and the command.
+/// The refusal for a failed check names the constraint and command.
 ///
 /// The command's own output is deliberately *not* folded in. It is not
 /// reproducible across machines (a git version, a locale, a `$PATH`), so a
@@ -1136,7 +1134,7 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
     .hint("Run the constraint's `check` command directly to see its output.")
 }
 
-// --- gate 11: tests (D10) ----------------------------------------------------
+// --- gate 11: tests ----------------------------------------------------
 
 /// Runs `[test] cmd` once per distinct `proves` target of the impacted
 /// scenarios, `{filter}` substituted with the target's test name (or, when
@@ -1145,7 +1143,7 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
 /// An empty `cmd` skips the whole gate and reports zero runs. Gate 9 already
 /// proved that no active obligation requires one; draft-only/spec scaffolding
 /// may therefore still reconcile without a runner. A run that fails is the
-/// reconcile half of rule 4 --
+/// runtime half of the proof check --
 /// a scenario the spec claims is proved, whose proof does not currently
 /// pass -- and is reported as `TELOS_INTEGRITY_VIOLATION` carrying the
 /// substituted command, so the caller can rerun exactly what ran.
@@ -1189,8 +1187,8 @@ fn run_tests(
     Ok(tests_run)
 }
 
-/// The `--full` half of D10: one invocation of `[test] cmd`, `{filter}`
-/// substituted with nothing -- the whole suite, once.
+/// A full reconcile invokes `[test] cmd` once with `{filter}` substituted by
+/// nothing -- the whole suite, once.
 ///
 /// A full reseal with active obligations proves the spec as it stands rather
 /// than what a delta reached, so there is no per-target loop and nothing to
@@ -1213,8 +1211,8 @@ fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
 
 /// Names what was run and the command that ran for it -- the latter after
 /// substitution, so a caller can rerun character-for-character what this
-/// did. `target` is a `proves` target for a per-change reconcile and «the
-/// whole suite» for a full one. The command's output is left out for the
+/// did. `target` is a `proves` target for a per-change reconcile and “the
+/// whole suite” for a full one. The command's output is left out for the
 /// same reason as in [`constraint_failed`]: it is not reproducible, so it
 /// cannot be contract.
 fn test_failed(target: &str, command: &str) -> TelosError {
@@ -1225,7 +1223,7 @@ fn test_failed(target: &str, command: &str) -> TelosError {
     .hint("run the configured executable with the displayed arguments, then reconcile again")
 }
 
-// --- the writes (D6) ---------------------------------------------------------
+// --- the writes ---------------------------------------------------------
 
 /// Writes one op's target: the entity's canonical bytes for `add`/`edit`,
 /// deletion for `remove`, nothing for `accept` (the bytes are already what
@@ -1234,7 +1232,7 @@ fn test_failed(target: &str, command: &str) -> TelosError {
 /// Ops are applied in staged order, so a change that adds an entity and then
 /// removes it leaves no file, and one that removes and re-adds leaves the
 /// re-added one: the same net effect the overlay computed, obtained the same
-/// way -- order is data (D1).
+/// way -- order is data.
 ///
 /// A `remove` whose file is already absent is not an error: an earlier op of
 /// this very change may have been the only reason it would have existed.
@@ -1258,7 +1256,7 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
     repo_fs.write(&path, content.as_bytes())
 }
 
-/// Writes `telos/bindings.tel` from the folded model (D2), through the
+/// Writes `telos/bindings.tel` from the folded model, through the
 /// emitter like every other spec file this transaction writes.
 ///
 /// The whole table is re-emitted rather than appended to: `model.bindings`
@@ -1445,7 +1443,7 @@ mod tests {
         assert_eq!(fresh.code[&RepoPath::new(INVOICE)], oid("a"));
     }
 
-    // --- gate 7: the sealed code coverage (D9) ---------------------------
+    // --- gate 7: the sealed code coverage ---------------------------
 
     fn model_binding(paths: &[&str]) -> TelosModel {
         TelosModel {
@@ -1525,7 +1523,7 @@ mod tests {
         assert!(require_no_coverage_shrink(&previous, &model_binding(&[CODE]), &[]).is_ok());
     }
 
-    // --- gate 6's in-flight exemption (T5) --------------------------------
+    // --- gate 6's in-flight exemption -------------------------------------
 
     fn info(id: u32, claims: &[&str]) -> OpenChangeInfo {
         OpenChangeInfo {
@@ -1541,9 +1539,9 @@ mod tests {
     #[test]
     fn in_flight_paths_are_this_journals_and_every_other_changes_claims() {
         // `accept STRAY` is the witness that a change's *own op targets* are
-        // not in flight: this transaction is applying them, so rule 5 judges
+        // not in flight: this transaction is applying them, so the unbound-code gate judges
         // the state they produce -- adopting a code file without binding it
-        // is still an orphan, exactly as in M2.
+        // is still an orphan.
         let change = Change {
             id: crate::ids::ChangeId(1),
             motivation: "x".to_string(),
@@ -1566,7 +1564,7 @@ mod tests {
         assert_eq!(paths, carried(&[CODE, ROGUE]));
         assert!(
             !paths.contains(&RepoPath::new(STRAY)),
-            "a path this change's own op targets must not be exempted from rule 5"
+            "a path this change's own op targets must not be exempted from the unbound-code gate"
         );
     }
 

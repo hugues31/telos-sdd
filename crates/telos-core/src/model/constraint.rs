@@ -37,7 +37,7 @@ pub struct Constraint {
     pub title: String,
     pub rule: Rule,
     pub scope: Scope,
-    /// Shell command; opaque in M1.
+    /// Optional shell command, stored as opaque text.
     pub check: Option<String>,
 }
 

@@ -1,8 +1,8 @@
-//! `telos adopt [--into CHG-NNNN]`: the exit from drift that keeps the
-//! bytes (spec §6, D7).
+//! `telos adopt [--into CHG-NNNN]`: the exit from drift that captures the
+//! current bytes.
 //!
 //! Drift is refused everywhere else -- `change open`, the staging verbs,
-//! `approve`, `reconcile` (D17) -- and this is one of the two commands that
+//! `approve`, `reconcile` -- and this is one of the two commands that
 //! makes those refusals cheap rather than punitive: an edit made outside the
 //! protocol is not lost, it is *routed back in*. Every drifted path becomes a
 //! staged op of a change, and from there the ordinary loop applies: `change
@@ -15,10 +15,10 @@
 //! 1. **State first.** Drift is what this command acts on, so its absence is
 //!    the one refusal that comes before any work.
 //! 2. **The plan is built** ([`plan_adopt`]) from the *unclaimed* drift only
-//!    -- a path an open change already claims is that change in progress
-//!    (D5), never adopted twice.
+//!    -- a path an open change already claims is that change in progress,
+//!    never adopted twice.
 //! 3. **The target change is chosen**: a new one, or `--into`'s.
-//! 4. **One file, one change** (D5): the claim gate, against every *other*
+//! 4. **One file, one change**: the claim gate, against every *other*
 //!    open change.
 //! 5. **The whole delta is validated** ([`validate_ops_idempotent`]) --
 //!    including the ops the target change already held.
@@ -45,7 +45,7 @@ use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_dri
 use crate::envelope::{CmdResult, Outcome};
 
 /// The motivation a change opened by `adopt` carries. A change file must say
-/// why it exists (D1), and «somebody edited the spec outside the protocol»
+/// why it exists, and “somebody edited the spec outside the protocol”
 /// is the honest answer -- the review that follows is where a better one
 /// gets written, if the caller wants one.
 const MOTIVATION: &str = "adopted drift";
@@ -91,7 +91,7 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
         }
     };
 
-    // D5, defensively: a claimed path is never unclaimed drift, so
+    // Defensively exclude claimed paths: they are never unclaimed drift, so
     // `plan_adopt` cannot have produced one -- unless a change file was
     // written between `compute_state` and here. The gate costs nothing and
     // the alternative is two changes owning one file.
@@ -111,7 +111,7 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
 
     write_change(&project.ws, &change)?;
     // Only a *new* change spent an id; `--into` reuses one that was
-    // allocated and persisted when it was opened (D4).
+    // allocated and persisted when it was opened.
     if let Some(alloc) = &alloc {
         write_counters(&project.ws, &alloc.counters())?;
     }

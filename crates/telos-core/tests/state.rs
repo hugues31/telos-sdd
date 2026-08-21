@@ -4,7 +4,7 @@
 //! actually exercises it -- see `telos_core::state`'s module docs for why it
 //! never parses a `.tel` file itself.
 //!
-//! The claim-aware section below (D15) drives `compute_state` with real
+//! The claim-aware section below drives `compute_state` with real
 //! `OpenChangeInfo`s -- built via `write_change` + `open_change_infos`
 //! rather than constructed by hand -- so the same store `changes_store.rs`
 //! exercises is what state.rs is proved against.
@@ -269,7 +269,8 @@ fn compute_state_ignores_a_new_unbound_code_file() {
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
     // Created after the seal, never referenced by any binding, and not a
-    // spec file -- unlinked code is free in M1 (rule 5 is M2 reconcile-time).
+    // spec file -- unlinked code is permitted while reading project state;
+    // coverage is enforced during reconcile.
     fs::write(tmp.path().join("src/other.rs"), "// unrelated\n").unwrap();
 
     let report = compute_state(&ws, &lock, &git, &[]).unwrap();
@@ -303,7 +304,7 @@ fn compute_state_answers_drifted_on_a_corrupted_spec_file_without_parsing() {
     );
 }
 
-// --- compute_state: claim-aware (D15) -----------------------------------
+// --- compute_state: claim-aware -----------------------------------
 
 /// A minimal notion distinct from anything the corpus already declares.
 fn ledger_notion() -> Notion {
@@ -456,7 +457,7 @@ fn compute_state_reports_an_unparseable_change_file_as_changing_with_a_repair_ob
 /// bytes `parse_change_file` (`&str`-only) can never be offered. This must
 /// still reach `compute_state` as a `Changing` report with the repair
 /// obligation, never as an `Err`: `open_change_infos` is best-effort per
-/// D15, and a truncated write or binary corruption is exactly the on-disk
+/// A truncated write or binary corruption is exactly the on-disk
 /// damage that guarantee exists to survive.
 #[test]
 fn compute_state_reports_invalid_utf8_change_bytes_as_changing_never_an_error() {

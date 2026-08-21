@@ -1,9 +1,9 @@
-//! Byte-exact round-trip suite for the canonical `.tel` emitter (Annex C.4).
+//! Byte-exact round-trip suite for the canonical `.tel` emitter.
 //!
 //! Three angles, all of them checking the same invariant from a different
 //! side:
 //!
-//! 1. **Corpus idempotence** -- for every `.tel` file of the Annex D fixture
+//! 1. **Corpus idempotence** -- for every `.tel` file of the Billing fixture
 //!    tree, `emit_file(&parse(bytes)) == bytes`, compared byte for byte.
 //!    This is the strongest statement of the canonical form: the corpus
 //!    files *are* the specification of the emitter's output, so padding,
@@ -35,8 +35,7 @@ use telos_core::syntax::{
 
 // --- corpus helpers ------------------------------------------------------
 
-/// The Annex D fixture tree, shared with the later tasks (which copy it into
-/// throwaway git repos).
+/// The JSON payload fixture tree, copied into throwaway Git repositories.
 fn corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/billing")
 }
@@ -77,8 +76,8 @@ fn read_corpus(rel: &str) -> String {
     String::from_utf8(bytes).unwrap_or_else(|e| panic!("{rel} is not UTF-8: {e}"))
 }
 
-/// Parses a corpus file with the rule its location calls for (Annex C.4.2:
-/// one file = one entity, `bindings.tel` excepted).
+/// Parses a corpus file with the rule its location calls for:
+/// one file = one entity, `bindings.tel` excepted.
 fn parse_corpus(rel: &str, src: &str) -> TelFile {
     /// A parse failure in a fixture is a bug in the fixture: report which
     /// file, and stop.
@@ -105,7 +104,7 @@ fn parse_corpus(rel: &str, src: &str) -> TelFile {
 // --- 1. corpus idempotence ----------------------------------------------
 
 #[test]
-fn corpus_holds_exactly_the_annex_d_tel_files() {
+fn corpus_holds_exactly_the_payload_schema_tel_files() {
     // Guards the suite below: were a corpus file to go missing, its
     // round-trip assertion would silently stop running.
     assert_eq!(
@@ -134,7 +133,7 @@ fn every_corpus_tel_file_round_trips_byte_exact() {
 
 #[test]
 fn corpus_tel_files_are_lf_only_with_one_trailing_newline() {
-    // The canonical form is a byte-level contract (Annex C.4.1). A checkout
+    // The canonical form is a byte-level contract. A checkout
     // that rewrote line endings would make the assertions above vacuous, so
     // the file bytes are checked head-on too -- this is what the repo's
     // `.gitattributes` (`*.tel text eol=lf`) protects on Windows.
@@ -155,7 +154,7 @@ fn corpus_tel_files_are_lf_only_with_one_trailing_newline() {
 
 #[test]
 fn invoice_notion_is_byte_exact_down_to_its_padding() {
-    // The §4.5 reference file, spelled out: keyword padding (`def  `,
+    // The reference file for round-trip guarantees, spelled out: keyword padding (`def  `,
     // `attr `, `rel  `), attr-name padding (`state` to `balance`'s width),
     // enum rendering, 2-space indent.
     let src = read_corpus("telos/notions/Invoice.tel");
@@ -392,7 +391,7 @@ fn every_comparison_operator_round_trips() {
 
 #[test]
 fn literals_re_emit_their_preserved_lexeme() {
-    // Annex C.4.10: a decimal is never routed through a float, and dates
+    // A decimal is never routed through a float, and dates
     // keep the exact lexeme they were written with.
     assert_eq!(
         emit_literal(&Literal::Decimal("120.50".to_string())),
@@ -414,7 +413,7 @@ fn literals_re_emit_their_preserved_lexeme() {
     assert_eq!(emit_literal(&Literal::Bool(true)), "true");
     assert_eq!(emit_literal(&Literal::Bool(false)), "false");
     assert_eq!(emit_literal(&symbol("settled")), "settled");
-    // Annex C.4.8: only `\"` and `\\` are escaped.
+    // Only `\"` and `\\` are escaped.
     assert_eq!(
         emit_literal(&Literal::Str("a \"b\" \\ c".to_string())),
         "\"a \\\"b\\\" \\\\ c\""
@@ -459,7 +458,7 @@ fn relation_lines_are_sorted_ascending_on_emit() {
     assert_eq!(
         relations,
         vec![
-            // Grammar order between the groups (Annex C.4.3)...
+            // Grammar order between the groups...
             "refines INT-0001",
             "refines INT-0009",
             "requires INT-0003",
@@ -482,7 +481,7 @@ fn scenarios_are_sorted_ascending_on_emit() {
 
 #[test]
 fn scenarios_are_separated_by_exactly_one_blank_line() {
-    // Annex C.4.4: a blank line before each scenario, nowhere else.
+    // One blank line before each scenario, nowhere else.
     let emitted = emit_intent(&unsorted_intent());
     assert!(!emitted.contains("\n\n\n"), "no double blank line");
     assert_eq!(
@@ -512,7 +511,7 @@ fn proves(test: &str, id: u32) -> Binding {
 
 #[test]
 fn bindings_are_grouped_and_sorted_on_emit() {
-    // Annex C.4.2: every `implements` first, sorted; then every `proves`.
+    // Every `implements` first, sorted; then every `proves`.
     let emitted = emit_bindings(&[
         proves("tests/z.rs::b", 2),
         implements("src/z.rs", 20),
@@ -563,7 +562,7 @@ fn unsorted_constraint() -> Constraint {
 
 #[test]
 fn constraint_scope_intents_are_sorted_ascending_on_emit() {
-    // C.4.3: `scope`'s intent list is sorted, not echoed in model order.
+    // `scope`'s intent list is sorted, not echoed in model order.
     let emitted = emit_constraint(&unsorted_constraint());
     assert!(emitted.contains("\n  scope INT-0017, INT-0042\n"));
 }
@@ -654,7 +653,7 @@ fn shapes_the_corpus_does_not_cover_round_trip_through_the_parser() {
     // emitting it must give the exact same bytes back.
     let notions = [
         // Every scalar attr type, a `ref(...)`, several rels: the attr-name
-        // and rel-name paddings are independent (Annex C.4.6).
+        // and rel-name paddings are independent.
         concat!(
             "notion Ledger value {\n",
             "  def  \"Everything an attribute can be.\"\n",

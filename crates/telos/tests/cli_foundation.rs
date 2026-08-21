@@ -1,4 +1,4 @@
-//! End-to-end tests for the M1 command surface: `version` and `init`, in
+//! End-to-end tests for the foundational command surface: `version` and `init`, in
 //! both human and `--json` mode. Every one of them runs the real binary in a
 //! throwaway directory -- these are the tests that prove the CLI contract,
 //! not the ones that prove the engine (those live in `telos-core`).
@@ -112,7 +112,7 @@ fn init_creates_the_whole_telos_tree() {
     );
 }
 
-/// D4: `init` seeds `telos/changes/counters.toml` at zero, and -- because
+/// `init` seeds `telos/changes/counters.toml` at zero and, because
 /// `changes/` is excluded from `Workspace::spec_files`, this seed never
 /// enters the seal.
 #[test]

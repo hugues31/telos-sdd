@@ -15,7 +15,7 @@ use crate::ids::RepoPath;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
-    // Frozen by spec §8 (present from M1 even if only emitted in M2+).
+    // Core public error codes.
     TelosDriftDetected,
     TelosApprovalStale,
     TelosReferenceUnknown,
@@ -25,14 +25,14 @@ pub enum ErrorCode {
     TelosConstraintFailed,
     TelosChangeStateInvalid,
     TelosFileClaimed,
-    // M1 extensions (frozen in turn as of their publication).
+    // Initialization and engine error codes.
     /// No `telos/` directory or no `telos.lock`.
     TelosNotInitialized,
     /// `init` run on an already-initialized project.
     TelosAlreadyInitialized,
     /// `.tel` file is syntactically invalid.
     TelosParseError,
-    /// Rule §3.3 violated (other than unknown reference / cycle).
+    /// Integrity rule violated (other than unknown reference / cycle).
     TelosIntegrityViolation,
     /// Cycle detected on `requires`/`refines`.
     TelosCycleDetected,
@@ -40,9 +40,9 @@ pub enum ErrorCode {
     TelosGitError,
     /// Internal invariant broken (a bug).
     TelosInternal,
-    // M3 extension.
+    // Test discovery error code.
     /// No test runner configured, or `telos test`/`witness_verdict`'s test
-    /// discovery (D4) found zero or more than one candidate.
+    /// discovery found zero or more than one candidate.
     TelosTestNotFound,
 }
 
@@ -111,10 +111,8 @@ mod tests {
 
     #[test]
     fn error_code_serialization_is_frozen() -> Result<(), serde_json::Error> {
-        // One assertion per variant -- this list IS the freeze. Annex B's
-        // `error.rs` enumerates 17 identifiers (9 codes frozen by spec §8 +
-        // 7 M1 extensions + 1 M3 extension); every one of them is checked
-        // here.
+        // One assertion per variant -- this list IS the freeze. The public
+        // contract enumerates 17 identifiers; every one is checked here.
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosDriftDetected)?,
             "\"TELOS_DRIFT_DETECTED\""

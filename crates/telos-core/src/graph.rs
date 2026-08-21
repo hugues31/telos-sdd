@@ -1,5 +1,5 @@
-//! The relation graph (spec 3.2): every entity of the spec is a node, every
-//! relation between two of them is a directed, labelled edge.
+//! The relation graph: every entity of the spec is a node, and every relation
+//! between two of them is a directed, labelled edge.
 //!
 //! Seven of the eight relations are *declared* (`refines`, `requires`,
 //! `excludes` between intents; `constrains` from a scoped constraint;
@@ -257,7 +257,7 @@ mod tests {
     // --- NodeRef / Relation --------------------------------------------
 
     #[test]
-    fn node_ref_ordering_follows_the_annex_variant_order() {
+    fn node_ref_ordering_follows_the_canonical_variant_order() {
         // Load-bearing: `impact` ranks equal-distance entries with this
         // ordering, and its golden output depends on it.
         let mut nodes = vec![
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn relation_ordering_follows_the_annex_variant_order() {
+    fn relation_ordering_follows_the_canonical_variant_order() {
         let mut relations = vec![
             Relation::Proves,
             Relation::Uses,

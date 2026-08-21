@@ -140,7 +140,7 @@ pub fn run(ctx: &Ctx, query: &QueryCommand) -> CmdResult {
 }
 
 /// Resolves a `--using`/`--triggered-by` argument to the notion it names, or
-/// the same «unknown notion ...» error (with the same edit-distance hint)
+/// the same “unknown notion ...” error (with the same edit-distance hint)
 /// `show` reports for an unresolved notion argument.
 fn resolve_notion_arg(model: &TelosModel, arg: &str) -> Result<NotionName, TelosError> {
     let name = NotionName::new(arg)?;

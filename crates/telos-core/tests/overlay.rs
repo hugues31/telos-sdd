@@ -1,5 +1,5 @@
 //! The overlay: the sealed base plus a change's staged ops, and the rules
-//! that govern applying them (rule 2 of spec §3.3 in particular).
+//! that govern applying them (referential deletion safety in particular).
 //!
 //! Everything here runs against a copy of the `billing` corpus in a
 //! tempdir. The overlay never writes: these tests read a real spec tree,
@@ -285,9 +285,9 @@ fn apply_ops_rejects_removing_a_constraint_the_base_does_not_hold() {
     );
 }
 
-// --- apply_ops: rule 2, removing something still referenced -----------------
+// --- apply_ops: the referential-deletion check, removing something still referenced -----------------
 
-/// The rule as spec §3.3 states it, and as the brief freezes its wording:
+/// A referenced entity cannot be removed; the error names its referrer:
 /// the referrer is named, so the caller knows what to fix first.
 #[test]
 fn apply_ops_refuses_to_remove_an_intent_another_intent_requires() {
@@ -334,7 +334,7 @@ fn apply_ops_refuses_to_remove_an_intent_a_binding_implements() {
 
 /// The referrers are computed from the state *after* the removal, so a
 /// change that removes the referrer first and the referred-to entity second
-/// is allowed -- order is data (D1).
+/// is allowed -- order is data.
 #[test]
 fn apply_ops_allows_removing_an_intent_once_its_referrers_are_gone() {
     let (_tmp, ws) = corpus();
@@ -358,7 +358,7 @@ fn apply_ops_allows_removing_an_intent_once_its_referrers_are_gone() {
 }
 
 /// Nothing in the model points at a constraint, so removing one is never
-/// blocked by rule 2.
+/// blocked by the referential-deletion check.
 #[test]
 fn apply_ops_removes_a_constraint_nothing_can_reference() {
     let (_tmp, ws) = corpus();
@@ -414,7 +414,7 @@ fn apply_ops_leaves_an_accept_op_alone() {
 
 // --- apply_ops_idempotent ---------------------------------------------------
 //
-// The second application (D7): each op puts its post-state at its target
+// The second application: each op puts its post-state at its target
 // path and refuses nothing, so it can be replayed over a tree that already
 // shows it -- which is exactly what `adopt` produces and what `reconcile`
 // then has to validate. These tests pin the two halves of that: that it
@@ -555,7 +555,7 @@ fn validate_ops_idempotent_reports_a_dangling_reference_in_a_staged_op() {
 }
 
 /// **The safety property of the whole idempotent path**, pinned rather than
-/// argued: `apply_ops_idempotent` cannot enforce rule 2 of §3.3 (it refuses
+/// argued: `apply_ops_idempotent` cannot enforce the referential-deletion check (it refuses
 /// nothing), so a removal that leaves a referrer dangling has to be caught by
 /// the semantic pass instead. It is -- with a different, file-located
 /// message, and the same refusal.

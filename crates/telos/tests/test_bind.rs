@@ -7,7 +7,7 @@
 //!   the command appends names the test's blob oid, and the test recomputes
 //!   that oid with `git hash-object` rather than reading it back out of the
 //!   file it is checking.
-//! - **The drift carve-out** (D6). Writing the test function into a *sealed*
+//! - **The drift carve-out**. Writing the test function into a *sealed*
 //!   test file drifts the project before any journal line claims it, so
 //!   `telos test` has to admit exactly that path -- and only that path.
 //!
@@ -58,7 +58,7 @@ const BILLING_TEST: &str = "tests/billing.rs";
 const SCN: &str = "SCN-0108";
 
 /// The test function name appended to [`BILLING_TEST`], and therefore the
-/// `name` half of the discovered locator (D4).
+/// `name` half of the discovered locator.
 const TEST_FN: &str = "scn_0108_x";
 
 /// The exact `TELOS_DRIFT_DETECTED` hint, frozen by `docs/contracts.md`.
@@ -157,7 +157,7 @@ fn open_change(dir: &Path) {
 }
 
 /// `SCN-0091` exactly as the corpus declares it: re-supplied unchanged so
-/// that its emitted fragment is identical and D7 exempts it from owing a
+/// that its emitted fragment is identical, so it does not owe a
 /// witness of its own.
 fn unchanged_scn_0091() -> Value {
     json!({
@@ -305,11 +305,11 @@ fn writing_the_test_into_a_sealed_file_drifts_the_project_first() {
     );
 }
 
-/// The Annex C result, key for key, on a green run -- carve-out included:
+/// The public result, key for key, on a green run -- carve-out included:
 /// the command succeeds even though the project was drifted on the test
 /// file it just claimed.
 #[test]
-fn test_records_a_green_witness_with_the_annex_c_result() {
+fn test_records_a_green_witness_with_the_canonical_result() {
     let tmp = approved_with_a_drifted_test();
 
     let out = telos(tmp.path(), &["test", SCN, "--json"])
@@ -442,7 +442,7 @@ fn a_second_run_appends_rather_than_replacing_the_first() {
     );
 }
 
-/// D5's transition: the first journalled run takes an `approved` change to
+/// The first journalled run takes an `approved` change to
 /// `implementing`, which is what the grammar requires of a change that has a
 /// journal at all -- and the project, whose only drift is now claimed, is
 /// back to `changing`.
@@ -463,13 +463,13 @@ fn test_moves_the_owner_to_implementing_and_the_project_to_changing() {
     );
 }
 
-/// D1's whole point: journalling is digest-inert, so the change that was
+/// Journalling is digest-inert, so the change that was
 /// approved before its first run is not stale after it.
 #[test]
 fn journalling_a_run_leaves_the_approval_fresh() {
     let tmp = approved_with_a_drifted_test();
     // Read back rather than re-approved: the project is drifted on the test
-    // file at this point, and `approve` is gated on that (D17).
+    // file at this point, and `approve` is gated on that.
     let approved_digest = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"])["result"]
         ["approved_digest"]
         .clone();
@@ -484,8 +484,7 @@ fn journalling_a_run_leaves_the_approval_fresh() {
     assert_eq!(envelope["result"]["status"], json!("implementing"));
 }
 
-/// D13, advanced here because `telos test` is what makes it reachable:
-/// re-approving a change that has already started being implemented
+/// Re-approving a change that has already started being implemented
 /// recalculates the digest and *keeps* `implementing` -- writing `approved`
 /// over a journalled change would produce a file the grammar refuses.
 #[test]
@@ -565,7 +564,7 @@ fn reapproving_after_implementation_refreshes_the_digest_but_keeps_implementing(
     assert_eq!(reconciled["ok"], json!(true), "{reconciled}");
 }
 
-// --- the gates, in the order D6 freezes them --------------------------------
+// --- gates checked before any write ------------------------------------------
 
 /// An id no change and no spec file declares: the same `unknown scenario`
 /// shape `show` answers with, nearest existing id included.
@@ -580,7 +579,7 @@ fn test_on_an_unknown_scenario_names_the_nearest_id() {
     assert_eq!(error["hint"], json!("closest is SCN-0107"));
 }
 
-/// D5: a scenario the sealed spec declares but no open change stages is
+/// A scenario the sealed spec declares but no open change stages is
 /// nobody's to witness.
 #[test]
 fn test_on_a_scenario_no_change_implements_is_refused() {
@@ -599,7 +598,7 @@ fn test_on_a_scenario_no_change_implements_is_refused() {
     );
 }
 
-/// The owner exists but has not been reviewed: the M2 wording, reused.
+/// The owner exists but has not been reviewed: the established wording.
 #[test]
 fn test_on_a_drafted_owner_asks_for_the_approval_first() {
     let tmp = fixture_with_runner();
@@ -619,8 +618,8 @@ fn test_on_a_drafted_owner_asks_for_the_approval_first() {
     );
 }
 
-/// No runner wired up at all -- the corpus' own state (D13 ships `[test]
-/// cmd` empty), reached only once the owner and its status have checked out.
+/// No runner is configured in the corpus (`[test] cmd` is empty). This gate
+/// is reached only once the owner and its status have checked out.
 #[test]
 fn test_without_a_configured_runner_names_the_missing_setting() {
     let tmp = fixture_without_runner();
@@ -641,7 +640,7 @@ fn test_without_a_configured_runner_names_the_missing_setting() {
     );
 }
 
-/// D4: nothing the `[tests]` globs cover holds the convention.
+/// Nothing covered by the `[tests]` globs holds the naming convention.
 #[test]
 fn test_without_a_matching_test_function_names_the_convention() {
     let tmp = fixture_with_runner();
@@ -688,7 +687,7 @@ fn test_with_an_absent_explicit_file_is_the_exact_no_hint_error() {
     assert_eq!(error["hint"], Value::Null);
 }
 
-/// D4: two files hold the convention, so discovery refuses rather than
+/// Two files hold the naming convention, so discovery refuses rather than
 /// picking one, and names `--file` as the way out.
 #[test]
 fn test_with_the_convention_in_two_files_refuses_to_choose() {
@@ -735,7 +734,7 @@ fn test_with_an_explicit_file_picks_it_and_still_names_the_function() {
     );
 }
 
-/// The carve-out is exactly one path wide (D6): drift anywhere else is still
+/// The carve-out is exactly one path wide: drift anywhere else is still
 /// damage nobody claimed, and the command refuses before running anything.
 #[test]
 fn test_refuses_unclaimed_drift_outside_the_test_file() {
@@ -765,7 +764,7 @@ fn test_refuses_unclaimed_drift_outside_the_test_file() {
 
 /// `--all` runs every scenario the open, approved changes owe a witness for
 /// -- which here is the new one only: `SCN-0091` was re-staged byte-
-/// identical, so D7 exempts it.
+/// identical, so it is exempted.
 #[test]
 fn test_all_runs_every_scenario_that_owes_a_witness() {
     let tmp = approved_with_a_drifted_test();
@@ -825,7 +824,7 @@ fn test_requires_exactly_one_of_a_scenario_and_all() {
 }
 
 // =============================================================================
-// `telos bind`: the same shape of gates (D5, D6), and the dedup that makes
+// `telos bind`: the same gate shape, plus the deduplication that makes
 // it idempotent -- `telos test` never checks a run against what is already
 // in the journal, but a re-bind of the identical pair must answer with the
 // one line already on disk, not a second copy of it.
@@ -844,18 +843,18 @@ const INVOICE_CODE: &str = "src/billing/invoice.rs";
 
 /// The intent every happy-path bind below targets: `active` with one
 /// scenario and one binding already in the sealed corpus, so a no-op `edit
-/// intent` is enough to make an open change its owner (D5) without
+/// intent` is enough to make an open change its owner without
 /// changing its content.
 const BOUND_INTENT: &str = "INT-0042";
 
 /// An intent the sealed corpus declares but no change stages: the owner
-/// gate (D5) has nothing to find.
+/// gate has nothing to find.
 const UNOWNED_INTENT: &str = "INT-0017";
 
 /// Stages a no-op `edit intent INT-0042` into `CHG-0001`. An empty patch
 /// payload keeps every field exactly as `patch_intent`'s base default
 /// leaves it, so the only effect of this call is making `CHG-0001` the
-/// intent's owner (D5).
+/// intent's owner.
 fn edit_int_0042(dir: &Path) {
     let out = telos(
         dir,
@@ -994,9 +993,9 @@ fn append_to_invoice_code(dir: &Path) {
 
 // --- the happy path ----------------------------------------------------------
 
-/// The Annex C result, key for key, binding a brand-new file.
+/// The public result, key for key, when binding a brand-new file.
 #[test]
-fn bind_records_a_new_file_with_the_annex_c_result() {
+fn bind_records_a_new_file_with_the_canonical_result() {
     let tmp = approved_owning_int_0042();
     fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
 
@@ -1021,7 +1020,7 @@ fn bind_records_a_new_file_with_the_annex_c_result() {
     );
 }
 
-/// The journal line, byte for byte (Annex A's padding group).
+/// The journal line, byte for byte, including canonical padding.
 #[test]
 fn bind_appends_the_exact_journal_line() {
     let tmp = approved_owning_int_0042();
@@ -1039,7 +1038,7 @@ fn bind_appends_the_exact_journal_line() {
     );
 }
 
-/// D5's transition: the first journalled bind takes an `approved` change to
+/// The first journalled bind takes an `approved` change to
 /// `implementing`, and the project -- which has no drift at all here -- is
 /// `changing`.
 #[test]
@@ -1059,7 +1058,7 @@ fn bind_moves_the_owner_to_implementing() {
     );
 }
 
-/// D1's whole point: journalling a bind is digest-inert, so the change that
+/// Journalling a bind is digest-inert, so the change that
 /// was approved before it is not stale after.
 #[test]
 fn bind_leaves_the_approval_fresh() {
@@ -1079,7 +1078,7 @@ fn bind_leaves_the_approval_fresh() {
     assert_eq!(envelope["result"]["status"], json!("implementing"));
 }
 
-/// Unlike a run, a bind is deduplicated (Annex C): the identical pair
+/// Unlike a run, a bind is deduplicated: the identical pair
 /// journalled twice is one line, and the second call answers with exactly
 /// the same result as the first.
 #[test]
@@ -1160,7 +1159,7 @@ fn bind_on_an_unknown_intent_names_the_nearest_id() {
     assert_eq!(error["hint"], json!("closest is INT-0042"));
 }
 
-/// D5: an intent the sealed spec declares but no open change claims is
+/// An intent the sealed spec declares but no open change claims is
 /// nobody's to bind.
 #[test]
 fn bind_on_an_intent_no_change_owns_is_refused() {
@@ -1182,7 +1181,7 @@ fn bind_on_an_intent_no_change_owns_is_refused() {
     );
 }
 
-/// The owner exists but has not been reviewed: the M2 wording, reused.
+/// The owner exists but has not been reviewed: the established wording.
 #[test]
 fn bind_on_a_drafted_owner_asks_for_the_approval_first() {
     let tmp = with_fixture();
@@ -1202,7 +1201,7 @@ fn bind_on_a_drafted_owner_asks_for_the_approval_first() {
     );
 }
 
-/// A path that does not exist on disk: the M2 seal wording, reused
+/// A path that does not exist on disk: the seal wording is reused
 /// verbatim, no hint.
 #[test]
 fn bind_of_a_missing_path_names_it() {
@@ -1262,7 +1261,7 @@ fn bind_of_a_path_under_telos_is_refused() {
     );
 }
 
-/// The carve-out is exactly one path wide (D6): drift anywhere else is
+/// The carve-out is exactly one path wide: drift anywhere else is
 /// still damage nobody claimed, and the command refuses before writing
 /// anything.
 #[test]
@@ -1292,7 +1291,7 @@ fn bind_refuses_unclaimed_drift_elsewhere() {
 
 // --- an intent only the open change's overlay knows about -------------------
 
-/// D5's ownership rule reaches an intent `add intent` allocated a moment
+/// File ownership reaches an intent that `add intent` allocated a moment
 /// ago just as well as one the sealed spec has always known: the overlay is
 /// part of "known" and part of "owned" alike.
 #[test]

@@ -455,7 +455,6 @@ fn ignored_event(root: &FsPath, event: &Event) -> bool {
                     let name = name.to_string_lossy();
                     (index == 0 && name == ".git")
                         || (index == 0 && name == "target")
-                        || (index == 0 && name == ".superpowers")
                         || (name.starts_with('.') && name.contains(".telos-staging-"))
                 }
                 _ => false,
@@ -552,7 +551,6 @@ mod tests {
         for path in [
             "/repo/.git/index",
             "/repo/target/debug/telos",
-            "/repo/.superpowers/task.md",
             "/repo/.site.telos-staging-42/index.html",
         ] {
             notifier.record(Ok(event(path)));
@@ -578,14 +576,14 @@ mod tests {
     }
 
     #[test]
-    fn watcher_ignores_only_the_repository_root_target_directory() {
+    fn watcher_ignores_only_repository_metadata_and_build_outputs() {
         let root = PathBuf::from("/repo");
 
         assert!(ignored_event(&root, &event("/repo/target/debug/telos")));
         assert!(ignored_event(&root, &event("/repo/.git/index")));
-        assert!(ignored_event(
+        assert!(!ignored_event(
             &root,
-            &event("/repo/.superpowers/progress.md")
+            &event("/repo/.project-meta/progress.md")
         ));
         assert!(!ignored_event(
             &root,
@@ -597,7 +595,7 @@ mod tests {
         ));
         assert!(!ignored_event(
             &root,
-            &event("/repo/examples/.superpowers/source.rs")
+            &event("/repo/examples/.project-meta/source.rs")
         ));
     }
 

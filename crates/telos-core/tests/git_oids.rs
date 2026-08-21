@@ -1,5 +1,5 @@
 //! `GitRepo::blob_oids` and `Lock` against a real `git` binary -- this is
-//! the whole point of Task 10: prove OIDs are filter-aware (same logical
+//! The suite proves OIDs are filter-aware (same logical
 //! content hashes the same regardless of the checkout's line endings) and
 //! that hashing a batch of paths costs exactly one `git` process.
 //!

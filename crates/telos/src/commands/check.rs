@@ -1,5 +1,5 @@
-//! `telos check [--sealed]`: parses the spec and checks its integrity
-//! (spec §3.3), optionally also requiring the project to be sealed and
+//! `telos check [--sealed]`: parses the spec and checks its integrity,
+//! optionally also requiring the project to be sealed and
 //! unmodified.
 //!
 //! `--sealed` checks state *before* parsing -- state comes from
@@ -11,7 +11,7 @@
 //!
 //! "Sealed and unmodified" is also false while a change is open, which is
 //! why `--sealed` refuses `changing` too -- with `TELOS_CHANGE_STATE_INVALID`
-//! rather than the drift code (D15): nothing is damaged there, there is
+//! rather than the drift code: nothing is damaged there, there is
 //! simply work in flight, and the remedy is to finish or drop it.
 
 use serde_json::{Value, json};
@@ -28,7 +28,7 @@ pub fn run(ctx: &Ctx, sealed: bool) -> CmdResult {
     let ws = if sealed {
         let project = project(ctx)?;
         // Both non-coherent states are refused, each under its own code and
-        // in D15's priority order: unclaimed drift first (damage), then an
+        // in state priority order: unclaimed drift first (damage), then an
         // open change (work in progress). Two remedies, two diagnoses.
         require_no_unclaimed_drift(&project)?;
         require_no_open_changes(&project)?;

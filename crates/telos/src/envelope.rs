@@ -1,4 +1,4 @@
-//! The `--json` envelope (Annex B): the single shape every command answers
+//! The `--json` envelope: the single shape every command answers
 //! with, success or failure.
 //!
 //! The contract is frozen, and the freeze is about *absence* as much as

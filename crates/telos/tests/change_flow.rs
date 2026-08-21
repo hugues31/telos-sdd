@@ -1,12 +1,12 @@
 //! End-to-end tests for `telos change open|list|abandon`, the `changing`
-//! state `status` now really reports, `show CHG-…`, and the two gates of
-//! D17/D15: `change open` refused on unclaimed drift, `check --sealed`
-//! refused while a change is open.
+//! state reported by `status`, `show CHG-…`, refusal of `change open` on
+//! unclaimed drift, and refusal of `check --sealed` while a change is open.
 //!
 //! Every test drives the real binary against the sealed `billing` corpus
 //! fixture. What they prove is the CLI contract -- the frozen result shapes
-//! of Annex E, the exact bytes of what lands on disk, and the never-reuse
-//! rule of D4 -- not the engine, which has its own tests in `telos-core`.
+//! in the result schema, the exact bytes of what lands on disk, and the
+//! never-reuse rule for identifiers -- not the engine, which has its own tests
+//! in `telos-core`.
 
 mod common;
 
@@ -26,14 +26,14 @@ fn json_stdout(out: &std::process::Output) -> Value {
     })
 }
 
-/// The motivation every test opens its change with -- Annex C's own.
+/// The motivation every test uses when opening a change.
 const MOTIVATION: &str = "Invoices can be settled";
 
 /// The first change's file, relative to the repository root.
 const CHG_0001: &str = "telos/changes/CHG-0001.tel";
 
 /// The bytes `telos change open` must leave at [`CHG_0001`]: a change with
-/// no op yet, in the canonical form `emit_change` defines (D1).
+/// no op yet, in the canonical form `emit_change` defines.
 const CANONICAL_OPEN_CHANGE: &str =
     "change CHG-0001 \"Invoices can be settled\" {\n  status open\n}\n";
 
@@ -43,7 +43,7 @@ const INVOICE_TEL: &str = "telos/notions/Invoice.tel";
 /// The exact `TELOS_DRIFT_DETECTED` hint, frozen by `docs/contracts.md`.
 const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
 
-/// The obligations of an `open` change, frozen by Annex E.
+/// The obligations of an `open` change, frozen by the result schema.
 fn open_obligations() -> Value {
     json!(["stage the delta", "approve", "reconcile"])
 }
@@ -75,7 +75,7 @@ fn drift(dir: &std::path::Path) {
 
 // --- change open ---------------------------------------------------------
 
-/// The whole envelope, on a freshly sealed fixture, equals Annex E's
+/// The whole envelope, on a freshly sealed fixture, equals the result schema's
 /// golden: the result pair and the single next action, byte for byte as a
 /// `Value`.
 #[test]
@@ -104,7 +104,7 @@ fn change_open_json_matches_the_golden_envelope() {
 }
 
 /// The file `change open` writes is canonical to the byte -- it is
-/// `emit_change` that wrote it, and D1's round-trip is what makes it
+/// `emit_change` that wrote it, and byte-exact round-tripping is what makes it
 /// readable back.
 #[test]
 fn change_open_writes_the_canonical_change_file_byte_for_byte() {
@@ -119,7 +119,7 @@ fn change_open_writes_the_canonical_change_file_byte_for_byte() {
 }
 
 /// `counters.toml` is persisted at the corpus' own floors, with `change`
-/// alone advanced by the allocation (D4): the billing corpus tops out at
+/// alone advanced by the allocation: the billing corpus tops out at
 /// INT-0042, SCN-0107 and CON-0003, none of which this command allocated.
 #[test]
 fn change_open_persists_the_counters_at_the_corpus_floors() {
@@ -141,7 +141,7 @@ fn a_second_change_open_allocates_the_next_id() {
     assert_eq!(open_change(tmp.path(), "another motivation"), "CHG-0002");
 }
 
-/// The floor scan is what makes D4 hold when `counters.toml` is not to be
+/// The floor scan preserves allocation when `counters.toml` is not to be
 /// trusted -- a bad merge resolution, or the file simply gone -- *and* when
 /// the change on disk cannot be parsed to be scanned for its ops: its id is
 /// still read off its file name, so the next allocation lands past it
@@ -164,7 +164,7 @@ fn an_unparseable_change_still_holds_the_counter_down_without_counters_toml() {
 // --- status: the changing state ------------------------------------------
 
 /// With one change open and nothing drifted, `status` reports `changing`,
-/// the real `changes[]` of Annex E, and the one next action D15 names.
+/// the real `changes[]` result and the one relevant next action.
 #[test]
 fn status_json_with_an_open_change_reports_the_changing_state() {
     let tmp = with_fixture();
@@ -263,8 +263,8 @@ fn change_abandon_of_a_malformed_id_is_a_domain_error() {
     );
 }
 
-/// D4's whole point: an abandoned id is never handed out again, because the
-/// counters file remembers it even once its change file is deleted.
+/// An abandoned id is never handed out again because the counters file
+/// remembers it even after its change file is deleted.
 #[test]
 fn an_abandoned_id_is_never_reused() {
     let tmp = with_fixture();
@@ -377,8 +377,8 @@ fn change_list_human_mode_prints_one_line_per_change() {
     assert!(line.contains(MOTIVATION), "line: {line}");
 }
 
-/// An unparseable change file does not take `change list` down with it
-/// (D15): the entry is still reported, with an empty motivation (there is
+/// An unparseable change file does not take `change list` down with it: the
+/// entry is still reported with an empty motivation (there is
 /// nothing trustworthy to read) and the repair obligation.
 #[test]
 fn change_list_is_best_effort_on_an_unparseable_change_file() {
@@ -411,7 +411,7 @@ fn change_list_is_best_effort_on_an_unparseable_change_file() {
 // --- show CHG-… ----------------------------------------------------------
 
 #[test]
-fn show_of_a_change_matches_the_annex_e_shape() {
+fn show_of_a_change_matches_the_public_result_shape() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
@@ -440,7 +440,7 @@ fn show_of_a_change_matches_the_annex_e_shape() {
         })
     );
     // The same bytes that are on disk -- for a file telos wrote, the
-    // canonical form and the file's text are one and the same (D1).
+    // canonical form and the file's text are one and the same.
     assert_eq!(
         envelope["result"]["canonical"],
         json!(fs::read_to_string(tmp.path().join(CHG_0001)).unwrap())
@@ -539,7 +539,7 @@ fn show_of_a_change_human_mode_prints_the_canonical_text_and_no_relation() {
     );
 }
 
-// --- D17: the drift gate --------------------------------------------------
+// --- drift gate --------------------------------------------------------------
 
 #[test]
 fn change_open_on_a_drifted_project_is_refused() {
@@ -560,7 +560,7 @@ fn change_open_on_a_drifted_project_is_refused() {
     );
 }
 
-/// D17 permits `list` and `abandon` while drifted: they are the two ways
+/// `list` and `abandon` remain available while drifted: they are the two ways
 /// out of a mess, not more mutation of the spec.
 #[test]
 fn change_list_and_abandon_are_allowed_while_drifted() {
@@ -575,7 +575,7 @@ fn change_list_and_abandon_are_allowed_while_drifted() {
     assert!(!tmp.path().join(CHG_0001).exists());
 }
 
-// --- D15: check --sealed while changing -----------------------------------
+// --- check --sealed while changing -----------------------------------------
 
 #[test]
 fn check_sealed_while_a_change_is_open_reports_change_state_invalid() {
@@ -599,8 +599,8 @@ fn check_sealed_while_a_change_is_open_reports_change_state_invalid() {
     assert_eq!(envelope["error"]["hint"], json!("run `telos change list`"));
 }
 
-/// Drift still wins over an open change: the state priority of D15 is
-/// unclaimed drift first, and `check --sealed` reports what it finds.
+/// Drift still wins over an open change: state priority puts unclaimed drift
+/// first, and `check --sealed` reports what it finds.
 #[test]
 fn check_sealed_reports_drift_before_open_changes() {
     let tmp = with_fixture();
@@ -658,7 +658,7 @@ fn vendor_payload() -> String {
 const VENDOR_CANONICAL: &str = "notion Vendor actor {\n  def  \"A party the business pays.\"\n}\n";
 
 /// Whether `digest` is `sha256:` followed by exactly 64 lowercase hex
-/// digits (D3) -- the shape `change diff`/`change approve` must report,
+/// digits -- the shape `change diff`/`change approve` must report,
 /// without pinning the value itself.
 fn is_sha256_hex(digest: &str) -> bool {
     match digest.strip_prefix("sha256:") {
@@ -720,7 +720,7 @@ fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
 }
 
 /// `before` for an `edit` is the sealed base's own canonical block -- the
-/// corpus' `INT-0017.tel` bytes, read straight off disk, D1's round-trip
+/// corpus' `INT-0017.tel` bytes, read straight off disk; byte-exact round-tripping
 /// being exactly what makes that legitimate -- and `after` is the patched
 /// intent's canonical block. Staging never touches the sealed file itself.
 #[test]
@@ -796,9 +796,9 @@ fn change_diff_human_mode_prints_per_op_sections() {
 }
 
 /// `approve` writes `status approved` and a `digest` line into the change
-/// file, in `emit_change`'s own layout, byte for byte -- the digest itself
-/// is read back from the JSON result rather than pinned, since D3 does not
-/// freeze a value, only a shape and an algorithm.
+/// file in `emit_change`'s layout, byte for byte. This test reads the exact
+/// digest from the JSON result; the core digest tests separately pin the
+/// algorithm to a golden value.
 #[test]
 fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
     let tmp = with_fixture();
@@ -903,7 +903,7 @@ fn change_approve_refuses_a_digest_that_changed_during_review() {
 }
 
 /// `approve` of a change with no staged op is refused, with the exact
-/// message and hint the brief freezes -- and writes nothing: the file is
+/// documented message and hint -- and writes nothing: the file is
 /// left exactly as `change open` wrote it.
 #[test]
 fn change_approve_of_a_change_with_no_ops_is_change_state_invalid() {
@@ -935,9 +935,9 @@ fn change_approve_of_a_change_with_no_ops_is_change_state_invalid() {
 }
 
 /// Staging into an already-approved change is allowed (`mutate.rs`'s own
-/// design): nothing is lost, but the approval goes stale (D3) -- `diff`
-/// reports it, and re-`approve` clears it again, recalculating the digest
-/// (D16: idempotent).
+/// design): nothing is lost, but the approval goes stale -- `diff`
+/// reports it, and re-`approve` idempotently clears it by recalculating the
+/// digest.
 #[test]
 fn staging_after_approve_goes_stale_and_re_approve_clears_it() {
     let tmp = with_fixture();
@@ -1007,7 +1007,7 @@ fn staging_after_approve_goes_stale_and_re_approve_clears_it() {
     );
 }
 
-/// D17: `approve` is refused on unclaimed drift, same as `open`, and writes
+/// `approve` is refused on unclaimed drift, same as `open`, and writes
 /// nothing -- the change stays `drafted`, no digest.
 #[test]
 fn change_approve_on_unclaimed_drift_is_refused() {
@@ -1034,7 +1034,7 @@ fn change_approve_on_unclaimed_drift_is_refused() {
     assert!(!contents.contains("digest"), "{contents}");
 }
 
-/// D17: unlike `approve`, `diff` is allowed on unclaimed drift -- it reads,
+/// Unlike `approve`, `diff` is allowed on unclaimed drift -- it reads,
 /// it does not stage a review against the base.
 #[test]
 fn change_diff_is_allowed_on_unclaimed_drift() {

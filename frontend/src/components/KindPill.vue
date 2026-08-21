@@ -6,24 +6,36 @@
 // it so kind is never conveyed by colour alone.
 import { computed } from 'vue';
 
-import type { GraphKeyKind } from '../data/types';
+import type { ConstraintKind, GraphKeyKind, NotionKind } from '../data/types';
+
+type PillKind = GraphKeyKind | NotionKind | ConstraintKind;
 
 const props = withDefaults(
   defineProps<{
-    kind: GraphKeyKind;
+    kind: PillKind;
     /** Override the default kind label (e.g. a plural in a list heading). */
     label?: string;
   }>(),
   { label: undefined },
 );
 
-const defaultLabels: Record<GraphKeyKind, string> = {
+const defaultLabels: Record<PillKind, string> = {
   notion: 'Notion',
   intent: 'Intent',
   scenario: 'Scenario',
   constraint: 'Constraint',
   code: 'Code',
   test: 'Test',
+  actor: 'Actor',
+  entity: 'Entity',
+  value: 'Value',
+  event: 'Event',
+  state: 'State',
+  stack: 'Stack',
+  architecture: 'Architecture',
+  quality: 'Quality',
+  security: 'Security',
+  convention: 'Convention',
 };
 
 const displayLabel = computed(() => props.label ?? defaultLabels[props.kind]);
@@ -75,5 +87,21 @@ const displayLabel = computed(() => props.label ?? defaultLabels[props.kind]);
 
 .kind-pill--test .kind-pill__dot {
   background: var(--k-test);
+}
+
+.kind-pill--actor .kind-pill__dot,
+.kind-pill--entity .kind-pill__dot,
+.kind-pill--value .kind-pill__dot,
+.kind-pill--event .kind-pill__dot,
+.kind-pill--state .kind-pill__dot {
+  background: var(--k-notion);
+}
+
+.kind-pill--stack .kind-pill__dot,
+.kind-pill--architecture .kind-pill__dot,
+.kind-pill--quality .kind-pill__dot,
+.kind-pill--security .kind-pill__dot,
+.kind-pill--convention .kind-pill__dot {
+  background: var(--k-constraint);
 }
 </style>

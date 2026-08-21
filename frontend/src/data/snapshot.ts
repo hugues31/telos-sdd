@@ -5,6 +5,7 @@
 import { computed, shallowRef } from 'vue';
 import type {
   ConstraintView,
+  GraphKey,
   IntentView,
   NotionView,
   ScenarioView,
@@ -82,17 +83,18 @@ export const constraintById = computed(() => {
  * `uses` relation from an intent or a scenario to a notion (see
  * `uses_from` in `view/model.rs` — those are the only two node kinds it
  * ever calls). So this is derived from `snapshot.edges`, keyed by the
- * notion (`edge.to`) and collecting the user ids (`edge.from.id`).
+ * notion (`edge.to`) and collecting the complete consumer GraphKeys
+ * (`edge.from`) so callers can render correctly typed entity links.
  */
 export const notionUsedBy = computed(() => {
-  const map = new Map<string, string[]>();
+  const map = new Map<string, GraphKey[]>();
   for (const edge of payload.value.snapshot.edges) {
     if (edge.relation !== 'uses' || edge.to.kind !== 'notion') continue;
     const users = map.get(edge.to.id);
     if (users) {
-      users.push(edge.from.id);
+      users.push(edge.from);
     } else {
-      map.set(edge.to.id, [edge.from.id]);
+      map.set(edge.to.id, [edge.from]);
     }
   }
   return map;

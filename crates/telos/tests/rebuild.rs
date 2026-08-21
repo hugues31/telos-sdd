@@ -374,6 +374,7 @@ fn a_legitimate_path_with_spaces_and_shell_metacharacters_is_one_safe_filter_arg
 fn unsafe_or_escaping_proof_paths_are_rejected_and_never_run() {
     let tmp = unsealed_fixture();
     write_runner_config(tmp.path(), "mkdir invalid-proof-ran");
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut bindings = "proves \"../outside.rs\" -> SCN-0091\n\
                         proves \"/tmp/outside.rs\" -> SCN-0091\n\
                         proves \"telos/telos.toml\" -> SCN-0091\n"

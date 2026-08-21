@@ -411,23 +411,11 @@ fn open_ambient_directory_nofollow(path: &Path) -> io::Result<Dir> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            std::path::Component::RootDir => normalized.push(component.as_os_str()),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !normalized.pop() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "destination parent escapes its filesystem root",
-                    ));
-                }
-            }
-            std::path::Component::Normal(name) => normalized.push(name),
-        }
-    }
+    // Pre-existing symlinks in the announced parent path (macOS resolves
+    // `/var` and `/tmp` through `/private`) are resolved once; every component
+    // of the canonical path is still opened no-follow below, and the recorded
+    // parent identity is re-verified before publication.
+    let normalized = fs::canonicalize(&absolute)?;
 
     let mut anchor = PathBuf::new();
     let mut names = Vec::new();
@@ -1046,6 +1034,10 @@ mod tests {
         );
     }
 
+    // Windows refuses to rename a directory while the export holds its
+    // capability handle, so this substitution cannot be staged there: the
+    // OS itself enforces the property this test simulates.
+    #[cfg(not(windows))]
     #[test]
     fn a_substituted_staging_entry_is_never_published() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1078,6 +1070,9 @@ mod tests {
         );
     }
 
+    // Windows refuses to rename a directory while the export holds its
+    // capability handle, so this substitution cannot be staged there.
+    #[cfg(not(windows))]
     #[test]
     fn failed_publication_never_cleans_up_a_substituted_staging_entry() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1147,6 +1142,9 @@ mod tests {
         assert!(displaced.is_dir());
     }
 
+    // Windows refuses to rename a directory while the export holds its
+    // capability handle, so this substitution cannot be staged there.
+    #[cfg(not(windows))]
     #[test]
     fn a_staging_entry_substituted_after_identity_check_is_not_published() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1184,6 +1182,10 @@ mod tests {
         );
     }
 
+    // Windows refuses to rename a directory with open handles beneath it,
+    // so this parent rotation cannot be staged there: the OS itself
+    // enforces the property this test simulates.
+    #[cfg(not(windows))]
     #[test]
     fn a_rotated_destination_parent_is_refused_and_its_new_owner_is_preserved() {
         let temporary = tempfile::tempdir().unwrap();
@@ -1214,6 +1216,25 @@ mod tests {
             fs::read_to_string(parent.join("owner.txt")).unwrap(),
             "replacement parent owner"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_below_a_preexisting_symlinked_ancestor_is_published() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let real = temporary.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let linked = temporary.path().join("linked");
+        symlink(&real, &linked).unwrap();
+        let destination = linked.join("site");
+
+        let exported = super::export(&fixture_snapshot(), &destination).unwrap();
+
+        assert!(exported.contains(&PathBuf::from("index.html")));
+        assert!(destination.join("index.html").is_file());
+        assert!(real.join("site").join("index.html").is_file());
     }
 
     #[cfg(unix)]

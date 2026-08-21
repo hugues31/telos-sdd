@@ -776,7 +776,15 @@ fn rename_windows_directory_handle(
         FILE_RENAME_INFO, FileRenameInfo, SetFileInformationByHandle,
     };
 
-    let name: Vec<u16> = target.encode_wide().collect();
+    // The Win32 `SetFileInformationByHandle` variant of `FileRenameInfo`
+    // rejects a non-null `RootDirectory` with ERROR_INVALID_PARAMETER and
+    // only accepts a full destination path, so the path is derived from the
+    // retained parent handle rather than re-resolving the announced name.
+    let mut name = windows_handle_path(parent)?;
+    if name.last() != Some(&u16::from(b'\\')) {
+        name.push(u16::from(b'\\'));
+    }
+    name.extend(target.encode_wide());
     if name.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -795,11 +803,11 @@ fn rename_windows_directory_handle(
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
 
     // SAFETY: `buffer` is pointer-aligned and large enough for the fixed
-    // header plus every UTF-16 code unit. The source and parent handles remain
-    // open for the duration of the call, and replacement is explicitly false.
+    // header plus every UTF-16 code unit. The source handle remains open for
+    // the duration of the call, and replacement is explicitly false.
     let result = unsafe {
         (*info).Anonymous.ReplaceIfExists = false;
-        (*info).RootDirectory = parent.as_raw_handle();
+        (*info).RootDirectory = std::ptr::null_mut();
         (*info).FileNameLength = u32::try_from(name_bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "export name is too long"))?;
         std::ptr::copy_nonoverlapping(
@@ -820,6 +828,44 @@ fn rename_windows_directory_handle(
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+/// Returns the normalized `\\?\`-prefixed path of an open directory handle,
+/// so a rename destination never re-resolves the announced parent path.
+#[cfg(windows)]
+fn windows_handle_path(parent: &Dir) -> io::Result<Vec<u16>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+
+    let mut buffer = vec![0_u16; 512];
+    loop {
+        // SAFETY: the handle remains open for the call and the buffer length
+        // is passed alongside its pointer. A zero return reports failure; a
+        // return not below the capacity is the required size in code units
+        // including the terminator.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                parent.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                u32::try_from(buffer.len()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "export parent path is too long",
+                    )
+                })?,
+                0,
+            )
+        };
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let length = length as usize;
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(buffer);
+        }
+        buffer.resize(length, 0);
     }
 }
 

@@ -7,6 +7,7 @@ import type {
   ConstraintView,
   IntentView,
   NotionView,
+  ScenarioView,
   TelosPayload,
 } from './types';
 
@@ -51,6 +52,16 @@ export const scenarioToIntent = computed(() => {
   const map = new Map<string, string>();
   for (const scenario of payload.value.snapshot.scenarios) {
     map.set(scenario.id, scenario.intent);
+  }
+  return map;
+});
+
+/** Used by EntityLink to resolve a scenario GraphKey to its title (see the
+ * `intentById`-based lookup it does for intent GraphKeys). */
+export const scenarioById = computed(() => {
+  const map = new Map<string, ScenarioView>();
+  for (const scenario of payload.value.snapshot.scenarios) {
+    map.set(scenario.id, scenario);
   }
   return map;
 });

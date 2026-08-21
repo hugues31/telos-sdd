@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
+import logoUrl from '../assets/logo.png';
 import { snapshot } from '../data/snapshot';
 import ThemeToggle from './ThemeToggle.vue';
 
@@ -29,7 +30,13 @@ const isHealthy = computed(() => projectState.value === 'coherent');
   <header class="app-header">
     <div class="app-header__inner">
       <RouterLink to="/" class="app-header__brand">
-        <span class="app-header__logo">Telos</span>
+        <img
+          class="app-header__logo"
+          :src="logoUrl"
+          width="128"
+          height="37"
+          alt="Telos"
+        />
         <span
           class="app-header__status"
           :class="{ 'app-header__status--warn': !isHealthy }"
@@ -82,9 +89,9 @@ const isHealthy = computed(() => projectState.value === 'coherent');
 }
 
 .app-header__logo {
-  font-weight: 700;
-  font-size: 1.125rem;
-  color: var(--color-primary-strong);
+  display: block;
+  width: 6rem;
+  height: auto;
 }
 
 .app-header__status {

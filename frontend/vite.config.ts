@@ -12,7 +12,7 @@ function classicScript(): Plugin {
     apply: 'build',
     enforce: 'post',
     transformIndexHtml(html) {
-      return html
+      const transformed = html
         .replace(
           /<script type="module"(?: crossorigin)? src="([^"]+)"><\/script>/g,
           '<script defer src="$1"></script>',
@@ -20,6 +20,19 @@ function classicScript(): Plugin {
         .replace(
           /<link rel="stylesheet"(?: crossorigin)? href="([^"]+)">/g,
           '<link rel="stylesheet" href="$1">',
+        );
+
+      // Vite injects the entry into <head>. Keep the exported execution
+      // contract explicit in source order as well: data.js first, then the
+      // deferred classic IIFE.
+      const entry = transformed.match(/\s*<script defer src="(\.\/assets\/app\.js)"><\/script>/);
+      if (!entry) return transformed;
+
+      return transformed
+        .replace(entry[0], '')
+        .replace(
+          '<script src="./data.js"></script>',
+          `<script src="./data.js"></script>\n    <script defer src="${entry[1]}"></script>`,
         );
     },
   };

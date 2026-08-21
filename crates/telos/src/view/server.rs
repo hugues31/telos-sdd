@@ -5,21 +5,22 @@ use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use axum::Router;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::extract::{OriginalUri, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Json, Router};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Serialize;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::ids::IntentId;
 use telos_core::workspace::Workspace;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use crate::commands::{Ctx, diagnostics_to_error, project};
 
-use super::html::{LinkMode, Page, render};
+use super::assets::{self, Asset};
+use super::data::{DataMode, data_js};
 use super::model::ViewSnapshot;
 
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(75);
@@ -144,6 +145,7 @@ enum WatchWork {
 
 struct LiveState {
     snapshot: ViewSnapshot,
+    generation: u64,
     reload_error: Option<String>,
     watcher_error: Option<WatcherFailure>,
 }
@@ -157,6 +159,7 @@ impl LiveState {
     fn new(snapshot: ViewSnapshot) -> Self {
         Self {
             snapshot,
+            generation: 0,
             reload_error: None,
             watcher_error: None,
         }
@@ -180,6 +183,7 @@ impl LiveState {
         {
             self.watcher_error = None;
         }
+        self.generation = self.generation.saturating_add(1);
     }
 }
 
@@ -223,11 +227,10 @@ impl LiveServer {
             process_watch_work(&root, &reload_state, work)
         }));
         let router = Router::new()
-            .route("/", get(dashboard))
-            .route("/graph", get(graph))
-            .route("/intent/{id}", get(intent))
-            .route("/glossary", get(glossary))
-            .route("/coverage", get(coverage))
+            .route("/", get(index))
+            .route("/data.js", get(live_data))
+            .route("/live.json", get(live_status))
+            .fallback(static_asset)
             .with_state(state);
 
         Ok(Self {
@@ -258,88 +261,60 @@ fn subscribe_before_build<S, T, E>(
     Ok((subscription, snapshot))
 }
 
-async fn dashboard(State(state): State<SharedState>) -> Response {
-    page_response(&state, Page::Dashboard)
+async fn index() -> Response {
+    asset_response(assets::lookup("index.html").expect("embedded index.html is present"))
 }
 
-async fn graph(State(state): State<SharedState>) -> Response {
-    page_response(&state, Page::Graph)
-}
-
-async fn glossary(State(state): State<SharedState>) -> Response {
-    page_response(&state, Page::Glossary)
-}
-
-async fn coverage(State(state): State<SharedState>) -> Response {
-    page_response(&state, Page::Coverage)
-}
-
-async fn intent(State(state): State<SharedState>, Path(raw): Path<String>) -> Response {
-    let Ok(id) = raw.parse::<IntentId>() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    page_response(&state, Page::Intent(id))
-}
-
-fn page_response(state: &SharedState, page: Page) -> Response {
-    let state = state
+async fn live_data(State(state): State<SharedState>) -> Response {
+    let snapshot = state
         .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match render(&state.snapshot, page, LinkMode::Server) {
-        Some(html) => Html(add_reload_banner(
-            html,
-            state.reload_error.as_deref(),
-            state
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .snapshot
+        .clone();
+    let script = data_js(&snapshot, DataMode::Live);
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        script,
+    )
+        .into_response()
+}
+
+#[derive(Serialize)]
+struct LiveStatus {
+    generation: u64,
+    reload_error: Option<String>,
+    watcher_error: Option<String>,
+}
+
+async fn live_status(State(state): State<SharedState>) -> Response {
+    let status = {
+        let state = state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        LiveStatus {
+            generation: state.generation,
+            reload_error: state.reload_error.clone(),
+            watcher_error: state
                 .watcher_error
                 .as_ref()
-                .map(|error| error.message.as_str()),
-        ))
-        .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-fn add_reload_banner(
-    mut html: String,
-    reload_error: Option<&str>,
-    watcher_error: Option<&str>,
-) -> String {
-    if reload_error.is_none() && watcher_error.is_none() {
-        return html;
-    }
-    let mut banner = String::from(
-        "<body><aside class=\"reload-error\" role=\"alert\" style=\"padding:12px;background:#7f1d1d;color:#fff\">",
-    );
-    if let Some(error) = reload_error {
-        banner.push_str(&format!(
-            "<p><strong>Reload error:</strong> {}</p>",
-            escape(error)
-        ));
-    }
-    if let Some(error) = watcher_error {
-        banner.push_str(&format!(
-            "<p><strong>Watcher error:</strong> {}</p>",
-            escape(error)
-        ));
-    }
-    banner.push_str("</aside>");
-    html = html.replacen("<body>", &banner, 1);
-    html
-}
-
-fn escape(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for character in input.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(character),
+                .map(|error| error.message.clone()),
         }
-    }
-    escaped
+    };
+    ([(header::CACHE_CONTROL, "no-store")], Json(status)).into_response()
+}
+
+async fn static_asset(OriginalUri(uri): OriginalUri) -> Response {
+    let path = uri.path().strip_prefix('/').unwrap_or(uri.path());
+    assets::lookup(path)
+        .map(asset_response)
+        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+fn asset_response(asset: &'static Asset) -> Response {
+    ([(header::CONTENT_TYPE, asset.content_type)], asset.bytes).into_response()
 }
 
 async fn watch_loop(
@@ -445,6 +420,9 @@ fn ignored_event(root: &FsPath, event: &Event) -> bool {
     if event.paths.is_empty() || event.need_rescan() {
         return false;
     }
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return true;
+    }
     !event.paths.iter().any(|path| {
         let relative = path.strip_prefix(root).unwrap_or(path);
         !relative
@@ -483,6 +461,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
     use notify::{Event, EventKind};
     use telos_core::state::{ProjectStateKind, StateReport};
     use telos_core::workspace::Workspace;
@@ -490,7 +469,7 @@ mod tests {
 
     use super::{
         LiveState, MAX_REBUILD_LATENCY, PendingEvents, WatchNotifier, WatchTiming, WatchWork,
-        add_reload_banner, ignored_event, subscribe_before_build, watch_loop,
+        ignored_event, subscribe_before_build, watch_loop,
     };
     use crate::view::model::ViewSnapshot;
 
@@ -600,6 +579,33 @@ mod tests {
     }
 
     #[test]
+    fn watcher_ignores_non_mutating_access_without_hiding_mutations() {
+        let root = PathBuf::from("/repo");
+        let path = PathBuf::from("/repo/telos/intents/INT-0042.tel");
+
+        for kind in [
+            AccessKind::Any,
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Close(AccessMode::Write),
+            AccessKind::Other,
+        ] {
+            let access = Event::new(EventKind::Access(kind)).add_path(path.clone());
+            assert!(ignored_event(&root, &access), "access kind: {kind:?}");
+        }
+
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Other,
+        ] {
+            let mutation = Event::new(kind).add_path(path.clone());
+            assert!(!ignored_event(&root, &mutation), "event kind: {kind:?}");
+        }
+    }
+
+    #[test]
     fn sustained_writes_are_capped_from_the_first_relevant_event() {
         let start = Instant::now();
         let mut pending = PendingEvents::default();
@@ -662,11 +668,17 @@ mod tests {
     #[test]
     fn watcher_health_clears_only_after_a_later_successful_relevant_batch() {
         let snapshot = fixture_snapshot();
+        let mut changed_snapshot = snapshot.clone();
+        changed_snapshot.intents[0].title = "reloaded title".to_string();
         let mut live = LiveState::new(snapshot.clone());
         live.record_reload_error("invalid model".to_string());
         live.record_watcher_error(2, "watch backend failed".to_string());
+        assert_eq!(live.generation, 0);
+        assert_eq!(live.snapshot, snapshot);
 
-        live.record_reload_success(1, snapshot.clone());
+        live.record_reload_success(1, changed_snapshot.clone());
+        assert_eq!(live.generation, 1);
+        assert_eq!(live.snapshot, changed_snapshot);
         assert!(live.reload_error.is_none());
         assert_eq!(
             live.watcher_error
@@ -676,27 +688,40 @@ mod tests {
         );
 
         live.record_reload_success(3, snapshot);
+        assert_eq!(live.generation, 2);
         assert!(live.reload_error.is_none());
         assert!(live.watcher_error.is_none());
     }
 
     #[test]
-    fn banner_combines_and_escapes_model_and_watcher_failures() {
-        let mut live = LiveState::new(fixture_snapshot());
+    fn failures_keep_the_last_good_snapshot_and_generation() {
+        let snapshot = fixture_snapshot();
+        let mut live = LiveState::new(snapshot.clone());
         live.record_reload_error("model <invalid> & stale".to_string());
         live.record_watcher_error(4, "watch <offline> & stale".to_string());
 
-        let html = add_reload_banner(
-            "<body><main>last good</main></body>".to_string(),
+        assert_eq!(live.snapshot, snapshot);
+        assert_eq!(live.generation, 0);
+        assert_eq!(
             live.reload_error.as_deref(),
+            Some("model <invalid> & stale")
+        );
+        assert_eq!(
             live.watcher_error
                 .as_ref()
                 .map(|error| error.message.as_str()),
+            Some("watch <offline> & stale")
         );
+    }
 
-        assert!(html.contains("Reload error:</strong> model &lt;invalid&gt; &amp; stale"));
-        assert!(html.contains("Watcher error:</strong> watch &lt;offline&gt; &amp; stale"));
-        assert!(!html.contains("<invalid>"));
-        assert!(!html.contains("<offline>"));
+    #[test]
+    fn generation_saturates_after_success_at_the_u64_boundary() {
+        let snapshot = fixture_snapshot();
+        let mut live = LiveState::new(snapshot.clone());
+        live.generation = u64::MAX;
+
+        live.record_reload_success(1, snapshot);
+
+        assert_eq!(live.generation, u64::MAX);
     }
 }

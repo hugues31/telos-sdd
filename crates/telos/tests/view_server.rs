@@ -76,7 +76,25 @@ fn spawn_and_read_startup(root: &Path, args: &[&str]) -> (ServerChild, String) {
     (child, line)
 }
 
-fn get(url: &str, path: &str) -> String {
+struct HttpResponse {
+    status_line: String,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+impl HttpResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    fn text(&self) -> &str {
+        std::str::from_utf8(&self.body).expect("HTTP response body is UTF-8")
+    }
+}
+
+fn get(url: &str, path: &str) -> HttpResponse {
     let address = url
         .strip_prefix("http://")
         .and_then(|url| url.strip_suffix('/'))
@@ -90,9 +108,59 @@ fn get(url: &str, path: &str) -> String {
         "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    response
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HTTP response separates headers and body");
+    let head = std::str::from_utf8(&response[..split]).expect("HTTP response head is UTF-8");
+    let mut lines = head.split("\r\n");
+    let status_line = lines
+        .next()
+        .expect("HTTP response has a status line")
+        .to_string();
+    let headers = lines
+        .map(|line| {
+            let (name, value) = line.split_once(':').expect("HTTP header has a colon");
+            (name.to_ascii_lowercase(), value.trim().to_string())
+        })
+        .collect();
+    HttpResponse {
+        status_line,
+        headers,
+        body: response[split + 4..].to_vec(),
+    }
+}
+
+fn data_payload(response: &HttpResponse) -> Value {
+    const PREFIX: &str = "window.__TELOS_DATA__ = ";
+    const SUFFIX: &str = ";\n";
+
+    let script = response.text();
+    assert!(script.starts_with(PREFIX), "data.js prefix: {script}");
+    assert!(script.ends_with(SUFFIX), "data.js suffix: {script}");
+    serde_json::from_str(&script[PREFIX.len()..script.len() - SUFFIX.len()])
+        .expect("data.js assignment contains JSON")
+}
+
+fn referenced_assets(index: &str) -> Vec<String> {
+    let mut assets = Vec::new();
+    for attribute in ["src=\"", "href=\""] {
+        let mut remaining = index;
+        while let Some(start) = remaining.find(attribute) {
+            remaining = &remaining[start + attribute.len()..];
+            let end = remaining.find('"').expect("quoted asset attribute");
+            let value = &remaining[..end];
+            if let Some(path) = value.strip_prefix("./assets/") {
+                assets.push(format!("/assets/{path}"));
+            }
+            remaining = &remaining[end + 1..];
+        }
+    }
+    assets.sort();
+    assets.dedup();
+    assets
 }
 
 fn telos_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -129,7 +197,7 @@ fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-fn serves_every_page_on_loopback() {
+fn serves_the_spa_and_payload_on_loopback() {
     let tmp = with_fixture();
     let before = telos_bytes(tmp.path());
 
@@ -147,27 +215,69 @@ fn serves_every_page_on_loopback() {
     );
     assert!(url.starts_with("http://127.0.0.1:"), "url: {url}");
 
-    for (path, expected) in [
-        ("/", "Telos dashboard"),
-        ("/graph", "requires"),
-        (
-            "/intent/INT-0042",
-            "Customers must see immediately that their debt is cleared.",
-        ),
-        ("/glossary", "Invoice"),
-        ("/coverage", "SCN-0107"),
-    ] {
-        let response = get(&url, path);
-        assert!(response.starts_with("HTTP/1.1 200 "), "{path}: {response}");
+    let index = get(&url, "/");
+    assert!(index.status_line.starts_with("HTTP/1.1 200 "));
+    assert_eq!(
+        index.header("content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(index.text().contains("<!doctype html>"));
+    assert!(index.text().contains("<div id=\"app\"></div>"));
+    assert!(index.text().contains("<script src=\"./data.js\"></script>"));
+
+    let assets = referenced_assets(index.text());
+    assert!(!assets.is_empty(), "index.html references embedded assets");
+    for path in assets {
+        let response = get(&url, &path);
         assert!(
-            response.contains("content-type: text/html; charset=utf-8\r\n"),
-            "{path}: {response}"
+            response.status_line.starts_with("HTTP/1.1 200 "),
+            "{path}: {}",
+            response.status_line
         );
-        assert!(response.contains(expected), "{path}: {response}");
+        let expected_type = if path.ends_with(".css") {
+            "text/css; charset=utf-8"
+        } else if path.ends_with(".js") {
+            "text/javascript; charset=utf-8"
+        } else {
+            panic!("unexpected asset type in index.html: {path}");
+        };
+        assert_eq!(response.header("content-type"), Some(expected_type));
     }
 
-    let missing = get(&url, "/intent/INT-9999");
-    assert!(missing.starts_with("HTTP/1.1 404 "), "{missing}");
+    let data = get(&url, "/data.js");
+    assert!(data.status_line.starts_with("HTTP/1.1 200 "));
+    assert_eq!(
+        data.header("content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
+    assert_eq!(data.header("cache-control"), Some("no-store"));
+    let payload = data_payload(&data);
+    assert_eq!(payload["meta"]["mode"], "live");
+    assert!(data.text().contains("INT-0042"));
+    assert!(data.text().contains("SCN-0107"));
+
+    let live = get(&url, "/live.json");
+    assert!(live.status_line.starts_with("HTTP/1.1 200 "));
+    assert_eq!(live.header("content-type"), Some("application/json"));
+    assert_eq!(live.header("cache-control"), Some("no-store"));
+    let status: Value = serde_json::from_slice(&live.body).expect("live.json is valid JSON");
+    assert!(status["generation"].is_u64());
+    assert_eq!(status["reload_error"], Value::Null);
+    assert_eq!(status["watcher_error"], Value::Null);
+
+    for path in [
+        "/intent/INT-9999",
+        "/graph",
+        "/nope.js",
+        "/assets/%2e%2e/index.html",
+    ] {
+        let missing = get(&url, path);
+        assert!(
+            missing.status_line.starts_with("HTTP/1.1 404 "),
+            "{path}: {}",
+            missing.status_line
+        );
+    }
 
     server.stop();
     assert_eq!(telos_bytes(tmp.path()), before);
@@ -185,29 +295,55 @@ fn reloads_last_good_snapshot_and_recovers_after_invalid_edits() {
     );
     assert_ne!(changed, original, "fixture title changed unexpectedly");
     let (mut server, url, _) = start_server(tmp.path());
+    let initial_status: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+    let initial_generation = initial_status["generation"].as_u64().unwrap();
 
     fs::write(&intent_path, &changed).unwrap();
     wait_until("valid drifted snapshot", || {
-        let intent = get(&url, "/intent/INT-0042");
-        let dashboard = get(&url, "/");
-        intent.contains("Invoice payment closes the balance")
-            && dashboard.contains("Project state: <strong>drifted</strong>")
-            && dashboard.contains("telos/intents/INT-0042.tel")
+        let data = get(&url, "/data.js");
+        let live: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+        data.text().contains("Invoice payment closes the balance")
+            && live["generation"].as_u64().unwrap() > initial_generation
+            && live["reload_error"].is_null()
     });
+    let valid_data = get(&url, "/data.js");
+    let valid_payload = data_payload(&valid_data);
+    assert_eq!(valid_payload["snapshot"]["dashboard"]["state"], "drifted");
+    assert!(valid_data.text().contains("telos/intents/INT-0042.tel"));
+    let valid_status: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+    let valid_generation = valid_status["generation"].as_u64().unwrap();
 
     fs::write(&intent_path, "&\n").unwrap();
     wait_until("last-good snapshot with reload error", || {
-        let intent = get(&url, "/intent/INT-0042");
-        intent.contains("Invoice payment closes the balance")
-            && intent.contains("Reload error:")
-            && intent.contains("unexpected character `&amp;`")
-            && !intent.contains("unexpected character `&`")
+        let status: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+        status["reload_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("unexpected character `&`"))
     });
+    let invalid_status_response = get(&url, "/live.json");
+    let invalid_status: Value = serde_json::from_slice(&invalid_status_response.body).unwrap();
+    assert_eq!(invalid_status["generation"], valid_generation);
+    assert_eq!(invalid_status["watcher_error"], Value::Null);
+    assert!(
+        invalid_status["reload_error"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected character `&`")
+    );
+    assert!(!invalid_status_response.text().contains("&amp;"));
+    assert!(
+        get(&url, "/data.js")
+            .text()
+            .contains("Invoice payment closes the balance")
+    );
 
     fs::write(&intent_path, &original).unwrap();
     wait_until("recovered valid snapshot", || {
-        let intent = get(&url, "/intent/INT-0042");
-        intent.contains("Invoice payment marks it settled") && !intent.contains("Reload error:")
+        let data = get(&url, "/data.js");
+        let live: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+        data.text().contains("Invoice payment marks it settled")
+            && live["generation"].as_u64().unwrap() > valid_generation
+            && live["reload_error"].is_null()
     });
 
     server.stop();
@@ -225,8 +361,8 @@ fn live_view_observes_drifted_and_changing_projects() {
     fs::write(intent_path, changed).unwrap();
     let before_drifted_server = telos_bytes(drifted.path());
     let (mut drifted_server, drifted_url, _) = start_server(drifted.path());
-    let dashboard = get(&drifted_url, "/");
-    assert!(dashboard.contains("Project state: <strong>drifted</strong>"));
+    let payload = data_payload(&get(&drifted_url, "/data.js"));
+    assert_eq!(payload["snapshot"]["dashboard"]["state"], "drifted");
     drifted_server.stop();
     assert_eq!(telos_bytes(drifted.path()), before_drifted_server);
 
@@ -236,9 +372,12 @@ fn live_view_observes_drifted_and_changing_projects() {
         .success();
     let before_changing_server = telos_bytes(changing.path());
     let (mut changing_server, changing_url, _) = start_server(changing.path());
-    let dashboard = get(&changing_url, "/");
-    assert!(dashboard.contains("Project state: <strong>changing</strong>"));
-    assert!(dashboard.contains("CHG-0001"));
+    let payload = data_payload(&get(&changing_url, "/data.js"));
+    assert_eq!(payload["snapshot"]["dashboard"]["state"], "changing");
+    assert_eq!(
+        payload["snapshot"]["dashboard"]["open_changes"][0]["id"],
+        "CHG-0001"
+    );
     changing_server.stop();
     assert_eq!(telos_bytes(changing.path()), before_changing_server);
 }

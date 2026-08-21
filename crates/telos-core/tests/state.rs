@@ -22,7 +22,7 @@ use telos_core::ids::{ChangeId, IntentId, NotionName, RepoPath};
 use telos_core::lock::{Lock, seal};
 use telos_core::model::{Change, ChangeStatus, Notion, NotionKind, StagedOp};
 use telos_core::state::{
-    ChangeSummary, DriftEntry, DriftKind, ProjectStateKind, compute_state, coverage,
+    ChangeSummary, DriftEntry, DriftKind, ProjectStateKind, compute_state, coverage, drift_token,
 };
 use telos_core::workspace::Workspace;
 
@@ -175,6 +175,27 @@ fn compute_state_reports_modified_for_a_one_byte_spec_edit() {
             path: RepoPath::new("telos/notions/Invoice.tel"),
             kind: DriftKind::Modified,
         }]
+    );
+}
+
+#[test]
+fn drift_token_changes_when_modified_bytes_change_but_the_scope_does_not() {
+    let tmp = corpus_repo();
+    let (ws, lock, git) = discover_and_seal(tmp.path());
+    let invoice_path = tmp.path().join("telos/notions/Invoice.tel");
+
+    fs::write(&invoice_path, "first modified version\n").unwrap();
+    let first = compute_state(&ws, &lock, &git, &[]).unwrap();
+    let first_token = drift_token(&ws, &git, &lock, &first.drift).unwrap();
+
+    fs::write(&invoice_path, "second modified version\n").unwrap();
+    let second = compute_state(&ws, &lock, &git, &[]).unwrap();
+    let second_token = drift_token(&ws, &git, &lock, &second.drift).unwrap();
+
+    assert_eq!(first.drift, second.drift, "the displayed scope stays equal");
+    assert_ne!(
+        first_token, second_token,
+        "live bytes must be authenticated"
     );
 }
 

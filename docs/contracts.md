@@ -252,9 +252,9 @@ parses" doesn't have an obvious meaning when *nothing* parses.)
   distinction exists internally as `DriftKind`, but M1's frozen schema
   exposes paths only). The `token` field is the one explicit 0.7 addition to
   this frozen nested object. It authenticates the complete sealed spec/code
-  OID tables and the exact sorted `(path, drift kind)` scope, so a path whose
-  bytes or kind changes receives another token even when the displayed path
-  list is unchanged.
+  OID tables, the exact sorted `(path, drift kind)` scope, and the live blob
+  OID of every present drift entry, so a path whose bytes or kind changes
+  receives another token even when the displayed path list is unchanged.
 - `coverage` — exact counts off the loaded model, or all zeros if the spec
   didn't parse. `scenarios_proved` counts scenarios with ≥ 1 `proves`
   binding; `intents_implemented` counts intents with ≥ 1 `implements`
@@ -942,8 +942,8 @@ Before approval, the challenger presents `change diff`’s `result.digest` and
 passes that exact value as `--expected-digest`; before adopt/revert, the router
 presents the relevant drift paths/token and passes the exact `--expected-state`.
 The rules themselves are static prompts, while the token is a command argument
-the guard verifies independently. A token-less, stale, compound, or nested
-human-action command fails closed. The generated context
+the guard verifies independently. A token-less, stale, compound, nested, or
+environment-wrapped human-action command fails closed. The generated context
 deliberately remains a portable bounded `telos context` pack, never a
 whole-spec or host-specific prompt dump.
 
@@ -1327,8 +1327,8 @@ creates `.telos-init.json`, any other file, directory, byte-bearing entry,
 live/dangling symlink, core owner (`telos.toml`, bindings, counters, lock), or
 active-unproved prepopulation is `TELOS_ALREADY_INITIALIZED`; the entire tree
 and integrations remain byte-for-byte unchanged. Only an authenticated marker
-with exact options, phase, core definitions, bytes, and directory identities
-can resume. The generated empty configuration/model passes `validate_self`,
+with exact options, phase, core definitions, bytes, and canonical directory
+shapes can resume. The generated empty configuration/model passes `validate_self`,
 semantic integrity, and the same sealability predicate as full reconcile before
 the initial lock is published.
 
@@ -1350,8 +1350,8 @@ ordinary concurrency is preserved rather than overwritten or removed.
 
 If publication fails after the marker exists, a retry is allowed only with
 the same normalized `--agents`/`--ci` options and only while the marker,
-phase, core bytes, directory identities, and already-published Telos artifacts
-remain exact. Exact artifacts are safe no-ops, user merges are idempotent, and
+phase, core bytes, canonical directory shapes, and already-published Telos
+artifacts remain exact. Exact artifacts are safe no-ops, user merges are idempotent, and
 the retry completes the missing agents/workflow before removing the marker.
 Different options or any foreign byte/path owner are refused without further
 publication. Once the marker is gone, ordinary repeat init remains

@@ -34,7 +34,12 @@ use crate::envelope::{CmdResult, Outcome};
 pub fn run(ctx: &Ctx, expected_state: Option<&str>) -> CmdResult {
     let project = project(ctx)?;
     require_drift(&project, "revert")?;
-    let current = drift_token(&project.lock, &project.state.drift);
+    let current = drift_token(
+        &project.ws,
+        &project.git,
+        &project.lock,
+        &project.state.drift,
+    )?;
     let authorized = expected_state.unwrap_or(&current).to_string();
     if authorized != current {
         return Err(stale_state());
@@ -42,7 +47,7 @@ pub fn run(ctx: &Ctx, expected_state: Option<&str>) -> CmdResult {
 
     let changes = scan_changes(&project.ws)?;
     let boundary = compute_state(&project.ws, &project.lock, &project.git, &changes.infos)?;
-    if drift_token(&project.lock, &boundary.drift) != authorized {
+    if drift_token(&project.ws, &project.git, &project.lock, &boundary.drift)? != authorized {
         return Err(stale_state());
     }
 

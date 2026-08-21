@@ -51,7 +51,6 @@ struct RebuildInput {
 /// semantic pass judges their combined result.
 fn load(ctx: &Ctx, include_contexts: bool) -> Result<RebuildInput, TelosError> {
     let discovered = Workspace::discover(&ctx.cwd)?;
-    discovered.config.validate_self()?;
     let lock_path = discovered.lock_path();
     let has_lock_entry = match fs::symlink_metadata(&lock_path) {
         Ok(_) => true,
@@ -64,6 +63,7 @@ fn load(ctx: &Ctx, include_contexts: bool) -> Result<RebuildInput, TelosError> {
         }
     };
     if !has_lock_entry {
+        discovered.config.validate_self()?;
         let model = discovered.load_model().map_err(diagnostics_to_error)?;
         let contexts = if include_contexts {
             model

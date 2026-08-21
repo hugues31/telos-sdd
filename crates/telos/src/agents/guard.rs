@@ -984,7 +984,8 @@ fn decision_context(action: &HumanAction, cwd: &Path) -> Result<DecisionContext,
             let git = GitRepo::discover(cwd).map_err(|_| ())?;
             let changes = scan_changes(&workspace).map_err(|_| ())?;
             let state = compute_state(&workspace, &lock, &git, &changes.infos).map_err(|_| ())?;
-            let token = telos_core::state::drift_token(&lock, &state.drift);
+            let token = telos_core::state::drift_token(&workspace, &git, &lock, &state.drift)
+                .map_err(|_| ())?;
             if token != expected.as_str() {
                 return Err(());
             }

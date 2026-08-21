@@ -767,6 +767,26 @@ fn sealed_source_and_spec_drift_refuse_both_rebuild_subcommands() {
     }
 }
 
+#[test]
+fn sealed_drift_is_reported_before_invalid_runtime_globs() {
+    for subcommand in ["plan", "status"] {
+        let tmp = with_fixture();
+        let config_path = tmp.path().join("telos/telos.toml");
+        let source = fs::read_to_string(&config_path).unwrap();
+        fs::write(
+            &config_path,
+            source.replace("globs = [\"src/**/*.rs\"]", "globs = [\"[\"]"),
+        )
+        .unwrap();
+
+        let (ok, envelope) = run(tmp.path(), &["rebuild", subcommand, "--json"]);
+
+        assert!(!ok, "{subcommand} accepted drift with invalid globs");
+        assert_eq!(envelope["error"]["code"], json!("TELOS_DRIFT_DETECTED"));
+        assert_eq!(envelope["error"]["hint"], json!(DRIFT_HINT));
+    }
+}
+
 fn tree_bytes(root: &Path) -> BTreeMap<String, Vec<u8>> {
     fn collect(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         for entry in fs::read_dir(dir).unwrap() {

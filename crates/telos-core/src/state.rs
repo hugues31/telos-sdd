@@ -85,12 +85,23 @@ pub struct StateReport {
     pub open_changes: Vec<ChangeSummary>,
 }
 
-/// Stable authorization token for one exact seal plus its unclaimed drift
-/// scope. It is displayed by `status` and may be required by drift-mutating
-/// commands at their final decision boundary.
-pub fn drift_token(lock: &Lock, drift: &[DriftEntry]) -> String {
+/// Stable authorization token for one exact seal plus the live bytes and
+/// unclaimed drift scope observed at the decision boundary.
+pub fn drift_token(
+    ws: &Workspace,
+    git: &GitRepo,
+    lock: &Lock,
+    drift: &[DriftEntry],
+) -> Result<String, TelosError> {
+    git.ensure_matches_workspace_root(&ws.repo_root)?;
+    let live_paths = drift
+        .iter()
+        .filter(|entry| entry.kind != DriftKind::Missing)
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    let live_oids = git.blob_oids(&live_paths)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"telos-drift-v1\0");
+    hasher.update(b"telos-drift-v2\0");
     hasher.update(lock.spec_digest.as_bytes());
     hasher.update(b"\0");
     for (table, entries) in [(b's', &lock.spec), (b'c', &lock.code)] {
@@ -110,9 +121,15 @@ pub fn drift_token(lock: &Lock, drift: &[DriftEntry]) -> String {
             DriftKind::Missing => b"missing".as_slice(),
             DriftKind::Untracked => b"untracked".as_slice(),
         });
+        hasher.update(b"\0");
+        if let Some(oid) = live_oids.get(&entry.path) {
+            hasher.update(oid.0.as_bytes());
+        } else {
+            hasher.update(b"absent");
+        }
         hasher.update(b"\n");
     }
-    format!("sha256:{:x}", hasher.finalize())
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 /// Compares `lock` against the live working tree, by OID only, then folds

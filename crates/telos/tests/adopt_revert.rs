@@ -616,6 +616,31 @@ fn revert_refuses_a_drift_token_whose_scope_changed_during_review() {
     assert_eq!(read(dir, CONFIG), config_before);
 }
 
+#[test]
+fn drift_actions_refuse_a_token_when_bytes_change_inside_the_same_scope() {
+    for action in ["adopt", "revert"] {
+        let tmp = with_fixture();
+        let dir = tmp.path();
+        append(dir, INVOICE, "\n// first reviewed drift\n");
+        let token = state(dir)["drift"]["token"].as_str().unwrap().to_string();
+        append(dir, INVOICE, "// later unreviewed bytes\n");
+        let before = read(dir, INVOICE);
+
+        let error = run_err(
+            dir,
+            &[action, "--expected-state", &token, "--json"],
+            "TELOS_CHANGE_STATE_INVALID",
+        );
+
+        assert_eq!(
+            error["message"],
+            json!("project drift no longer matches the expected state token")
+        );
+        assert_eq!(read(dir, INVOICE), before);
+        assert!(!dir.join("telos/changes/CHG-0001.tel").exists());
+    }
+}
+
 /// A drifted `.tel` file that no longer parses cannot become an op: `adopt`
 /// says so, names the other exit, and writes nothing.
 #[test]

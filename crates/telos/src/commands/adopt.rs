@@ -131,7 +131,12 @@ fn require_expected_state(
     project: &crate::commands::Project,
     expected: Option<&str>,
 ) -> Result<String, TelosError> {
-    let current = drift_token(&project.lock, &project.state.drift);
+    let current = drift_token(
+        &project.ws,
+        &project.git,
+        &project.lock,
+        &project.state.drift,
+    )?;
     let authorized = expected.unwrap_or(&current);
     if authorized != current {
         return Err(stale_state());
@@ -145,7 +150,7 @@ fn require_unchanged_state(
 ) -> Result<(), TelosError> {
     let changes = scan_changes(&project.ws)?;
     let current = compute_state(&project.ws, &project.lock, &project.git, &changes.infos)?;
-    if drift_token(&project.lock, &current.drift) != expected {
+    if drift_token(&project.ws, &project.git, &project.lock, &current.drift)? != expected {
         return Err(stale_state());
     }
     Ok(())

@@ -1000,7 +1000,36 @@ fn guard_denies_unbound_or_noncanonical_human_actions() {
                 out["hookSpecificOutput"]["permissionDecisionReason"]
                     .as_str()
                     .expect("denial reason")
-                    .contains("current decision context")
+                    .contains("current decision context"),
+                "{host}: {command}: {out:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn guard_fails_closed_for_environment_wrapped_human_actions() {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+
+    for command in [
+        "env telos revert --expected-state sha256:stale",
+        "TELOS_REVIEW=1 telos revert --expected-state sha256:stale",
+    ] {
+        for host in ["claude", "codex"] {
+            let out = hook(
+                tmp.path(),
+                host,
+                json!({
+                    "cwd": tmp.path(),
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                }),
+            );
+            assert_eq!(
+                out["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{host}: {command}: {out:#}"
             );
         }
     }

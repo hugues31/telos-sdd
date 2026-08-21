@@ -302,3 +302,24 @@ Final fresh gate and smoke outputs are recorded after the documentation/report
 checkpoint and in the final handoff. Cross-platform cfg/API verification is
 reported separately because this host has only the Arch Linux
 `x86_64-unknown-linux-gnu` standard library; `rustup` is not installed.
+
+## Scoped re-review follow-up
+
+The independent scoped re-review passed 13/17 items and identified four
+follow-ups. They were resolved locally without another delegated fix wave:
+
+- init's contract now states the implemented authenticated canonical directory
+  **shape** guarantee rather than claiming directory inode identities; the
+  original foreign-owner and seal-gate finding remains covered;
+- environment/assignment-wrapped human actions were verified to already fail
+  closed through the direct-mutation classifier, and now have an explicit
+  two-host regression test;
+- drift tokens now include the live blob OID of every present drift entry, so
+  changed bytes under the same `(path, kind)` scope invalidate adopt/revert;
+- sealed rebuild validates drift before runtime globs, and watcher root ignores
+  for `.git`, `target`, and `.superpowers` no longer suppress same-named nested
+  project paths.
+
+Focused GREEN after these corrections: core state 17/17, agent init 41/41,
+rebuild 23/23, adopt/revert 22/22, Telos binary units 68/68, and contracts
+27/27 outside the loopback-restricted sandbox.

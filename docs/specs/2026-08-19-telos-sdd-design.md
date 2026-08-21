@@ -158,8 +158,9 @@ telos/
 | `CHANGING` | ≥ 1 change ouvert ; les fichiers touchés sont revendiqués par le change | Workflow normal |
 | `DRIFTED` | Spec ou code lié modifié hors de tout change | Les opérations d'avancement (open, approve, reconcile, rebuild, export doc) sont **refusées** |
 
-Sorties du drift : `status` publie un token du lock complet et du scope exact
-(chemin + kind), puis `telos adopt [--into CHG-…] --expected-state <token>`
+Sorties du drift : `status` publie un token du lock complet, du scope exact
+(chemin + kind) et des OID live correspondants, puis
+`telos adopt [--into CHG-…] --expected-state <token>`
 (le travail est capturé comme change légitime — on ne perd jamais rien) ou
 `telos revert --expected-state <token>` (restauration de l'état scellé via
 git). Les agents doivent passer l'exact displayed digest or drift token ; une

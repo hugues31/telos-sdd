@@ -39,7 +39,12 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     if project.state.state == ProjectStateKind::Coherent {
         require_sealed_integrity(&project)?;
     }
-    let token = drift_token(&project.lock, &project.state.drift);
+    let token = drift_token(
+        &project.ws,
+        &project.git,
+        &project.lock,
+        &project.state.drift,
+    )?;
     let report = project.state;
 
     let cov = project

@@ -453,9 +453,9 @@ fn ignored_event(root: &FsPath, event: &Event) -> bool {
             .any(|(index, component)| match component {
                 Component::Normal(name) => {
                     let name = name.to_string_lossy();
-                    name == ".git"
+                    (index == 0 && name == ".git")
                         || (index == 0 && name == "target")
-                        || name == ".superpowers"
+                        || (index == 0 && name == ".superpowers")
                         || (name.starts_with('.') && name.contains(".telos-staging-"))
                 }
                 _ => false,
@@ -582,9 +582,22 @@ mod tests {
         let root = PathBuf::from("/repo");
 
         assert!(ignored_event(&root, &event("/repo/target/debug/telos")));
+        assert!(ignored_event(&root, &event("/repo/.git/index")));
+        assert!(ignored_event(
+            &root,
+            &event("/repo/.superpowers/progress.md")
+        ));
         assert!(!ignored_event(
             &root,
             &event("/repo/examples/target/source.rs")
+        ));
+        assert!(!ignored_event(
+            &root,
+            &event("/repo/examples/.git/source.rs")
+        ));
+        assert!(!ignored_event(
+            &root,
+            &event("/repo/examples/.superpowers/source.rs")
         ));
     }
 

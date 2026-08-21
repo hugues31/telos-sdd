@@ -1,0 +1,102 @@
+/*
+ * Design tokens. `:root` is the light palette (the default, so the app
+ * still looks right if `data-theme` is ever missing); `[data-theme="dark"]`
+ * overrides it. `useTheme` (src/composables/useTheme.ts) is the only thing
+ * that ever sets `data-theme`, mirrored by the anti-FOUC script in
+ * index.html before Vue loads.
+ *
+ * Two families are for later tasks to consume, not this one:
+ *   --k-*    one colour per graph entity kind (GraphKey.kind in
+ *            src/data/types.ts — notion, intent, scenario, constraint,
+ *            code, test). Used to colour nodes/badges/pills per kind.
+ *   --tel-*  syntax-highlighting colours for rendering canonical `.tel`
+ *            source (the `canonical` string on notions/intents/
+ *            constraints). Named after the token classes a `.tel` lexer
+ *            produces: keyword, ident, string, number, date, punct,
+ *            comment.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* surfaces & text */
+  --color-bg: #ffffff;
+  --color-bg-subtle: #f3f6f4;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-border: #dbe3df;
+  --color-text: #16201b;
+  --color-text-muted: #566058;
+  --color-text-on-primary: #ffffff;
+
+  /* brand */
+  --color-primary: #1e6b4f;
+  --color-primary-strong: #144d38;
+  --color-primary-soft: #e3f1ea;
+
+  --color-link: var(--color-primary-strong);
+  --color-focus-ring: #1e6b4f;
+
+  /* status */
+  --color-status-ok: #1e8a5a;
+  --color-status-warn: #b3691b;
+  --color-status-error: #b3401f;
+
+  /* entity kinds (--k-*), one per GraphKey.kind */
+  --k-intent: #1e6b4f;
+  --k-scenario: #2f6fa8;
+  --k-notion: #7c4fae;
+  --k-constraint: #b3611f;
+  --k-code: #57625b;
+  --k-test: #1c8577;
+
+  /* .tel syntax highlighting (--tel-*) */
+  --tel-keyword: #1e6b4f;
+  --tel-ident: #16201b;
+  --tel-string: #9a4a1f;
+  --tel-number: #2f6fa8;
+  --tel-date: #7c4fae;
+  --tel-punct: #7c877e;
+  --tel-comment: #8b958d;
+
+  --header-height: 3.5rem;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-bg: #101512;
+  --color-bg-subtle: #161c18;
+  --color-surface: #1a211d;
+  --color-surface-raised: #202822;
+  --color-border: #2c352e;
+  --color-text: #e7ede9;
+  --color-text-muted: #a3b0a6;
+  --color-text-on-primary: #0c130f;
+
+  --color-primary: #3fa47c;
+  --color-primary-strong: #6cc79f;
+  --color-primary-soft: #1c3229;
+
+  --color-link: var(--color-primary-strong);
+  --color-focus-ring: #3fa47c;
+
+  --color-status-ok: #3fa47c;
+  --color-status-warn: #d99a4e;
+  --color-status-error: #d97b56;
+
+  --k-intent: #3fa47c;
+  --k-scenario: #6ea3d6;
+  --k-notion: #ab8bdc;
+  --k-constraint: #d99a4e;
+  --k-code: #9aa69c;
+  --k-test: #4fb9a8;
+
+  --tel-keyword: #3fa47c;
+  --tel-ident: #e7ede9;
+  --tel-string: #d99a68;
+  --tel-number: #6ea3d6;
+  --tel-date: #ab8bdc;
+  --tel-punct: #7d8a80;
+  --tel-comment: #6c766e;
+}

@@ -1,0 +1,94 @@
+/* Light reset + base typography. Imported once from src/main.ts, after tokens.css. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0 0 0.75em;
+}
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  padding: 0.5em 0.75em;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+code,
+pre {
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    'Liberation Mono',
+    monospace;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Minimal placeholder markup shared by the page stubs (src/pages/*.vue) and
+ * the "no data" fallback in src/main.ts. Not a Vue component — the real
+ * EmptyState component is left to a later task. */
+.page {
+  padding-block: 1.5rem;
+}
+
+.empty-state {
+  color: var(--color-text-muted);
+  border: 1px dashed var(--color-border);
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+}

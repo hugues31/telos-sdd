@@ -67,6 +67,12 @@ const LINE_KEYWORDS = new Set([
   'check',
   'rule',
   'scope',
+  'change',
+  'op',
+  'add',
+  'edit',
+  'run',
+  'bind',
 ]);
 
 const FOLLOWING_KEYWORDS = new Set(['system', 'status', 'statement', 'scope']);

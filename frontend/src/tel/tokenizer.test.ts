@@ -153,6 +153,13 @@ describe('tokenize: keyword heuristic', () => {
     });
   });
 
+  it.each(['change', 'op', 'add', 'edit', 'run', 'bind'])(
+    'marks the %s change-file line head as a keyword',
+    (head) => {
+      expect(tokenize(`${head} value`)[0]).toEqual({ kind: 'keyword', text: head });
+    },
+  );
+
   it('marks the single word right after status/scope/statement as a keyword too', () => {
     expect(kindsOf('status draft')).toEqual(['keyword', 'plain', 'keyword']);
     expect(kindsOf('scope global')).toEqual(['keyword', 'plain', 'keyword']);

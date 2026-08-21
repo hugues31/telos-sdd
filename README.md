@@ -1,4 +1,6 @@
-# Telos
+<p align="center">
+  <img src="docs/assets/telos.png" alt="Telos" width="420">
+</p>
 
 [![CI](https://github.com/hugues31/telos-sdd/actions/workflows/ci.yml/badge.svg)](https://github.com/hugues31/telos-sdd/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

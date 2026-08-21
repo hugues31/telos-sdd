@@ -9,6 +9,7 @@ import { defineConfig, type Plugin } from 'vitest/config';
 function classicScript(): Plugin {
   return {
     name: 'telos:classic-script',
+    apply: 'build',
     enforce: 'post',
     transformIndexHtml(html) {
       return html

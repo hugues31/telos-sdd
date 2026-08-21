@@ -40,6 +40,7 @@
   /* status */
   --color-status-ok: #1e8a5a;
   --color-status-warn: #b3691b;
+  --color-status-warn-bg: #fff1dd;
   --color-status-error: #b3401f;
 
   /* entity kinds (--k-*), one per GraphKey.kind */
@@ -85,6 +86,7 @@
 
   --color-status-ok: #3fa47c;
   --color-status-warn: #d99a4e;
+  --color-status-warn-bg: #392b1b;
   --color-status-error: #d97b56;
 
   --k-intent: #3fa47c;

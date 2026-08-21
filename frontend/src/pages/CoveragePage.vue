@@ -24,6 +24,7 @@ const provedScenarioPct = computed(() => percentage(coverage.value.scenarios_pro
       <MetricCard label="Notions" :value="coverage.notions" />
       <MetricCard label="Constraints" :value="coverage.constraints" />
       <MetricCard label="Intents" :value="coverage.intents_total" />
+      <MetricCard label="Scenarios" :value="coverage.scenarios_total" />
       <MetricCard label="Active intents" :value="coverage.intents_active" :subtext="`${coverage.intents_active} of ${coverage.intents_total}`"><ProgressBar :value="activeIntentPct" label="Active intent coverage" /></MetricCard>
       <MetricCard label="Implemented intents" :value="coverage.intents_implemented" :subtext="`${coverage.intents_implemented} of ${coverage.intents_total}`"><ProgressBar :value="implementedIntentPct" label="Implemented intent coverage" /></MetricCard>
       <MetricCard label="Proved scenarios" :value="coverage.scenarios_proved" :subtext="`${coverage.scenarios_proved} of ${coverage.scenarios_total}`"><ProgressBar :value="provedScenarioPct" label="Scenario proof coverage" /></MetricCard>
@@ -59,7 +60,7 @@ const provedScenarioPct = computed(() => percentage(coverage.value.scenarios_pro
 .coverage__section { margin-top: 2rem; }
 .coverage__table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: 0.75rem; }
 .coverage__table-wrap:focus-visible { outline-offset: 0.25rem; }
-.coverage__row--unproved { background: var(--color-bg-subtle); }
+.coverage__row--unproved { background: var(--color-status-warn-bg); }
 .coverage__no-proof { color: var(--color-status-warn); font-weight: 600; }
 .coverage__bindings { display: grid; gap: 0.5rem; margin: 0; padding: 0; list-style: none; }
 .coverage__bindings li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem; }

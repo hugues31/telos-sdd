@@ -11,9 +11,9 @@
  *            code, test). Used to colour nodes/badges/pills per kind.
  *   --tel-*  syntax-highlighting colours for rendering canonical `.tel`
  *            source (the `canonical` string on notions/intents/
- *            constraints). Named after the token classes a `.tel` lexer
- *            produces: keyword, ident, string, number, date, punct,
- *            comment.
+ *            constraints). Named after the display-token classes a `.tel`
+ *            tokenizer produces: keyword, ident, idlit, string, number,
+ *            date, punct, plain.
  */
 
 :root {
@@ -58,6 +58,8 @@
   --tel-date: #7c4fae;
   --tel-punct: #7c877e;
   --tel-comment: #8b958d;
+  --tel-idlit: #2f6fa8;
+  --tel-plain: #16201b;
 
   --header-height: 3.5rem;
 }
@@ -99,4 +101,6 @@
   --tel-date: #ab8bdc;
   --tel-punct: #7d8a80;
   --tel-comment: #6c766e;
+  --tel-idlit: #6ea3d6;
+  --tel-plain: #e7ede9;
 }

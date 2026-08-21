@@ -12,6 +12,7 @@ import { useRoute } from 'vue-router';
 import EmptyState from '../components/EmptyState.vue';
 import EntityLink from '../components/EntityLink.vue';
 import StatusBadge from '../components/StatusBadge.vue';
+import TelCode from '../components/TelCode.vue';
 import { intentById, snapshot } from '../data/snapshot';
 import type { GraphEdgeView, GraphKey, GraphRelation } from '../data/types';
 
@@ -91,9 +92,7 @@ function relationLabel(relation: GraphRelation): string {
 
       <details class="intent-detail__source">
         <summary>Canonical .tel source</summary>
-        <!-- Single substitution point: a later task replaces this <pre>
-             with a TelCode syntax-highlighting component. -->
-        <pre class="tel-source">{{ intent.canonical }}</pre>
+        <TelCode :source="intent.canonical" />
       </details>
 
       <section class="intent-detail__section" aria-labelledby="relations-heading">
@@ -233,17 +232,6 @@ function relationLabel(relation: GraphRelation): string {
   cursor: pointer;
   color: var(--color-link);
   font-weight: 600;
-}
-
-.tel-source {
-  margin: 0.75rem 0 0;
-  padding: 1rem;
-  background: var(--color-bg-subtle);
-  border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-  overflow-x: auto;
-  font-size: 0.8125rem;
-  line-height: 1.5;
 }
 
 .intent-detail__section {

@@ -169,6 +169,13 @@ fn validate_asset(root: &Path, source: &Path) -> Result<FrontendAsset, String> {
             source.display()
         ));
     }
+    let path = components.join("/");
+    if path != "index.html" && !(components.first() == Some(&"assets") && components.len() > 1) {
+        return Err(format!(
+            "frontend asset must be `index.html` or lie under `assets/`: {}",
+            source.display()
+        ));
+    }
     let extension = source
         .extension()
         .and_then(|value| value.to_str())
@@ -187,7 +194,7 @@ fn validate_asset(root: &Path, source: &Path) -> Result<FrontendAsset, String> {
 
     Ok(FrontendAsset {
         source: source.to_path_buf(),
-        path: components.join("/"),
+        path,
         content_type,
     })
 }

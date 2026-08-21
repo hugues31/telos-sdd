@@ -534,9 +534,8 @@ mod tests {
     use std::fs;
     use std::io::{self, Write};
     use std::path::Path;
-    use std::sync::{Arc, Barrier};
 
-    use super::{AgentHost, ErrorCode, preflight, render_with_before_write, render_with_hooks};
+    use super::{AgentHost, ErrorCode, preflight, render_with_hooks};
 
     fn assert_no_staging_files(root: &Path) {
         fn walk(directory: &Path) {
@@ -820,6 +819,9 @@ mod tests {
     #[test]
     fn cached_agent_write_does_not_follow_a_late_parent_swap() {
         use std::os::unix::fs::symlink;
+        use std::sync::{Arc, Barrier};
+
+        use super::render_with_before_write;
 
         let tmp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -847,8 +849,14 @@ mod tests {
         assert!(!outside.path().join("skills/telos/SKILL.md").exists());
     }
 
+    // Windows refuses to rename `.agents` while the staged writes hold
+    // handles beneath it, so this parent replacement cannot be staged
+    // there: the OS itself enforces the property this test simulates.
+    #[cfg(not(windows))]
     #[test]
     fn staged_agent_write_rejects_a_real_directory_parent_replacement() {
+        use super::render_with_before_write;
+
         let tmp = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let plan = preflight(tmp.path(), &[AgentHost::Codex]).unwrap();

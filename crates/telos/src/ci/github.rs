@@ -156,7 +156,7 @@ mod tests {
     use std::io::{self, Write};
     use std::sync::{Arc, Barrier};
 
-    use super::{WORKFLOW, WORKFLOW_PATH, collision, preflight, preflight_resume};
+    use super::{WORKFLOW, WORKFLOW_PATH, preflight, preflight_resume};
 
     #[test]
     fn exact_workflow_is_a_noop_only_during_init_resume() {
@@ -277,6 +277,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let actor_barrier = Arc::clone(&barrier);
         let actor_github = github.clone();
+        #[cfg(unix)]
         let actor_outside = outside.path().to_path_buf();
         let actor = std::thread::spawn(move || {
             actor_barrier.wait();
@@ -308,6 +309,8 @@ mod tests {
     #[test]
     fn final_create_new_preserves_a_late_workflow_symlink_owner() {
         use std::os::unix::fs::symlink;
+
+        use super::collision;
 
         let tmp = tempfile::tempdir().unwrap();
         let workflow = tmp.path().join(".github/workflows/telos.yml");

@@ -1463,9 +1463,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Telos v0.7.1
+      - name: Install Telos v0.8.0
         run: |
-          version=0.7.1
+          version=0.8.0
           asset="telos_${version}_linux_amd64.tar.gz"
           base="https://github.com/hugues31/telos-sdd/releases/download/v${version}"
           cd "$RUNNER_TEMP"
@@ -1480,8 +1480,8 @@ jobs:
 ```
 
 The downloaded release version is derived from the CLI package version.
-Shipping 0.7.1 therefore requires release `v0.7.1` to carry the
-`telos_0.7.1_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
+Shipping 0.8.0 therefore requires release `v0.8.0` to carry the
+`telos_0.8.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
 generated install step cannot succeed. The workflow reports a check but does
 not itself make GitHub treat it as required: repository branch protection
 must separately require job `sealed` before merges.

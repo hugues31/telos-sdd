@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
 import type { RouteLocationRaw } from 'vue-router';
 
 import EmptyState from '../components/EmptyState.vue';
 import EntityLink from '../components/EntityLink.vue';
 import KindPill from '../components/KindPill.vue';
 import { scenarioToIntent, snapshot } from '../data/snapshot';
-import type { GraphKey, GraphRelation } from '../data/types';
+import type { GraphKey } from '../data/types';
 import CytoGraph from '../graph/CytoGraph.vue';
 import type { RelationFilter } from '../graph/elements';
+import { relationLabel, relationOptionsFor } from '../graph/relations';
 import { useGraphSelection } from '../graph/selection';
 
 const nodes = computed(() => snapshot.value.snapshot.nodes);
@@ -16,15 +17,7 @@ const edges = computed(() => snapshot.value.snapshot.edges);
 const { selected, setSelection } = useGraphSelection(nodes, edges);
 const relationFilter = ref<RelationFilter>('all');
 
-const relations = computed<GraphRelation[]>(() => {
-  return [...new Set(edges.value.map((edge) => edge.relation))].sort();
-});
-
-watch(relations, (available) => {
-  if (relationFilter.value !== 'all' && !available.includes(relationFilter.value)) {
-    relationFilter.value = 'all';
-  }
-});
+const relationOptions = computed(() => relationOptionsFor(edges.value));
 
 const matchingEdges = computed(() => {
   if (relationFilter.value === 'all') return edges.value;
@@ -78,9 +71,6 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
   return null;
 });
 
-function relationLabel(relation: GraphRelation): string {
-  return relation.charAt(0).toUpperCase() + relation.slice(1);
-}
 </script>
 
 <template>
@@ -91,12 +81,11 @@ function relationLabel(relation: GraphRelation): string {
         <p class="graph-page__summary">{{ summary }}</p>
       </div>
 
-      <label v-if="edges.length" class="relation-filter">
+      <label class="relation-filter">
         <span>Relation</span>
         <select v-model="relationFilter" aria-label="Filter graph by relation">
-          <option value="all">All</option>
-          <option v-for="relation in relations" :key="relation" :value="relation">
-            {{ relationLabel(relation) }}
+          <option v-for="option in relationOptions" :key="option.value" :value="option.value">
+            {{ option.label }}
           </option>
         </select>
       </label>

@@ -1,6 +1,6 @@
 import { reactive } from 'vue';
 
-import type { TelosMode, TelosPayload } from './types';
+import { GRAPH_RELATIONS, type TelosMode, type TelosPayload } from './types';
 
 export interface LiveStatus {
   generation: number;
@@ -40,7 +40,7 @@ interface PendingLoad {
 }
 
 export interface LiveGenerationState {
-  /** Monotonic maximum reported by live.json; stale responses never lower it. */
+  /** Most recent valid live.json generation; a decrease starts a new server lifecycle. */
   last_seen: number | null;
   /** Newest observed generation that has not yet been validated and swapped. */
   reload_required: number | null;
@@ -226,16 +226,7 @@ function isGraphEdge(value: unknown): boolean {
   return (
     isRecord(value) &&
     isGraphKey(value.from) &&
-    isOneOf(value.relation, [
-      'refines',
-      'requires',
-      'excludes',
-      'constrains',
-      'verifies',
-      'uses',
-      'implements',
-      'proves',
-    ]) &&
+    isOneOf(value.relation, GRAPH_RELATIONS) &&
     isGraphKey(value.to)
   );
 }
@@ -282,6 +273,7 @@ export function createLiveReloadController(options: LiveReloadOptions): LiveRelo
   let timer: unknown;
   let running = false;
   let runId = 0;
+  let needsSynchronization = true;
 
   const poll = async (currentRun: number): Promise<void> => {
     let adoptedLoad: PendingLoad | null = null;
@@ -294,14 +286,16 @@ export function createLiveReloadController(options: LiveReloadOptions): LiveRelo
       state.watcher_error = rawStatus.watcher_error;
       state.client_error = null;
 
-      if (generationState.last_seen === null) {
-        generationState.last_seen = rawStatus.generation;
-      } else if (rawStatus.generation > generationState.last_seen) {
+      if (
+        needsSynchronization ||
+        generationState.last_seen === null ||
+        rawStatus.generation !== generationState.last_seen
+      ) {
         generationState.last_seen = rawStatus.generation;
         generationState.reload_required = rawStatus.generation;
       }
 
-      if (generationState.reload_required !== null) {
+      while (generationState.reload_required !== null) {
         const pending =
           generationState.pending_load ??
           (generationState.pending_load = {
@@ -312,14 +306,16 @@ export function createLiveReloadController(options: LiveReloadOptions): LiveRelo
         const nextSnapshot = await pending.promise;
         if (currentRun !== runId || !running) return;
         if (generationState.pending_load === pending) generationState.pending_load = null;
-        if (generationState.reload_required !== pending.generation) return;
+        if (generationState.reload_required !== pending.generation) continue;
         if (!isTelosPayload(nextSnapshot)) throw new Error('Invalid data.js payload');
         options.replaceSnapshot(nextSnapshot);
         generationState.reload_required = null;
+        needsSynchronization = false;
       }
     } catch (error) {
       if (currentRun === runId && running) {
         if (generationState.pending_load === adoptedLoad) generationState.pending_load = null;
+        needsSynchronization = true;
         state.client_error = errorMessage(error);
       }
     } finally {
@@ -337,6 +333,7 @@ export function createLiveReloadController(options: LiveReloadOptions): LiveRelo
     start() {
       if (running || options.mode !== 'live') return;
       running = true;
+      needsSynchronization = true;
       const currentRun = ++runId;
       void poll(currentRun);
     },

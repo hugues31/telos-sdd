@@ -144,16 +144,19 @@ export interface ProofView {
 
 export type GraphKeyKind = 'notion' | 'intent' | 'scenario' | 'constraint' | 'code' | 'test';
 
-/** `Relation::as_str()` in `crates/telos-core/src/graph.rs`. */
-export type GraphRelation =
-  | 'refines'
-  | 'requires'
-  | 'excludes'
-  | 'constrains'
-  | 'verifies'
-  | 'uses'
-  | 'implements'
-  | 'proves';
+/** Canonical `Relation::as_str()` order in `crates/telos-core/src/graph.rs`. */
+export const GRAPH_RELATIONS = [
+  'refines',
+  'requires',
+  'excludes',
+  'constrains',
+  'verifies',
+  'uses',
+  'implements',
+  'proves',
+] as const;
+
+export type GraphRelation = (typeof GRAPH_RELATIONS)[number];
 
 /** `#[serde(tag = "kind", content = "id", rename_all = "lowercase")]`, i.e.
  * `{ "kind": "notion", "id": "Customer" }`. */

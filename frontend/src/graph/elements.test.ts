@@ -201,4 +201,12 @@ describe('dimmedElementIds', () => {
       'edge:intent%3AINT-0001:excludes:intent%3AINT-0042',
     ]);
   });
+
+  it('dims the complete mounted graph when the selected canonical relation has no matches', () => {
+    const elements = buildGraphElements(nodes, edges.slice(1, 2));
+
+    expect([...dimmedElementIds(elements, 'proves')].sort()).toEqual(
+      elements.map((element) => element.data.id as string).sort(),
+    );
+  });
 });

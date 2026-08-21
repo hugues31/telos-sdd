@@ -1,12 +1,14 @@
 //! Read-only Axum projection served from the loopback interface.
 
+use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::{OriginalUri, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{OriginalUri, Request, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -25,6 +27,9 @@ use super::model::ViewSnapshot;
 
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(75);
 const MAX_REBUILD_LATENCY: Duration = Duration::from_millis(500);
+const SESSION_COOKIE_PREFIX: &str = "telos_view_session_";
+const CROSS_ORIGIN_RESOURCE_POLICY: HeaderName =
+    HeaderName::from_static("cross-origin-resource-policy");
 
 #[derive(Clone, Copy)]
 struct WatchTiming {
@@ -189,6 +194,102 @@ impl LiveState {
 
 type SharedState = Arc<RwLock<LiveState>>;
 
+#[derive(Clone)]
+struct LiveAppState {
+    live: SharedState,
+    boundary: Arc<LiveRequestBoundary>,
+}
+
+struct LiveRequestBoundary {
+    authority: String,
+    cookie_name: String,
+    credential: String,
+}
+
+impl LiveRequestBoundary {
+    fn generate(local_port: u16) -> Result<Self, TelosError> {
+        let mut entropy = [0_u8; 32];
+        getrandom::fill(&mut entropy).map_err(|error| {
+            TelosError::new(
+                ErrorCode::TelosInternal,
+                format!("failed to generate the live view session credential: {error}"),
+            )
+        })?;
+        let mut credential = String::with_capacity(entropy.len() * 2);
+        for byte in entropy {
+            write!(&mut credential, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        Ok(Self {
+            authority: format!("127.0.0.1:{local_port}"),
+            cookie_name: format!("{SESSION_COOKIE_PREFIX}{local_port}"),
+            credential,
+        })
+    }
+
+    fn host_matches(&self, headers: &HeaderMap) -> bool {
+        let mut values = headers.get_all(header::HOST).iter();
+        matches!(
+            (values.next(), values.next()),
+            (Some(value), None) if value.as_bytes() == self.authority.as_bytes()
+        )
+    }
+
+    fn authorizes_sensitive(&self, headers: &HeaderMap) -> bool {
+        self.fetch_site_allows(headers) && self.has_exact_session(headers)
+    }
+
+    fn fetch_site_allows(&self, headers: &HeaderMap) -> bool {
+        let mut values = headers.get_all("sec-fetch-site").iter();
+        match (values.next(), values.next()) {
+            (None, None) => true,
+            (Some(value), None) => matches!(value.as_bytes(), b"same-origin" | b"none"),
+            _ => false,
+        }
+    }
+
+    fn has_exact_session(&self, headers: &HeaderMap) -> bool {
+        let mut candidate = None;
+        for header in headers.get_all(header::COOKIE) {
+            let Ok(header) = header.to_str() else {
+                return false;
+            };
+            for pair in header.split(';').map(str::trim) {
+                let Some((name, value)) = pair.split_once('=') else {
+                    continue;
+                };
+                if name != self.cookie_name {
+                    continue;
+                }
+                if candidate.replace(value).is_some() {
+                    return false;
+                }
+            }
+        }
+        candidate.is_some_and(|candidate| constant_time_eq(candidate, &self.credential))
+    }
+
+    fn set_cookie(&self) -> HeaderValue {
+        HeaderValue::from_str(&format!(
+            "{}={}; HttpOnly; SameSite=Strict; Path=/",
+            self.cookie_name, self.credential
+        ))
+        .expect("a hex session credential is always a valid cookie value")
+    }
+}
+
+fn constant_time_eq(candidate: &str, expected: &str) -> bool {
+    if candidate.len() != expected.len() {
+        return false;
+    }
+    candidate
+        .bytes()
+        .zip(expected.bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
 pub(crate) struct LiveServer {
     listener: TcpListener,
     router: Router,
@@ -206,6 +307,7 @@ impl LiveServer {
             .local_addr()
             .map_err(|error| io_error("read the loopback view address", error))?
             .port();
+        let boundary = Arc::new(LiveRequestBoundary::generate(local_port)?);
         let (notifier, queue) = WatchNotifier::channel(root.clone());
         let (watcher, snapshot) = subscribe_before_build(
             || {
@@ -221,17 +323,22 @@ impl LiveServer {
             },
             || build_snapshot(ctx).map(|(_, snapshot)| snapshot),
         )?;
-        let state = Arc::new(RwLock::new(LiveState::new(snapshot)));
-        let reload_state = Arc::clone(&state);
+        let live = Arc::new(RwLock::new(LiveState::new(snapshot)));
+        let reload_state = Arc::clone(&live);
         tokio::spawn(watch_loop(queue, WatchTiming::default(), move |work| {
             process_watch_work(&root, &reload_state, work)
         }));
+        let app_state = LiveAppState {
+            live,
+            boundary: Arc::clone(&boundary),
+        };
         let router = Router::new()
             .route("/", get(index))
             .route("/data.js", get(live_data))
             .route("/live.json", get(live_status))
             .fallback_service(get(static_asset))
-            .with_state(state);
+            .with_state(app_state)
+            .layer(middleware::from_fn_with_state(boundary, enforce_exact_host));
 
         Ok(Self {
             listener,
@@ -261,25 +368,50 @@ fn subscribe_before_build<S, T, E>(
     Ok((subscription, snapshot))
 }
 
-async fn index() -> Response {
-    asset_response(assets::lookup("index.html").expect("embedded index.html is present"))
+async fn enforce_exact_host(
+    State(boundary): State<Arc<LiveRequestBoundary>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !boundary.host_matches(request.headers()) {
+        return sensitive_response(StatusCode::MISDIRECTED_REQUEST.into_response());
+    }
+    next.run(request).await
 }
 
-async fn live_data(State(state): State<SharedState>) -> Response {
+async fn index(State(state): State<LiveAppState>) -> Response {
+    let mut response =
+        asset_response(assets::lookup("index.html").expect("embedded index.html is present"));
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, state.boundary.set_cookie());
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn live_data(State(state): State<LiveAppState>, headers: HeaderMap) -> Response {
+    if !state.boundary.authorizes_sensitive(&headers) {
+        return sensitive_response(StatusCode::FORBIDDEN.into_response());
+    }
     let snapshot = state
+        .live
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .snapshot
         .clone();
     let script = data_js(&snapshot, DataMode::Live);
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
-        script,
+    sensitive_response(
+        (
+            [
+                (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            script,
+        )
+            .into_response(),
     )
-        .into_response()
 }
 
 #[derive(Serialize)]
@@ -289,9 +421,13 @@ struct LiveStatus {
     watcher_error: Option<String>,
 }
 
-async fn live_status(State(state): State<SharedState>) -> Response {
+async fn live_status(State(state): State<LiveAppState>, headers: HeaderMap) -> Response {
+    if !state.boundary.authorizes_sensitive(&headers) {
+        return sensitive_response(StatusCode::FORBIDDEN.into_response());
+    }
     let status = {
         let state = state
+            .live
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         LiveStatus {
@@ -303,7 +439,7 @@ async fn live_status(State(state): State<SharedState>) -> Response {
                 .map(|error| error.message.clone()),
         }
     };
-    ([(header::CACHE_CONTROL, "no-store")], Json(status)).into_response()
+    sensitive_response(Json(status).into_response())
 }
 
 async fn static_asset(OriginalUri(uri): OriginalUri) -> Response {
@@ -319,7 +455,22 @@ async fn static_asset(OriginalUri(uri): OriginalUri) -> Response {
 }
 
 fn asset_response(asset: &'static Asset) -> Response {
-    ([(header::CONTENT_TYPE, asset.content_type)], asset.bytes).into_response()
+    protected_response(([(header::CONTENT_TYPE, asset.content_type)], asset.bytes).into_response())
+}
+
+fn protected_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        CROSS_ORIGIN_RESOURCE_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+    response
+}
+
+fn sensitive_response(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    protected_response(response)
 }
 
 async fn watch_loop(

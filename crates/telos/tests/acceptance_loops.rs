@@ -71,22 +71,39 @@ fn data_payload(script: &str) -> Value {
     serde_json::from_str(json).expect("data.js assignment contains valid JSON")
 }
 
-fn http_get(url: &str, route: &str) -> String {
+fn http_get(url: &str, route: &str, cookie: Option<&str>) -> String {
     let address = url
         .strip_prefix("http://")
         .and_then(|url| url.strip_suffix('/'))
         .expect("view URL has the documented HTTP shape");
     let mut stream = TcpStream::connect(address).expect("connect to live view");
-    write!(
-        stream,
-        "GET {route} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-    )
-    .expect("write HTTP request");
+    write!(stream, "GET {route} HTTP/1.1\r\nHost: {address}\r\n").expect("write HTTP request head");
+    if let Some(cookie) = cookie {
+        write!(stream, "Cookie: {cookie}\r\n").expect("write session cookie");
+    }
+    write!(stream, "Connection: close\r\n\r\n").expect("finish HTTP request");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
         .expect("read HTTP response");
     response
+}
+
+fn session_cookie(response: &str) -> String {
+    response
+        .split_once("\r\n\r\n")
+        .expect("HTTP response separates headers and body")
+        .0
+        .split("\r\n")
+        .find_map(|line| {
+            line.strip_prefix("set-cookie: ")
+                .or_else(|| line.strip_prefix("Set-Cookie: "))
+        })
+        .expect("the live shell establishes a session")
+        .split(';')
+        .next()
+        .expect("Set-Cookie starts with a cookie pair")
+        .to_string()
 }
 
 // --- shared harness: run a step, assert its envelope ------------------------
@@ -804,10 +821,11 @@ fn loop_projection() {
     assert_eq!(envelope["command"], "view");
     assert_eq!(envelope["result"]["mode"], "server");
 
-    let shell = http_get(url, "/");
+    let shell = http_get(url, "/", None);
     assert!(shell.starts_with("HTTP/1.1 200 "), "/: {shell}");
+    let cookie = session_cookie(&shell);
 
-    let live_data = http_get(url, "/data.js");
+    let live_data = http_get(url, "/data.js", Some(&cookie));
     assert!(
         live_data.starts_with("HTTP/1.1 200 "),
         "/data.js: {live_data}"
@@ -821,7 +839,7 @@ fn loop_projection() {
     assert_eq!(live_payload["meta"]["mode"], "live");
     assert_eq!(live_payload["snapshot"], export_payload["snapshot"]);
 
-    let live_status = http_get(url, "/live.json");
+    let live_status = http_get(url, "/live.json", Some(&cookie));
     assert!(
         live_status.starts_with("HTTP/1.1 200 "),
         "/live.json: {live_status}"
@@ -846,7 +864,7 @@ fn loop_projection() {
         "/coverage",
         "/missing",
     ] {
-        let response = http_get(url, route);
+        let response = http_get(url, route, Some(&cookie));
         assert!(response.starts_with("HTTP/1.1 404 "), "{route}: {response}");
     }
 

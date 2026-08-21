@@ -20,12 +20,18 @@ concurrency:
 jobs:
   frontend:
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.tag || github.sha }}
+      - name: Resolve immutable source commit
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v5
         with:
           node-version-file: frontend/.nvmrc
@@ -92,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ needs.frontend.outputs.source_sha }}
       - name: Set reproducible build timestamp
         shell: bash
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
@@ -144,14 +150,29 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [frontend, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+      SOURCE_SHA: ${{ needs.frontend.outputs.source_sha }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.frontend.outputs.source_sha }}
+          fetch-depth: 1
+      - name: Refuse a tag that moved after source resolution
+        shell: bash
+        run: |
+          git check-ref-format "refs/tags/${TAG}"
+          git fetch --force --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          actual_sha="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
+          if [ "$actual_sha" != "$SOURCE_SHA" ]; then
+            echo "Tag ${TAG} moved from ${SOURCE_SHA} to ${actual_sha}." >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v8
         with:
           pattern: telos-*

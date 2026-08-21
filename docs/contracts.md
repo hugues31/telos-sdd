@@ -1195,6 +1195,31 @@ exactly one startup line, then serves until Ctrl-C or process termination:
 {"ok":true,"command":"view","result":{"mode":"server","url":"http://127.0.0.1:<allocated>/"},"error":null,"next_actions":[]}
 ```
 
+The live HTTP boundary is tied to that exact advertised authority. Every
+request must carry `Host: 127.0.0.1:<allocated>`; a missing or different Host
+is refused with HTTP 421, including `localhost` or another port. A successful
+`GET /` establishes a per-process 256-bit CSPRNG session as the host-only
+session cookie `telos_view_session_<allocated>`, with
+`HttpOnly; SameSite=Strict; Path=/`. Including the port in the name lets
+multiple live servers coexist even though cookies themselves have no port
+scope. `Secure` is intentionally absent because the advertised loopback URL
+is HTTP. The credential is never placed in the URL or shell body.
+
+`/data.js` and `/live.json` require that exact session cookie. They also reject
+HTTP 403 when a present `Sec-Fetch-Site` is anything except `same-origin` or
+`none`; this includes `same-site` requests from another loopback port, where a
+Strict cookie alone would not create an origin boundary. A non-browser client
+may omit Fetch Metadata, but still needs the exact Host and must first obtain
+the session through `/`. Sensitive successes and refusals are `no-store`, and
+all live resources carry `Cross-Origin-Resource-Policy: same-origin`.
+
+This boundary prevents a web origin from importing the executable live
+snapshot or polling its status. It does not attempt to isolate the model from
+another local process running as the user, because such a process can make the
+same two raw loopback requests. Static export has no session boundary: its
+`data.js` remains a self-contained file suitable for `file://` and GitHub
+Pages.
+
 The recursive watcher ignores root `.git`, the repository-root `target`, and
 exporter staging paths. A nested project path such as
 `examples/target/...` remains relevant and triggers reload. It coalesces bursts, rebuilds the complete state/model off the

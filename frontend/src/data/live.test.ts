@@ -95,13 +95,11 @@ describe('live reload controller', () => {
     expect(scheduler.pending).toBe(0);
   });
 
-  test('an unchanged generation does not load or replace the snapshot', async () => {
+  test('the first status reloads data to close the startup interleaving window', async () => {
     const scheduler = createScheduler();
-    const fetchStatus = vi
-      .fn<() => Promise<LiveStatus>>()
-      .mockResolvedValueOnce(status(4))
-      .mockResolvedValueOnce(status(4));
-    const loadSnapshot = vi.fn();
+    const currentSnapshot = snapshot('generation-4');
+    const fetchStatus = vi.fn<() => Promise<LiveStatus>>().mockResolvedValue(status(4));
+    const loadSnapshot = vi.fn().mockResolvedValue(currentSnapshot);
     const replaceSnapshot = vi.fn();
     const controller = createLiveReloadController({
       mode: 'live',
@@ -114,22 +112,53 @@ describe('live reload controller', () => {
 
     controller.start();
     await waitForScheduled(scheduler);
-    scheduler.runNext();
+    controller.stop();
+
+    expect(fetchStatus).toHaveBeenCalledOnce();
+    expect(loadSnapshot).toHaveBeenCalledOnce();
+    expect(loadSnapshot).toHaveBeenCalledWith(4);
+    expect(replaceSnapshot).toHaveBeenCalledWith(currentSnapshot);
+  });
+
+  test('the first status reloads even when shared state already saw the same generation', async () => {
+    const scheduler = createScheduler();
+    const currentSnapshot = snapshot('generation-4');
+    const loadSnapshot = vi.fn().mockResolvedValue(currentSnapshot);
+    const replaceSnapshot = vi.fn();
+    const controller = createLiveReloadController({
+      mode: 'live',
+      fetchStatus: vi.fn<() => Promise<LiveStatus>>().mockResolvedValue(status(4)),
+      loadSnapshot,
+      replaceSnapshot,
+      schedule: scheduler.schedule,
+      cancelSchedule: scheduler.cancel,
+      generationState: {
+        last_seen: 4,
+        reload_required: null,
+        pending_load: null,
+      },
+    });
+
+    controller.start();
     await waitForScheduled(scheduler);
     controller.stop();
 
-    expect(fetchStatus).toHaveBeenCalledTimes(2);
-    expect(loadSnapshot).not.toHaveBeenCalled();
-    expect(replaceSnapshot).not.toHaveBeenCalled();
+    expect(loadSnapshot).toHaveBeenCalledOnce();
+    expect(loadSnapshot).toHaveBeenCalledWith(4);
+    expect(replaceSnapshot).toHaveBeenCalledWith(currentSnapshot);
   });
 
-  test('a stale generation after a newer one does not load or replace', async () => {
+  test('a lower sequential generation is a server restart and reloads the reset lifecycle', async () => {
     const scheduler = createScheduler();
     const fetchStatus = vi
       .fn<() => Promise<LiveStatus>>()
       .mockResolvedValueOnce(status(10))
       .mockResolvedValueOnce(status(9));
-    const loadSnapshot = vi.fn();
+    const generation10 = snapshot('generation-10');
+    const generation9 = snapshot('generation-9');
+    const loadSnapshot = vi.fn((generation: number) =>
+      Promise.resolve(generation === 10 ? generation10 : generation9),
+    );
     const replaceSnapshot = vi.fn();
     const controller = createLiveReloadController({
       mode: 'live',
@@ -146,8 +175,44 @@ describe('live reload controller', () => {
     await waitForScheduled(scheduler);
     controller.stop();
 
-    expect(loadSnapshot).not.toHaveBeenCalled();
-    expect(replaceSnapshot).not.toHaveBeenCalled();
+    expect(loadSnapshot.mock.calls.map(([generation]) => generation)).toEqual([10, 9]);
+    expect(replaceSnapshot.mock.calls.map(([payload]) => payload)).toEqual([
+      generation10,
+      generation9,
+    ]);
+  });
+
+  test('a connection failure requires resynchronization at the same generation', async () => {
+    const scheduler = createScheduler();
+    const generation5 = snapshot('generation-5');
+    const fetchStatus = vi
+      .fn<() => Promise<LiveStatus>>()
+      .mockResolvedValueOnce(status(5))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(status(5));
+    const loadSnapshot = vi.fn().mockResolvedValue(generation5);
+    const replaceSnapshot = vi.fn();
+    const controller = createLiveReloadController({
+      mode: 'live',
+      fetchStatus,
+      loadSnapshot,
+      replaceSnapshot,
+      schedule: scheduler.schedule,
+      cancelSchedule: scheduler.cancel,
+    });
+
+    controller.start();
+    await waitForScheduled(scheduler);
+    scheduler.runNext();
+    await waitForScheduled(scheduler);
+    expect(controller.state.client_error).toBe('offline');
+    scheduler.runNext();
+    await waitForScheduled(scheduler);
+    controller.stop();
+
+    expect(loadSnapshot.mock.calls.map(([generation]) => generation)).toEqual([5, 5]);
+    expect(replaceSnapshot).toHaveBeenCalledTimes(2);
+    expect(controller.state.client_error).toBeNull();
   });
 
   test('a growing generation loads and atomically replaces once', async () => {
@@ -174,10 +239,9 @@ describe('live reload controller', () => {
     await waitForScheduled(scheduler);
     controller.stop();
 
-    expect(loadSnapshot).toHaveBeenCalledOnce();
-    expect(loadSnapshot).toHaveBeenCalledWith(8);
-    expect(replaceSnapshot).toHaveBeenCalledOnce();
-    expect(replaceSnapshot).toHaveBeenCalledWith(nextSnapshot);
+    expect(loadSnapshot.mock.calls.map(([generation]) => generation)).toEqual([7, 8]);
+    expect(replaceSnapshot).toHaveBeenCalledTimes(2);
+    expect(replaceSnapshot).toHaveBeenLastCalledWith(nextSnapshot);
   });
 
   test('a script load failure preserves the current snapshot and polling continues', async () => {
@@ -247,6 +311,7 @@ describe('live reload controller', () => {
     const restartedScheduler = createScheduler();
     const oldLoad = createDeferred<TelosPayload>();
     const initialSnapshot = snapshot('initial');
+    const generation10 = snapshot('generation-10');
     const generation11 = snapshot('generation-11');
     const generation12 = snapshot('generation-12');
     let globalSnapshot = initialSnapshot;
@@ -257,6 +322,10 @@ describe('live reload controller', () => {
       pending_load: null,
     };
     const loadSnapshot = vi.fn((generation: number) => {
+      if (generation === 10) {
+        globalSnapshot = generation10;
+        return Promise.resolve(generation10);
+      }
       if (generation === 11) {
         return oldLoad.promise.then((payload) => {
           globalSnapshot = payload;
@@ -305,13 +374,16 @@ describe('live reload controller', () => {
     restartedController.start();
     await vi.waitFor(() => expect(restartedOptions.fetchStatus).toHaveBeenCalledOnce());
     oldLoad.resolve(generation11);
-    await waitForScheduled(restartedScheduler);
-    restartedScheduler.runNext();
+    await vi.waitFor(() => expect(loadSnapshot).toHaveBeenCalledWith(12));
     await waitForScheduled(restartedScheduler);
     restartedController.stop();
 
-    expect(loadSnapshot.mock.calls.map(([generation]) => generation)).toEqual([11, 12]);
-    expect(replaceSnapshot).toHaveBeenCalledOnce();
+    expect(restartedOptions.fetchStatus).toHaveBeenCalledOnce();
+    expect(loadSnapshot.mock.calls.map(([generation]) => generation)).toEqual([10, 11, 12]);
+    expect(replaceSnapshot.mock.calls.map(([payload]) => payload)).toEqual([
+      generation10,
+      generation12,
+    ]);
     expect(visibleSnapshot).toBe(generation12);
     expect(globalSnapshot).toBe(generation12);
   });
@@ -364,18 +436,48 @@ describe('live reload controller', () => {
     expect(fetchStatus).toHaveBeenCalledOnce();
   });
 
+  test('starting the same controller again rearms first-status synchronization', async () => {
+    const scheduler = createScheduler();
+    const currentSnapshot = snapshot('generation-9');
+    const fetchStatus = vi.fn<() => Promise<LiveStatus>>().mockResolvedValue(status(9));
+    const loadSnapshot = vi.fn().mockResolvedValue(currentSnapshot);
+    const replaceSnapshot = vi.fn();
+    const controller = createLiveReloadController({
+      mode: 'live',
+      fetchStatus,
+      loadSnapshot,
+      replaceSnapshot,
+      schedule: scheduler.schedule,
+      cancelSchedule: scheduler.cancel,
+    });
+
+    controller.start();
+    await waitForScheduled(scheduler);
+    controller.stop();
+    controller.start();
+    await waitForScheduled(scheduler);
+    controller.stop();
+
+    expect(fetchStatus).toHaveBeenCalledTimes(2);
+    expect(loadSnapshot.mock.calls.map(([generation]) => generation)).toEqual([9, 9]);
+    expect(replaceSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   test('invalid status and network failures are reported without ending future polls', async () => {
     const scheduler = createScheduler();
+    const recoveredSnapshot = snapshot('recovered');
     const fetchStatus = vi
       .fn<() => Promise<unknown>>()
       .mockResolvedValueOnce({ generation: 'bad', reload_error: null, watcher_error: null })
       .mockRejectedValueOnce(new Error('offline'))
       .mockResolvedValueOnce(status(5));
+    const loadSnapshot = vi.fn().mockResolvedValue(recoveredSnapshot);
+    const replaceSnapshot = vi.fn();
     const controller = createLiveReloadController({
       mode: 'live',
       fetchStatus,
-      loadSnapshot: vi.fn(),
-      replaceSnapshot: vi.fn(),
+      loadSnapshot,
+      replaceSnapshot,
       schedule: scheduler.schedule,
       cancelSchedule: scheduler.cancel,
     });
@@ -391,6 +493,8 @@ describe('live reload controller', () => {
     scheduler.runNext();
     await waitForScheduled(scheduler);
     expect(controller.state.client_error).toBeNull();
+    expect(loadSnapshot).toHaveBeenCalledWith(5);
+    expect(replaceSnapshot).toHaveBeenCalledWith(recoveredSnapshot);
     controller.stop();
   });
 

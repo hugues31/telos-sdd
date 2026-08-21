@@ -94,7 +94,12 @@ impl HttpResponse {
     }
 }
 
-fn request(url: &str, method: &str, path: &str) -> HttpResponse {
+fn request_with_headers(
+    url: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
     let address = url
         .strip_prefix("http://")
         .and_then(|url| url.strip_suffix('/'))
@@ -103,11 +108,17 @@ fn request(url: &str, method: &str, path: &str) -> HttpResponse {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    write!(
-        stream,
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
+    write!(stream, "{method} {path} HTTP/1.1\r\n").unwrap();
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        write!(stream, "Host: {address}\r\n").unwrap();
+    }
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n").unwrap();
+    }
+    write!(stream, "Connection: close\r\n\r\n").unwrap();
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
     let split = response
@@ -133,8 +144,28 @@ fn request(url: &str, method: &str, path: &str) -> HttpResponse {
     }
 }
 
+fn request(url: &str, method: &str, path: &str) -> HttpResponse {
+    request_with_headers(url, method, path, &[])
+}
+
 fn get(url: &str, path: &str) -> HttpResponse {
     request(url, "GET", path)
+}
+
+fn establish_session(url: &str) -> (HttpResponse, String) {
+    let shell = get(url, "/");
+    let cookie = shell
+        .header("set-cookie")
+        .expect("the live shell establishes a session")
+        .split(';')
+        .next()
+        .expect("Set-Cookie starts with a cookie pair")
+        .to_string();
+    (shell, cookie)
+}
+
+fn session_get(url: &str, cookie: &str, path: &str) -> HttpResponse {
+    request_with_headers(url, "GET", path, &[("Cookie", cookie)])
 }
 
 fn data_payload(response: &HttpResponse) -> Value {
@@ -201,6 +232,160 @@ fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+fn live_data_requires_the_exact_loopback_session_and_browser_origin() {
+    let tmp = with_fixture();
+    let (mut server, url, _) = start_server(tmp.path());
+
+    for path in ["/data.js", "/live.json"] {
+        let unauthenticated = get(&url, path);
+        assert!(
+            unauthenticated.status_line.starts_with("HTTP/1.1 403 "),
+            "{path}: {}",
+            unauthenticated.status_line
+        );
+        assert_eq!(
+            unauthenticated.header("cross-origin-resource-policy"),
+            Some("same-origin")
+        );
+        assert_eq!(unauthenticated.header("cache-control"), Some("no-store"));
+        assert!(!unauthenticated.text().contains("INT-0042"));
+    }
+
+    let wrong_host = request_with_headers(&url, "GET", "/", &[("Host", "attacker.invalid")]);
+    assert!(
+        wrong_host.status_line.starts_with("HTTP/1.1 421 "),
+        "{}",
+        wrong_host.status_line
+    );
+
+    let shell = get(&url, "/");
+    assert!(shell.status_line.starts_with("HTTP/1.1 200 "));
+    assert_eq!(
+        shell.header("cross-origin-resource-policy"),
+        Some("same-origin")
+    );
+    assert_eq!(shell.header("cache-control"), Some("no-store"));
+    let set_cookie = shell
+        .header("set-cookie")
+        .expect("the shell establishes a live-view session");
+    let cookie = set_cookie
+        .split(';')
+        .next()
+        .expect("Set-Cookie starts with a cookie pair");
+    let port = url
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|url| url.strip_suffix('/'))
+        .expect("the advertised URL carries its loopback port");
+    let cookie_name = format!("telos_view_session_{port}");
+    let credential = cookie
+        .strip_prefix(&format!("{cookie_name}="))
+        .expect("the session cookie name is scoped to the advertised port");
+    assert_eq!(credential.len(), 64, "256-bit credential encoded as hex");
+    assert!(credential.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        set_cookie,
+        format!("{cookie_name}={credential}; HttpOnly; SameSite=Strict; Path=/")
+    );
+    assert!(!shell.text().contains(credential));
+
+    let mut wrong_credential = credential.to_string();
+    wrong_credential.replace_range(
+        ..1,
+        if credential.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    let wrong_cookie = format!("{cookie_name}={wrong_credential}");
+    let wrong_session = request_with_headers(&url, "GET", "/data.js", &[("Cookie", &wrong_cookie)]);
+    assert!(wrong_session.status_line.starts_with("HTTP/1.1 403 "));
+
+    for path in ["/data.js", "/live.json"] {
+        let authenticated = request_with_headers(
+            &url,
+            "GET",
+            path,
+            &[("Cookie", cookie), ("Sec-Fetch-Site", "same-origin")],
+        );
+        assert!(
+            authenticated.status_line.starts_with("HTTP/1.1 200 "),
+            "{path}: {}",
+            authenticated.status_line
+        );
+        assert_eq!(
+            authenticated.header("cross-origin-resource-policy"),
+            Some("same-origin")
+        );
+    }
+
+    let raw_client = request_with_headers(&url, "GET", "/live.json", &[("Cookie", cookie)]);
+    assert!(raw_client.status_line.starts_with("HTTP/1.1 200 "));
+
+    for fetch_site in ["same-site", "cross-site"] {
+        let foreign = request_with_headers(
+            &url,
+            "GET",
+            "/data.js",
+            &[("Cookie", cookie), ("Sec-Fetch-Site", fetch_site)],
+        );
+        assert!(
+            foreign.status_line.starts_with("HTTP/1.1 403 "),
+            "{fetch_site}: {}",
+            foreign.status_line
+        );
+        assert!(!foreign.text().contains("INT-0042"));
+    }
+
+    let rebound = request_with_headers(
+        &url,
+        "GET",
+        "/data.js",
+        &[("Host", "localhost:3000"), ("Cookie", cookie)],
+    );
+    assert!(
+        rebound.status_line.starts_with("HTTP/1.1 421 "),
+        "{}",
+        rebound.status_line
+    );
+
+    server.stop();
+}
+
+#[test]
+fn concurrent_live_servers_keep_independent_host_cookie_names() {
+    let first = with_fixture();
+    let second = with_fixture();
+    let (mut first_server, first_url, _) = start_server(first.path());
+    let (mut second_server, second_url, _) = start_server(second.path());
+    let (_, first_cookie) = establish_session(&first_url);
+    let (_, second_cookie) = establish_session(&second_url);
+    let first_name = first_cookie.split_once('=').unwrap().0;
+    let second_name = second_cookie.split_once('=').unwrap().0;
+
+    assert_ne!(first_name, second_name, "cookies are scoped by port name");
+    assert_ne!(first_cookie, second_cookie, "credentials are per-process");
+
+    let browser_cookie_header = format!("{first_cookie}; {second_cookie}");
+    for url in [&first_url, &second_url] {
+        let response = request_with_headers(
+            url,
+            "GET",
+            "/live.json",
+            &[("Cookie", &browser_cookie_header)],
+        );
+        assert!(
+            response.status_line.starts_with("HTTP/1.1 200 "),
+            "{url}: {}",
+            response.status_line
+        );
+    }
+
+    first_server.stop();
+    second_server.stop();
+}
+
+#[test]
 fn serves_the_spa_and_payload_on_loopback() {
     let tmp = with_fixture();
     let before = telos_bytes(tmp.path());
@@ -219,7 +404,7 @@ fn serves_the_spa_and_payload_on_loopback() {
     );
     assert!(url.starts_with("http://127.0.0.1:"), "url: {url}");
 
-    let index = get(&url, "/");
+    let (index, cookie) = establish_session(&url);
     assert!(index.status_line.starts_with("HTTP/1.1 200 "));
     assert_eq!(
         index.header("content-type"),
@@ -248,7 +433,7 @@ fn serves_the_spa_and_payload_on_loopback() {
         assert_eq!(response.header("content-type"), Some(expected_type));
     }
 
-    let data = get(&url, "/data.js");
+    let data = session_get(&url, &cookie, "/data.js");
     assert!(data.status_line.starts_with("HTTP/1.1 200 "));
     assert_eq!(
         data.header("content-type"),
@@ -260,10 +445,14 @@ fn serves_the_spa_and_payload_on_loopback() {
     assert!(data.text().contains("INT-0042"));
     assert!(data.text().contains("SCN-0107"));
 
-    let live = get(&url, "/live.json");
+    let live = session_get(&url, &cookie, "/live.json");
     assert!(live.status_line.starts_with("HTTP/1.1 200 "));
     assert_eq!(live.header("content-type"), Some("application/json"));
     assert_eq!(live.header("cache-control"), Some("no-store"));
+    assert_eq!(
+        live.header("cross-origin-resource-policy"),
+        Some("same-origin")
+    );
     let status: Value = serde_json::from_slice(&live.body).expect("live.json is valid JSON");
     assert!(status["generation"].is_u64());
     assert_eq!(status["reload_error"], Value::Null);
@@ -361,32 +550,37 @@ fn reloads_last_good_snapshot_and_recovers_after_invalid_edits() {
     );
     assert_ne!(changed, original, "fixture title changed unexpectedly");
     let (mut server, url, _) = start_server(tmp.path());
-    let initial_status: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+    let (_, cookie) = establish_session(&url);
+    let initial_status: Value =
+        serde_json::from_slice(&session_get(&url, &cookie, "/live.json").body).unwrap();
     let initial_generation = initial_status["generation"].as_u64().unwrap();
 
     fs::write(&intent_path, &changed).unwrap();
     wait_until("valid drifted snapshot", || {
-        let data = get(&url, "/data.js");
-        let live: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+        let data = session_get(&url, &cookie, "/data.js");
+        let live: Value =
+            serde_json::from_slice(&session_get(&url, &cookie, "/live.json").body).unwrap();
         data.text().contains("Invoice payment closes the balance")
             && live["generation"].as_u64().unwrap() > initial_generation
             && live["reload_error"].is_null()
     });
-    let valid_data = get(&url, "/data.js");
+    let valid_data = session_get(&url, &cookie, "/data.js");
     let valid_payload = data_payload(&valid_data);
     assert_eq!(valid_payload["snapshot"]["dashboard"]["state"], "drifted");
     assert!(valid_data.text().contains("telos/intents/INT-0042.tel"));
-    let valid_status: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+    let valid_status: Value =
+        serde_json::from_slice(&session_get(&url, &cookie, "/live.json").body).unwrap();
     let valid_generation = valid_status["generation"].as_u64().unwrap();
 
     fs::write(&intent_path, "&\n").unwrap();
     wait_until("last-good snapshot with reload error", || {
-        let status: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+        let status: Value =
+            serde_json::from_slice(&session_get(&url, &cookie, "/live.json").body).unwrap();
         status["reload_error"]
             .as_str()
             .is_some_and(|error| error.contains("unexpected character `&`"))
     });
-    let invalid_status_response = get(&url, "/live.json");
+    let invalid_status_response = session_get(&url, &cookie, "/live.json");
     let invalid_status: Value = serde_json::from_slice(&invalid_status_response.body).unwrap();
     assert_eq!(invalid_status["generation"], valid_generation);
     assert_eq!(invalid_status["watcher_error"], Value::Null);
@@ -398,15 +592,16 @@ fn reloads_last_good_snapshot_and_recovers_after_invalid_edits() {
     );
     assert!(!invalid_status_response.text().contains("&amp;"));
     assert!(
-        get(&url, "/data.js")
+        session_get(&url, &cookie, "/data.js")
             .text()
             .contains("Invoice payment closes the balance")
     );
 
     fs::write(&intent_path, &original).unwrap();
     wait_until("recovered valid snapshot", || {
-        let data = get(&url, "/data.js");
-        let live: Value = serde_json::from_slice(&get(&url, "/live.json").body).unwrap();
+        let data = session_get(&url, &cookie, "/data.js");
+        let live: Value =
+            serde_json::from_slice(&session_get(&url, &cookie, "/live.json").body).unwrap();
         data.text().contains("Invoice payment marks it settled")
             && live["generation"].as_u64().unwrap() > valid_generation
             && live["reload_error"].is_null()
@@ -427,7 +622,8 @@ fn live_view_observes_drifted_and_changing_projects() {
     fs::write(intent_path, changed).unwrap();
     let before_drifted_server = telos_bytes(drifted.path());
     let (mut drifted_server, drifted_url, _) = start_server(drifted.path());
-    let payload = data_payload(&get(&drifted_url, "/data.js"));
+    let (_, drifted_cookie) = establish_session(&drifted_url);
+    let payload = data_payload(&session_get(&drifted_url, &drifted_cookie, "/data.js"));
     assert_eq!(payload["snapshot"]["dashboard"]["state"], "drifted");
     drifted_server.stop();
     assert_eq!(telos_bytes(drifted.path()), before_drifted_server);
@@ -438,7 +634,8 @@ fn live_view_observes_drifted_and_changing_projects() {
         .success();
     let before_changing_server = telos_bytes(changing.path());
     let (mut changing_server, changing_url, _) = start_server(changing.path());
-    let payload = data_payload(&get(&changing_url, "/data.js"));
+    let (_, changing_cookie) = establish_session(&changing_url);
+    let payload = data_payload(&session_get(&changing_url, &changing_cookie, "/data.js"));
     assert_eq!(payload["snapshot"]["dashboard"]["state"], "changing");
     assert_eq!(
         payload["snapshot"]["dashboard"]["open_changes"][0]["id"],

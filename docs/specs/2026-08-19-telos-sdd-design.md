@@ -143,8 +143,11 @@ telos/
 ```
 
 - **Moteur en mémoire** : le CLI charge le telos à chaque invocation (parse + validation + index de graphe) ; à l'échelle visée (< 10 000 entités) c'est de l'ordre de la milliseconde en Rust. Le serveur web garde le modèle en mémoire avec un file-watcher. Un cache pourra être ajouté plus tard sans changer le modèle.
-- **`telos.toml`** : `[code] globs`, `[tests] globs`, `[test] cmd = "cargo test {filter}"`, `[policy] tdd = "strict" | "advisory"`, `[agents]`.
-- **`telos.lock`** : digest de la spec et **blob OIDs git** de chaque fichier `.tel` et de code lié — une seule identité d'octets dans tout le système, celle de git après filtres `.gitattributes` (pas de faux drift sur une fin de ligne, vérifiable à la main via `git cat-file`) ; plus version de l'outil et ID du change scellant. Les conflits de merge git sur le lock se résolvent par re-scellement prouvé (§7.4). Modèle de menace assumé : le seal détecte la négligence (humain, agent, IDE), il ne résiste pas à un adversaire qui forgerait les OIDs.
+- **`telos.toml`** : `[code] globs`, `[tests] globs`, `[test] cmd = "cargo test {filter}"` (gabarit validé d'un direct process argument vector, pas une commande shell), `[policy] tdd = "strict" | "advisory"`, `[agents]`.
+- **`telos.lock`** : digest de la spec et **blob OIDs git** de chaque fichier `.tel` et de code lié — une seule identité d'octets dans tout le système, celle de git après filtres `.gitattributes` (pas de faux drift sur une fin de ligne, vérifiable à la main via `git cat-file`) ; plus version de l'outil et ID du change scellant. Les conflits de merge git sur le lock se résolvent par re-scellement prouvé (§7.4). Le snapshot des OIDs spec/code est pris avant checks/tests, revalidé après leur exécution et aux frontières de publication ; le lock reprend les OIDs de code/preuve effectivement exécutés, jamais un re-hash tardif non prouvé.
+- **Chemins de dépôt** : toute entrée CLI/`.tel`/journal/lock est un chemin relatif portable et normalisé (`/`, composants normaux uniquement, sans racine/préfixe, `.`, `..`, backslash, colon ou contrôle). Hash, lecture, écriture et restauration répètent la validation avec une capability-anchored, no-follow repository traversal ; un symlink interne ne peut donc pas rediriger Telos hors du dépôt.
+- **Publication** : init, merges d'owners agents et export utilisent des siblings CSPRNG, authentifient identité/contenu avant remplacement ou nettoyage, et conservent les owners concurrents ordinaires. L'export authentifie un seul snapshot scellé et la chaîne complète d'identité de ses parents avant promotion. Les blocks agents mal formés sont refusés ; un owner existant est publié par CAS contenu+identité.
+- **Modèle de menace** : le seal détecte la négligence (humain, agent, IDE), il ne résiste pas à un adversaire qui forgerait les OIDs. Le confinement par capability/no-follow couvre les chemins malformés et redirections symlink. Les garanties CAS/publication couvrent l'ordinary same-UID concurrency (sauvegarde IDE, collision, rename concurrent non hostile), mais pas un processus malveillant du même UID capable de substituer intentionnellement une entrée entre deux syscalls ; un nom CSPRNG réduit les collisions, ce n'est pas un secret d'autorisation.
 - **Collaboration** : un fichier texte par entité → diffs lisibles, reviews de PR normales, conflits de merge rares et localisés ; après résolution manuelle d'un conflit, `telos check` revalide l'intégrité totale.
 
 ## 6. États du projet
@@ -155,7 +158,15 @@ telos/
 | `CHANGING` | ≥ 1 change ouvert ; les fichiers touchés sont revendiqués par le change | Workflow normal |
 | `DRIFTED` | Spec ou code lié modifié hors de tout change | Les opérations d'avancement (open, approve, reconcile, rebuild, export doc) sont **refusées** |
 
-Sorties du drift : `telos adopt [--into CHG-…]` (le travail est capturé comme change légitime — on ne perd jamais rien) ou `telos revert` (restauration de l'état scellé via git). Le statut est recalculé, jamais stocké.
+Sorties du drift : `status` publie un token du lock complet et du scope exact
+(chemin + kind), puis `telos adopt [--into CHG-…] --expected-state <token>`
+(le travail est capturé comme change légitime — on ne perd jamais rien) ou
+`telos revert --expected-state <token>` (restauration de l'état scellé via
+git). Les agents doivent passer l'exact displayed digest or drift token ; une
+valeur manquante ou périmée ferme le guard et une valeur périmée refuse le CLI
+à la frontière de mutation. La route humaine sans flag reste compatible mais
+se lie à sa première observation et revalide avant d'écrire. Le statut est
+recalculé, jamais stocké.
 
 ## 7. Workflow
 
@@ -167,9 +178,9 @@ Sorties du drift : `telos adopt [--into CHG-…]` (le travail est capturé comme
 
 1. **Observe** — `telos view` ou `telos status` : l'utilisateur voit le graphe, la couverture, l'état.
 2. **Challenge** — l'utilisateur demande une évolution à son agent. Skill `telos-challenger` : `telos change open "<motivation>"`, parcours **dur** du graphe (`query`, `impact` — jamais toute la spec en contexte), classification de la demande : *faisable* / *infaisable* (constraint violée) / *incohérente* (conflit `excludes` ou contradiction avec un intent actif) / *ambiguë* → questions de cadrage à la bmad, une par une. Le delta est staged via `telos add|edit|remove … --change`, le moteur validant chaque opération.
-3. **Approve** — `telos change diff` produit le delta lisible ; `telos change approve` lie l'approbation au **digest du delta**. Toute modification ultérieure du delta invalide l'approbation. Jamais d'« équivalence sémantique » jugée par un LLM.
-4. **Implement** — skill `telos-implementer`, scenario par scenario, DDD+TDD : le code du domaine nomme les notions ; test rouge d'abord (nommé avec l'ID du scenario), constaté par `telos test SCN-…`, qui journalise le run **et scelle le témoin rouge** : le blob OID du fichier de test au moment du rouge. Les mêmes bytes doivent passer au vert — modifier le test entre le rouge et le vert invalide le témoin et exige un nouveau rouge. Puis implémentation minimale jusqu'au vert. En `tdd = "strict"`, le reconcile refuse un scenario sans témoin rouge intact avant le vert. Bindings au fil de l'eau : `telos bind <path> INT-…`.
-5. **Reconcile** — `telos change reconcile` : applique le delta, revalide toute l'intégrité (§3.3), exécute les tests des scenarios impactés (vert exigé), lance les `check` des constraints, vérifie no-code-without-telos, réécrit `telos.lock`, ferme le change → `COHERENT`. **Un test flaky ne scelle jamais** : `retry-until-green` n'existe pas, même en option — un test `proves` intermittent se répare par un change.
+3. **Approve** — `telos change diff` produit le delta lisible et son digest ; l'agent déclenche `telos change approve … --expected-digest <digest affiché>`, qui revalide cette valeur à la frontière d'écriture et lie l'approbation au **digest du delta**. Toute modification ultérieure du delta invalide l'approbation. Jamais d'« équivalence sémantique » jugée par un LLM.
+4. **Implement** — skill `telos-implementer`, scenario par scenario, DDD+TDD : le code du domaine nomme les notions ; test rouge d'abord (nommé avec l'ID du scenario), constaté par `telos test SCN-…`, qui hash le fichier avant le process, re-hash après, puis seulement journalise le run **et scelle le témoin rouge** : le blob OID exact du fichier de test exécuté. Les mêmes bytes doivent passer au vert — un runner qui réécrit son test ou une édition concurrente refuse sans journal ; modifier le test entre le rouge et le vert invalide le témoin et exige un nouveau rouge. Puis implémentation minimale jusqu'au vert. En `tdd = "strict"`, le reconcile refuse un scenario sans témoin rouge intact avant le vert. Bindings au fil de l'eau : `telos bind <path> INT-…`.
+5. **Reconcile** — `telos change reconcile` : capture le snapshot spec/code avant checks/tests, applique le delta seulement après leur succès et l'égalité des OIDs, revalide toute l'intégrité (§3.3), lance les `check` des constraints, vérifie no-code-without-telos, publie un `telos.lock` lié au snapshot prouvé, revalide à la frontière, puis ferme le change → `COHERENT`. **Un test flaky ne scelle jamais** : `retry-until-green` n'existe pas, même en option — un test `proves` intermittent se répare par un change.
 
 ### 7.3 Contexte borné
 
@@ -189,9 +200,9 @@ Toutes les commandes acceptent `--json` — enveloppe stable `{ok, command, resu
 | Cycle de vie | `telos init [--agents claude,codex] [--ci github]` · `status` · `check [--sealed]` · `config` · `version` |
 | Lecture / graphe | `show <id>` · `list <type>` · `query <type> [--using N] [--status s] [--triggered-by E] …` · `impact <id>` · `context <id>` |
 | Mutations (staged) | `add \| edit \| remove <entity> --change <id>` — payload JSON sur stdin |
-| Change | `change open \| diff \| approve \| abandon \| list` · `change reconcile [--full]` |
+| Change | `change open \| diff \| approve <id> [--expected-digest SHA256] \| abandon \| list` · `change reconcile [--full]` |
 | Tests & bindings | `test <SCN-id \| --all>` · `bind <path> <INT-id>` |
-| Drift | `adopt [--into <id>]` · `revert` |
+| Drift | `adopt [--into <id>] [--expected-state SHA256]` · `revert [--expected-state SHA256]` |
 | Vue & doc | `view [--port N] [--export <dir>]` |
 | Rebuild | `rebuild plan` · `rebuild status` |
 
@@ -200,7 +211,7 @@ Toutes les commandes acceptent `--json` — enveloppe stable `{ok, command, resu
 Deux contrats sont **gelés dès M1** — les skills routent dessus, sans interprétation :
 
 - **Error codes** énumérés et stables : `TELOS_DRIFT_DETECTED`, `TELOS_APPROVAL_STALE`, `TELOS_REFERENCE_UNKNOWN`, `TELOS_SCENARIO_RED_EXPECTED`, `TELOS_TEST_SEALED`, `TELOS_ORPHAN_CODE`, `TELOS_CONSTRAINT_FAILED`, `TELOS_CHANGE_STATE_INVALID`, `TELOS_FILE_CLAIMED`, … — chacun avec son `hint` correctif.
-- **Schéma de `status --json`** documenté : `state` (`coherent` | `changing` | `drifted`), changes ouverts (id, status, obligations restantes), drift éventuel (paths + proposition d'`adopt [--into]`), compteurs de couverture.
+- **Schéma de `status --json`** documenté : `state` (`coherent` | `changing` | `drifted`), changes ouverts (id, status, obligations restantes), drift éventuel (`paths`, proposition d'`adopt [--into]`, et ajout 0.7 explicite `token`), compteurs de couverture. Les `next_actions` de drift portent ce même token exact.
 
 ## 9. Agents et skills
 
@@ -212,7 +223,7 @@ Deux contrats sont **gelés dès M1** — les skills routent dessus, sans interp
 
 La séparation challenger/implementer reprend le meilleur de bmad (rôles qui se challengent) sans simulation d'équipe : deux phases outillées, pas des personnages.
 
-En plus des skills, `telos init` dépose un **guard** : hook préventif (PreToolUse pour Claude Code, équivalent Codex) qui refuse en direct toute édition manuelle de `telos/` par un agent, et présente les décisions humaines (`change approve`, `adopt`, `revert`) comme des prompts de permission natifs affichant le digest concerné. La détection de drift (§6) reste le filet de sécurité ; le guard rend le drift exceptionnel — humain, IDE ou script, plus jamais un agent qui suit les skills.
+En plus des skills, `telos init` dépose un **guard** : hook préventif (PreToolUse pour Claude Code, équivalent Codex) qui refuse en direct toute édition manuelle de `telos/` par un agent, et présente les décisions humaines (`change approve`, `adopt`, `revert`) comme des prompts de permission natifs. Le skill passe le digest/token exact affiché dans l'argument public ; le guard le recalcule depuis le dépôt et refuse toute forme absente, périmée, composée ou imbriquée. Les fichiers hôtes fusionnés exigent zéro ou un block Telos bien formé et utilisent un CAS atomique contenu+identité pour ne pas écraser une sauvegarde IDE après validation. La détection de drift (§6) reste le filet de sécurité ; le guard rend le drift exceptionnel — humain, IDE ou script, plus jamais un agent qui suit les skills.
 
 ## 10. Serveur web et documentation
 
@@ -224,7 +235,7 @@ En plus des skills, `telos init` dépose un **guard** : hook préventif (PreTool
 - **Glossaire** des notions ;
 - **Matrice de couverture** — intent × scenario × test : les trous sautent aux yeux.
 
-`telos view --export <dir>` : export statique des mêmes pages (HTML autonome) — publication CI, GitHub Pages, partage sans CLI. Instantané de l'état scellé.
+`telos view --export <dir>` : export statique des mêmes pages (HTML autonome) — publication CI, GitHub Pages, partage sans CLI. Le modèle et l'état sont réauthentifiés en un snapshot scellé unique avant rendu ; l'identité no-follow de toute la chaîne parent de la destination est recapturée avant la promotion atomique. Une sauvegarde modèle ou rotation parent concurrente exporte exactement l'ancien snapshot scellé ou refuse, jamais des bytes nouveaux étiquetés cohérents ni un succès vers une destination devenue invisible.
 
 ## 11. `telos rebuild`
 
@@ -232,7 +243,7 @@ En plus des skills, `telos init` dépose un **guard** : hook préventif (PreTool
 
 - `rebuild plan` — ordre topologique des intents (via `requires`) + pack de contexte de chacun ;
 - l'agent implémenteur exécute le plan intent par intent avec la machinerie normale (red-green, bind, reconcile par lots) ;
-- `rebuild status` — progression : scenarios verts / total.
+- `rebuild status` — progression : scenarios verts / total ; chaque `TestRef` distinct est exécuté une fois globalement, en ordre déterministe, puis le même résultat est projeté vers tous les scenarios qui le partagent.
 
 ## 12. Non-goals (v1)
 

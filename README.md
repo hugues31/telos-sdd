@@ -109,8 +109,12 @@ the repository `.codex` layer, and verify the exact
 treat `.codex/hooks.json` and `.codex/rules/telos.rules` as inactive. Once
 active, the guard blocks direct agent edits under `telos/`; use the CLI for
 spec mutations. Before approval, the challenger presents the `change diff`
-digest; for adopting or reverting, the router presents the relevant drift
-paths. The native prompts themselves are static confirmations.
+digest and passes the exact displayed token with `--expected-digest`; for
+adopting or reverting, the router presents the relevant drift paths and passes
+the exact `status` token with `--expected-state`. Missing or stale tokens fail
+closed. Direct humans may omit these flags as an explicit compatibility route;
+the CLI still binds the mutation to the state first observed and rechecks it at
+the write boundary. The native prompts themselves are static confirmations.
 
 ## Configuration
 
@@ -129,7 +133,7 @@ telos change open "use advisory TDD"
 printf '%s\n' '{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"advisory"},"agents":{"hosts":["claude","codex"]}}' \
   | telos config --change CHG-0001 --json
 telos change diff CHG-0001
-telos change approve CHG-0001
+telos change approve CHG-0001 --expected-digest '<digest from diff>'
 telos change reconcile CHG-0001
 ```
 
@@ -166,8 +170,9 @@ publishes no Telos-owned destination and preserves the existing owner.
 
 The rebuild surface plans and measures; it never calls an LLM or writes
 application code. Plans are deterministic and prerequisite-first, while
-status executes every bound proof and reports a scenario green only when at
-least one proof exists and all its proofs pass:
+status executes every distinct bound proof once globally (including targets
+shared by scenarios) and reports a scenario green only when at least one proof
+exists and all its proofs pass:
 
 ```sh
 telos rebuild plan --json
@@ -179,8 +184,11 @@ lock, Cargo manifest/lock, source, tests, generated site, build output, hidden
 solution, or application template. Both intents begin `draft`, the constraint
 is declarative, and the future Cargo runner is configured but has no proof
 target to execute. An external `telos-implementer` follows the bounded plan
-and writes the solution. The demo README provides the exact commands,
-generated-file heredocs, and ordinary per-intent lifecycle.
+and writes its own solution. The demo README provides only the reviewed CLI
+lifecycle and placeholders for externally chosen code/test paths; it contains
+no manifest, source, test, or extractable solution bytes. The repository's
+private `rebuild_demo` fixture is a protocol/conformance harness, not evidence
+that the CLI generated application code.
 
 The one-time seal uses the real command:
 
@@ -203,12 +211,14 @@ telos view --export site --json
 ```
 
 Configured test and constraint commands are trusted project code and may have
-effects. Ordinary `telos check` and `telos status` do not replay constraints;
-constraint checks run at reconcile, while `rebuild status` runs scenario
-proofs only. A seal is refused if any active scenario lacks a `proves` binding
-or if active obligations have no nonblank runner. Full reconcile runs the
-whole suite once when at least one intent is active and zero times for a
-draft-only model.
+effects. Test filters are passed to one validated direct executable argument
+vector and never reinterpreted by a shell; the displayed command remains D10's
+literal diagnostic substitution. Ordinary `telos check` and `telos status` do
+not replay constraints; constraint checks run at reconcile, while `rebuild
+status` runs scenario proofs only. A seal is refused if any active scenario
+lacks a `proves` binding or if active obligations have no nonblank runner. Full
+reconcile runs the whole suite once when at least one intent is active and zero
+times for a draft-only model.
 
 ## Docs
 

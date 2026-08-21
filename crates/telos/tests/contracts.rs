@@ -496,6 +496,60 @@ fn published_contract_pins_reapproval_and_codex_activation() {
 }
 
 #[test]
+fn published_contract_closes_the_final_review_boundaries() {
+    let contracts = include_str!("../../../docs/contracts.md");
+    let design = include_str!("../../../docs/specs/2026-08-19-telos-sdd-design.md");
+    let readme = include_str!("../../../README.md");
+    let normalized_contracts = contracts.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_design = design.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for required in [
+        "portable normalized relative components",
+        "capability-anchored, no-follow traversal",
+        "snapshot captured before checks/tests",
+        "exact executed code/proof OIDs",
+        "authenticated single sealed snapshot",
+        "full destination parent chain",
+        "exactly zero or one well-formed Telos-owned block",
+        "content-and-identity CAS",
+        "direct process argument vector",
+        "never evaluated by a shell",
+        "shared by multiple scenarios is still invoked once globally",
+        "repository-root `target`",
+        "CSPRNG sibling names",
+        "`telos change approve CHG-0001 --expected-digest sha256:...`",
+        "`telos adopt --expected-state sha256:...`",
+        "`telos revert --expected-state sha256:...`",
+    ] {
+        assert!(
+            normalized_contracts.contains(required),
+            "docs/contracts.md must publish final-review invariant: {required}"
+        );
+    }
+
+    for required in [
+        "capability-anchored, no-follow repository traversal",
+        "ordinary same-UID concurrency",
+        "exact displayed digest or drift token",
+        "direct process argument vector",
+    ] {
+        assert!(
+            normalized_design.contains(required),
+            "design §5/workflow must publish final-review invariant: {required}"
+        );
+    }
+
+    assert!(normalized_readme.contains("protocol/conformance harness"));
+    assert!(normalized_readme.contains("passes the exact displayed token"));
+    assert!(
+        normalized_readme
+            .contains("publishes no Telos-owned destination and preserves the existing owner")
+    );
+    assert!(!readme.contains("generated-file heredocs"));
+}
+
+#[test]
 fn readme_and_acceptance_comments_match_the_completed_m3_suite() {
     let readme = include_str!("../../../README.md");
     let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -855,13 +909,23 @@ fn published_filesystem_publication_threat_model_is_exact() {
                 "no owner overwritten; failed partial init authenticated and safely resumable",
             ],
             [
+                "agent merged owners",
+                "ordinary IDE save after validation",
+                "content/identity CAS refuses and restores without losing either version",
+            ],
+            [
                 "export",
                 "negligence and ordinary concurrent filesystem owners",
                 "no owner overwritten; no final destination on error",
             ],
             [
-                "init and export",
-                "same-UID adversary substituting a path between syscalls",
+                "repository proof/hash/read/write/restore",
+                "malformed paths and symlink redirection",
+                "portable normalization plus capability-anchored, no-follow traversal remains below the opened repository root",
+            ],
+            [
+                "init, agent merge, and export",
+                "adversarial same-UID path substitution between syscalls",
                 "excluded by the §5 threat model",
             ],
         ]

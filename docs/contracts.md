@@ -1076,24 +1076,42 @@ or constraint gate.
 
 ### `view [--port N] [--export DIR]`
 
-Live and export consume the same immutable `ViewSnapshot` and the same HTML
-renderer. The five page families and their exact mappings are:
+Live and export consume the same immutable `ViewSnapshot`. The binary embeds
+one SPA application shell and all of its assets; live serves that shell with a
+generated `/data.js`, while export writes the same shell and assets with the
+same deterministic snapshot payload in `data.js`.
+
+The SPA owns navigation. Its six frontend routes are:
+
+### Frontend hash routes
+
+| Page | Hash route |
+|---|---|
+| Dashboard | `#/` |
+| Intents | `#/intents` |
+| Intent detail | `#/intent/INT-NNNN` |
+| Graph | `#/graph` |
+| Glossary | `#/glossary` |
+| Coverage | `#/coverage` |
 
 ### Live routes and export files
 
-| Page | Live route | Export file |
+| Resource | Live path | Export path |
 |---|---|---|
-| Dashboard | `/` | `index.html` |
-| Graph | `/graph` | `graph.html` |
-| Intent | `/intent/INT-NNNN` | `intents/INT-NNNN.html` |
-| Glossary | `/glossary` | `glossary.html` |
-| Coverage | `/coverage` | `coverage.html` |
+| Application shell | `/` | `index.html` |
+| Snapshot payload | `/data.js` | `data.js` |
+| Embedded asset | `/<path>` | `<path>` |
+| Live status | `/live.json` | — |
+| Pages marker | — | `.nojekyll` |
 
-The Dashboard exposes state, open changes, and drift; Graph exposes all eight
-relation filters; Intent exposes canonical statement, scenarios, applicable
-constraints, `implements`, and `proves`; Glossary exposes notions; Coverage
-is the intent × scenario × test matrix. All pages cross-link through the
-mapping above. An unknown or malformed intent route is HTTP 404.
+Every other server HTTP path returns HTTP 404. In particular, frontend hash
+routes are never direct server paths.
+
+The Dashboard exposes state, open changes, and drift; Intents lists every
+intent; Graph exposes all eight relation filters; Intent detail exposes the
+canonical statement, scenarios, applicable constraints, `implements`, and
+`proves`; Glossary exposes notions; Coverage is the intent × scenario × test
+matrix. All pages cross-link through the hash routes above.
 
 #### Static export
 
@@ -1115,14 +1133,16 @@ refused as drift; newly saved model bytes are never labelled coherent. The
 snapshot itself owns the already-authenticated model bytes, so later working
 tree edits cannot change what is rendered.
 
-Every page is rendered in memory before publication. Under the filesystem
+Every file is assembled in memory before publication. Under the filesystem
 publication threat model below, the exporter writes a unique sibling staging
 directory and promotes it atomically with a no-replacement primitive: no
 ordinary concurrent owner is overwritten, and any render, write, or
 finalization error leaves no final destination. `files` is sorted by
-repository-style `/` path. HTML is byte-deterministic and self-contained: CSS
-and JavaScript are inline and no page contains an external URL, font, image,
-stylesheet, script, or network request.
+repository-style `/` path. For a given binary and snapshot, the complete
+export tree is byte-deterministic and self-contained: every script, style,
+font, and image it uses is present in the export, and no exported page makes a
+network request. Every published path is exactly `index.html`, `data.js`,
+`.nojekyll`, or is below `assets/`.
 
 The exporter also captures the no-follow identity of the full destination
 parent chain. It reopens that pathname chain and compares every identity
@@ -1140,6 +1160,8 @@ the replacement owner.
 | render/write/finalization error | absent | n/a | authenticated Telos staging cleaned |
 | staging identity mismatch | absent | replacement preserved | foreign/replaced entry never cleaned |
 
+### Export envelope
+
 ```json
 {
   "ok": true,
@@ -1148,12 +1170,12 @@ the replacement owner.
     "mode": "export",
     "destination": "site",
     "files": [
-      "coverage.html",
-      "glossary.html",
-      "graph.html",
-      "index.html",
-      "intents/INT-0017.html",
-      "intents/INT-0042.html"
+      ".nojekyll",
+      "assets/app.css",
+      "assets/app.js",
+      "assets/logo.png",
+      "data.js",
+      "index.html"
     ]
   },
   "error": null,
@@ -1177,10 +1199,17 @@ The recursive watcher ignores root `.git`, the repository-root `target`, and
 exporter staging paths. A nested project path such as
 `examples/target/...` remains relevant and triggers reload. It coalesces bursts, rebuilds the complete state/model off the
 read lock, and atomically replaces the snapshot only after successful
-validation. An invalid edit retains the last good pages and adds an escaped
-reload-error banner; a later valid reload clears it. Watcher errors are
-reported in the banner rather than terminating the server. Serving and
-reloading never write project or Telos bytes.
+validation. A successful replacement increases `generation` monotonically.
+An invalid edit retains the last good snapshot and sets `reload_error` in
+`/live.json`; a later valid reload clears it. Watcher errors set
+`watcher_error` in `/live.json` rather than terminating the server. The status
+response always has the same three fields:
+
+```json
+{"generation":0,"reload_error":null,"watcher_error":null}
+```
+
+Serving and reloading never write project or Telos bytes.
 
 ### `rebuild plan|status`
 

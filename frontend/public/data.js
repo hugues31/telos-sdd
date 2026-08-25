@@ -689,7 +689,7 @@ const dashboard = {
 
 window.__TELOS_DATA__ = {
   meta: {
-    version: '0.10.0',
+    version: '0.11.0',
     build_date: '2026-08-21',
     mode: 'live',
   },

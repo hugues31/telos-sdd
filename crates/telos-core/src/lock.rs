@@ -320,7 +320,7 @@ mod tests {
             &path,
             concat!(
                 "version = 1\n",
-                "tool = \"telos 0.10.0\"\n",
+                "tool = \"telos 0.11.0\"\n",
                 "spec_digest = \"sha256:old\"\n",
                 "\n[spec]\n",
                 "\n[code]\n",

@@ -816,8 +816,8 @@ pub(crate) mod fixtures {
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
   op add notion billing/Invoice entity {
-    def  "A bill issued to a Customer for delivered work."
-    attr state enum(open, settled)
+    def    "A bill issued to a Customer for delivered work."
+    attr   state enum(open, settled)
   }
 
   op edit intent INT-0017 in billing/invoicing "Issuing an invoice opens it" {
@@ -916,8 +916,8 @@ pub(crate) mod fixtures {
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
   op add notion billing/Invoice entity {
-    def  "A bill issued to a Customer for delivered work."
-    attr state enum(open, settled)
+    def    "A bill issued to a Customer for delivered work."
+    attr   state enum(open, settled)
   }
 
   run  SCN-0001 red "tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
@@ -1140,7 +1140,7 @@ mod tests {
     fn ops_digest_is_pinned_to_the_bytes_of_the_canonical_ops() {
         assert_eq!(
             example_change().ops_digest(),
-            "sha256:539297083030209b5d228d12531947706ecf6f3fb779364feca365b1cdd9ecb1"
+            "sha256:548d9110787c4aa5f43d172361eb46d6d717b22d742c3c4cf9085b66747240d0"
         );
         // No op means no byte hashed: the SHA-256 of the empty input.
         assert_eq!(
@@ -1298,7 +1298,7 @@ mod tests {
 
         assert_eq!(
             implementing.ops_digest(),
-            "sha256:539297083030209b5d228d12531947706ecf6f3fb779364feca365b1cdd9ecb1"
+            "sha256:548d9110787c4aa5f43d172361eb46d6d717b22d742c3c4cf9085b66747240d0"
         );
         assert_eq!(implementing.ops_digest(), example_change().ops_digest());
     }

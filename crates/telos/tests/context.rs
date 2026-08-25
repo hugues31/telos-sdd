@@ -181,11 +181,11 @@ fn expected_int_0042_pack() -> serde_json::Value {
         "notions": [
             {
                 "name": "billing/Invoice",
-                "canonical": "notion billing/Invoice entity {\n  def  \"A bill issued to a Customer for delivered work.\"\n  attr state   enum(open, settled, cancelled)\n  attr balance money\n  rel  issued-to -> Customer\n}\n",
+                "canonical": "notion billing/Invoice entity {\n  def    \"A bill issued to a Customer for delivered work.\"\n  attr   state   enum(open, settled, cancelled)\n  attr   balance money\n  rel    issued-to -> Customer\n}\n",
             },
             {
                 "name": "billing/PaymentReceived",
-                "canonical": "notion billing/settlement/PaymentReceived event {\n  def  \"A payment arrived for an invoice.\"\n  attr amount money\n}\n",
+                "canonical": "notion billing/settlement/PaymentReceived event {\n  def    \"A payment arrived for an invoice.\"\n  attr   amount money\n}\n",
             },
         ],
         "constraints": [

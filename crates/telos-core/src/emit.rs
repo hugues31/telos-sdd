@@ -71,8 +71,8 @@ const INDENT: &str = "  ";
 /// of the longest keyword the group admits, so the width is a property of
 /// the grammar, not of the file being emitted.
 mod width {
-    /// `def`, `attr`, `rel`.
-    pub const NOTION: usize = 4;
+    /// `def`, `phrase`, `attr`, `rel`.
+    pub const NOTION: usize = 6;
     /// `status`, `telos`.
     pub const INTENT: usize = 6;
     /// `when`, `while`, `if`, `where`, `system`.
@@ -1164,7 +1164,7 @@ mod tests {
         keyword(&mut out, 0, "then", width::SCENARIO);
         keyword(&mut out, 0, "rule", width::CONSTRAINT);
         keyword(&mut out, 0, "proves", width::BINDING);
-        assert_eq!(out, "  def  telos  if     then  rule  proves     ");
+        assert_eq!(out, "  def    telos  if     then  rule  proves     ");
     }
 
     #[test]

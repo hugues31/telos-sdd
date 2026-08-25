@@ -720,8 +720,8 @@ fn an_unknown_notion_in_a_scenario_step_is_reported() {
 fn an_unknown_rel_target_is_reported() {
     let diag = only_diagnostic(edited(
         "telos/contexts/billing/notions/Invoice.tel",
-        "rel  issued-to -> Customer",
-        "rel  issued-to -> Custome",
+        "rel    issued-to -> Customer",
+        "rel    issued-to -> Custome",
     ));
     assert_eq!(diag.code, ErrorCode::TelosReferenceUnknown);
     assert_eq!(
@@ -740,8 +740,8 @@ fn an_unknown_ref_attr_target_is_reported() {
         "telos/contexts/billing/notions/Ledger.tel",
         concat!(
             "notion billing/Ledger entity {\n",
-            "  def  \"A book of invoices.\"\n",
-            "  attr owner ref(Custome)\n",
+            "  def    \"A book of invoices.\"\n",
+            "  attr   owner ref(Custome)\n",
             "}\n",
         ),
     ));
@@ -979,7 +979,7 @@ fn two_notions_with_the_same_name_are_a_violation() {
         "telos/contexts/billing/capabilities/invoicing/notions/Invoice.tel",
         concat!(
             "notion billing/invoicing/Invoice entity {\n",
-            "  def  \"A second, conflicting definition.\"\n",
+            "  def    \"A second, conflicting definition.\"\n",
             "}\n",
         ),
     ));

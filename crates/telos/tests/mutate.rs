@@ -304,7 +304,7 @@ fn add_notion_writes_the_canonical_change_file_byte_for_byte() {
            status drafted\n\
          \n  \
            op add notion billing/Customer actor {\n    \
-             def  \"A party that receives invoices.\"\n  \
+             def    \"A party that receives invoices.\"\n  \
            }\n\
          }\n"
     );
@@ -335,15 +335,15 @@ fn a_second_op_appends_a_block_and_resolves_against_the_first() {
            status drafted\n\
          \n  \
            op add notion billing/Customer actor {\n    \
-             def  \"A party that receives invoices.\"\n  \
+             def    \"A party that receives invoices.\"\n  \
            }\n\
          \n  \
            op add notion billing/Invoice entity {\n    \
-             def  \"A bill issued to a Customer for delivered work.\"\n    \
-             attr state    enum(open, settled)\n    \
-             attr balance  money\n    \
-             attr customer ref(Customer)\n    \
-             rel  issued-to -> Customer\n  \
+             def    \"A bill issued to a Customer for delivered work.\"\n    \
+             attr   state    enum(open, settled)\n    \
+             attr   balance  money\n    \
+             attr   customer ref(Customer)\n    \
+             rel    issued-to -> Customer\n  \
            }\n\
          }\n"
     );
@@ -631,8 +631,8 @@ fn edit_notion_stages_the_full_post_state() {
            status drafted\n\
          \n  \
            op edit notion billing/Customer entity {\n    \
-             def  \"Reworded.\"\n    \
-             attr name string\n  \
+             def    \"Reworded.\"\n    \
+             attr   name string\n  \
            }\n\
          }\n"
     );

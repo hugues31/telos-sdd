@@ -154,10 +154,10 @@ fn invoice_notion_is_byte_exact_down_to_its_padding() {
         src,
         concat!(
             "notion billing/Invoice entity {\n",
-            "  def  \"A bill issued to a Customer for delivered work.\"\n",
-            "  attr state   enum(open, settled, cancelled)\n",
-            "  attr balance money\n",
-            "  rel  issued-to -> Customer\n",
+            "  def    \"A bill issued to a Customer for delivered work.\"\n",
+            "  attr   state   enum(open, settled, cancelled)\n",
+            "  attr   balance money\n",
+            "  rel    issued-to -> Customer\n",
             "}\n",
         )
     );
@@ -666,30 +666,30 @@ fn shapes_the_corpus_does_not_cover_round_trip_through_the_parser() {
         // and rel-name paddings are independent.
         concat!(
             "notion Ledger value {\n",
-            "  def  \"Everything an attribute can be.\"\n",
-            "  attr a         string\n",
-            "  attr bb        int\n",
-            "  attr ccc       decimal\n",
-            "  attr dddd      money\n",
-            "  attr eeeee     bool\n",
-            "  attr ffffff    date\n",
-            "  attr ggggggg   datetime\n",
-            "  attr hhhhhhhh  enum(one, two)\n",
-            "  attr iiiiiiiii ref(Invoice)\n",
-            "  rel  x  -> Invoice\n",
-            "  rel  yy -> Customer\n",
+            "  def    \"Everything an attribute can be.\"\n",
+            "  attr   a         string\n",
+            "  attr   bb        int\n",
+            "  attr   ccc       decimal\n",
+            "  attr   dddd      money\n",
+            "  attr   eeeee     bool\n",
+            "  attr   ffffff    date\n",
+            "  attr   ggggggg   datetime\n",
+            "  attr   hhhhhhhh  enum(one, two)\n",
+            "  attr   iiiiiiiii ref(Invoice)\n",
+            "  rel    x  -> Invoice\n",
+            "  rel    yy -> Customer\n",
             "}\n",
         ),
         // A notion with only a `def`: no padding group to compute.
         concat!(
             "notion Bare state {\n",
-            "  def  \"Nothing but a definition.\"\n",
+            "  def    \"Nothing but a definition.\"\n",
             "}\n",
         ),
         // Escapes inside the `def` string.
         concat!(
             "notion Quoted actor {\n",
-            "  def  \"She said \\\"yes\\\", with a \\\\ in it.\"\n",
+            "  def    \"She said \\\"yes\\\", with a \\\\ in it.\"\n",
             "}\n",
         ),
     ];

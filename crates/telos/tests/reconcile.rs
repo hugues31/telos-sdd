@@ -311,8 +311,8 @@ fn reconcile_writes_the_canonical_spec_files_byte_for_byte() {
     assert_eq!(
         read(tmp.path(), "telos/contexts/billing/notions/Invoice.tel"),
         "notion billing/Invoice entity {\n  \
-           def  \"A bill issued to a Customer for delivered work.\"\n  \
-           attr state enum(open, settled)\n\
+           def    \"A bill issued to a Customer for delivered work.\"\n  \
+           attr   state enum(open, settled)\n\
          }\n"
     );
     assert_eq!(
@@ -321,8 +321,8 @@ fn reconcile_writes_the_canonical_spec_files_byte_for_byte() {
             "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel"
         ),
         "notion billing/settlement/PaymentReceived event {\n  \
-           def  \"A payment arrived for an invoice.\"\n  \
-           attr amount money\n\
+           def    \"A payment arrived for an invoice.\"\n  \
+           attr   amount money\n\
          }\n"
     );
     assert_eq!(

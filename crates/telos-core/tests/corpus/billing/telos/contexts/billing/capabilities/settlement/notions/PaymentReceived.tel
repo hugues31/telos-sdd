@@ -1,4 +1,4 @@
 notion billing/settlement/PaymentReceived event {
-  def  "A payment arrived for an invoice."
-  attr amount money
+  def    "A payment arrived for an invoice."
+  attr   amount money
 }

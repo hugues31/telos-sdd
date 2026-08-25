@@ -85,8 +85,8 @@ const LOCK: &str = "telos/telos.lock";
 /// A valid notion, in canonical form, created outside the protocol -- the
 /// `Untracked` half of drift.
 const ROGUE_TEL: &str = "notion billing/Rogue entity {\n  \
-    def  \"A notion created outside the protocol.\"\n  \
-    attr label string\n\
+    def    \"A notion created outside the protocol.\"\n  \
+    attr   label string\n\
 }\n";
 
 /// The exact `TELOS_PARSE_ERROR` hint `adopt` attaches to a drifted file it

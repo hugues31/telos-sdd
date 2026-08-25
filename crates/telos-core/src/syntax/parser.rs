@@ -2293,10 +2293,10 @@ mod tests {
     /// themselves are created by mutation commands).
     const INVOICE_TEL: &str = concat!(
         "notion Invoice entity {\n",
-        "  def  \"A bill issued to a Customer for delivered work.\"\n",
-        "  attr state   enum(open, settled, cancelled)\n",
-        "  attr balance money\n",
-        "  rel  issued-to -> Customer\n",
+        "  def    \"A bill issued to a Customer for delivered work.\"\n",
+        "  attr   state   enum(open, settled, cancelled)\n",
+        "  attr   balance money\n",
+        "  rel    issued-to -> Customer\n",
         "}\n",
     );
 
@@ -2499,16 +2499,16 @@ mod tests {
     fn parses_every_attr_type() {
         let src = concat!(
             "notion Thing value {\n",
-            "  def  \"d\"\n",
-            "  attr a string\n",
-            "  attr b int\n",
-            "  attr c decimal\n",
-            "  attr d money\n",
-            "  attr e bool\n",
-            "  attr f date\n",
-            "  attr g datetime\n",
-            "  attr h ref(Customer)\n",
-            "  attr i enum(one)\n",
+            "  def    \"d\"\n",
+            "  attr   a string\n",
+            "  attr   b int\n",
+            "  attr   c decimal\n",
+            "  attr   d money\n",
+            "  attr   e bool\n",
+            "  attr   f date\n",
+            "  attr   g datetime\n",
+            "  attr   h ref(Customer)\n",
+            "  attr   i enum(one)\n",
             "}\n",
         );
         let notion = parse_notion_file(&path(), src).unwrap();
@@ -2539,7 +2539,7 @@ mod tests {
             ("state", NotionKind::State),
         ];
         for (word, expected) in cases {
-            let src = format!("notion Thing {word} {{\n  def  \"d\"\n}}\n");
+            let src = format!("notion Thing {word} {{\n  def    \"d\"\n}}\n");
             let notion = parse_notion_file(&path(), &src).unwrap();
             assert_eq!(notion.kind, expected, "kind `{word}`");
         }
@@ -2547,14 +2547,15 @@ mod tests {
 
     #[test]
     fn a_notion_without_attrs_or_rels_parses() {
-        let notion = parse_notion_file(&path(), "notion Thing value {\n  def  \"d\"\n}\n").unwrap();
+        let notion =
+            parse_notion_file(&path(), "notion Thing value {\n  def    \"d\"\n}\n").unwrap();
         assert!(notion.attrs.is_empty());
         assert!(notion.rels.is_empty());
     }
 
     #[test]
     fn unknown_notion_kind_suggests_the_closest_one() {
-        let src = "notion Invoice entty {\n  def  \"d\"\n}\n";
+        let src = "notion Invoice entty {\n  def    \"d\"\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, ErrorCode::TelosParseError);
@@ -2567,7 +2568,7 @@ mod tests {
 
     #[test]
     fn unknown_notion_kind_without_a_close_match_is_reported_plainly() {
-        let src = "notion Invoice zzzzzz {\n  def  \"d\"\n}\n";
+        let src = "notion Invoice zzzzzz {\n  def    \"d\"\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags[0].message, "unknown notion kind `zzzzzz`");
     }
@@ -2579,8 +2580,8 @@ mod tests {
         //  123456789...
         let src = concat!(
             "notion Invoice entity {\n",
-            "  def  \"A bill.\"\n",
-            "  attr state enum(open settled)\n",
+            "  def    \"A bill.\"\n",
+            "  attr   state enum(open settled)\n",
             "}\n",
         );
         let diags = parse_notion_file(&path(), src).unwrap_err();
@@ -2590,13 +2591,13 @@ mod tests {
             diags[0].message,
             "expected `,` or `)` in enum symbol list, found `settled`"
         );
-        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(24)));
+        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(26)));
         assert_eq!(diags[0].file.as_ref(), Some(&path()));
     }
 
     #[test]
     fn an_empty_enum_symbol_list_is_a_syntax_error() {
-        let src = "notion Invoice entity {\n  def  \"d\"\n  attr state enum()\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   state enum()\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected an enum symbol, found `)`");
@@ -2606,10 +2607,10 @@ mod tests {
     fn two_faulty_fields_yield_two_diagnostics_and_parsing_continues() {
         let src = concat!(
             "notion Invoice entity {\n",
-            "  def  \"A bill.\"\n",
-            "  attr state enum(open settled)\n",
-            "  attr balance\n",
-            "  rel  issued-to -> Customer\n",
+            "  def    \"A bill.\"\n",
+            "  attr   state enum(open settled)\n",
+            "  attr   balance\n",
+            "  rel    issued-to -> Customer\n",
             "}\n",
         );
         let diags = parse_notion_file(&path(), src).unwrap_err();
@@ -2618,21 +2619,21 @@ mod tests {
             diags[0].message,
             "expected `,` or `)` in enum symbol list, found `settled`"
         );
-        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(24)));
+        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(26)));
         assert_eq!(
             diags[1].message,
             "expected an attribute type, found end of line"
         );
-        assert_eq!((diags[1].line, diags[1].col), (Some(4), Some(15)));
+        assert_eq!((diags[1].line, diags[1].col), (Some(4), Some(17)));
     }
 
     #[test]
     fn an_attr_after_a_rel_violates_the_grammar_order() {
         let src = concat!(
             "notion Invoice entity {\n",
-            "  def  \"d\"\n",
-            "  rel  issued-to -> Customer\n",
-            "  attr state money\n",
+            "  def    \"d\"\n",
+            "  rel    issued-to -> Customer\n",
+            "  attr   state money\n",
             "}\n",
         );
         let diags = parse_notion_file(&path(), src).unwrap_err();
@@ -2643,7 +2644,7 @@ mod tests {
 
     #[test]
     fn a_missing_def_field_is_a_syntax_error() {
-        let src = "notion Invoice entity {\n  attr state money\n}\n";
+        let src = "notion Invoice entity {\n  attr   state money\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected `def`, found `attr`");
@@ -2652,7 +2653,7 @@ mod tests {
 
     #[test]
     fn an_unknown_attr_type_suggests_the_closest_one() {
-        let src = "notion Invoice entity {\n  def  \"d\"\n  attr balance mony\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   balance mony\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected an attribute type, found `mony`");
@@ -2661,14 +2662,14 @@ mod tests {
 
     #[test]
     fn a_ref_attr_type_requires_a_notion_name() {
-        let src = "notion Invoice entity {\n  def  \"d\"\n  attr owner ref(customer)\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   owner ref(customer)\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags[0].message, "expected a notion name, found `customer`");
     }
 
     #[test]
     fn a_rel_field_requires_an_arrow() {
-        let src = "notion Invoice entity {\n  def  \"d\"\n  rel  issued-to Customer\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  rel    issued-to Customer\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags[0].message, "expected `->`, found `Customer`");
     }
@@ -2681,11 +2682,11 @@ mod tests {
             "\n",
             "notion Invoice entity {\n",
             "\n",
-            "  def  \"A bill.\"\n",
+            "  def    \"A bill.\"\n",
             "\n",
-            "  attr balance money\n",
+            "  attr   balance money\n",
             "\n",
-            "  rel  issued-to -> Customer\n",
+            "  rel    issued-to -> Customer\n",
             "\n",
             "}\n",
         );
@@ -2696,13 +2697,13 @@ mod tests {
 
     #[test]
     fn a_file_without_a_trailing_newline_parses() {
-        let notion = parse_notion_file(&path(), "notion Thing value {\n  def  \"d\"\n}").unwrap();
+        let notion = parse_notion_file(&path(), "notion Thing value {\n  def    \"d\"\n}").unwrap();
         assert_eq!(notion.name, nname("Thing"));
     }
 
     #[test]
     fn content_after_the_closing_brace_is_a_syntax_error() {
-        let src = format!("{INVOICE_TEL}notion Other entity {{\n  def  \"d\"\n}}\n");
+        let src = format!("{INVOICE_TEL}notion Other entity {{\n  def    \"d\"\n}}\n");
         let diags = parse_notion_file(&path(), &src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected end of input, found `notion`");
@@ -2710,7 +2711,7 @@ mod tests {
 
     #[test]
     fn a_truncated_file_reports_the_unexpected_end_of_input() {
-        let src = "notion Invoice entity {\n  def  \"d\"\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(
@@ -2721,13 +2722,13 @@ mod tests {
 
     #[test]
     fn a_lexer_error_is_reported_against_the_file() {
-        let src = "notion Invoice entity {\n  def  \"d\"\n  attr state @\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   state @\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, ErrorCode::TelosParseError);
         assert_eq!(diags[0].message, "unexpected character `@`");
         assert_eq!(diags[0].file.as_ref(), Some(&path()));
-        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(14)));
+        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(16)));
     }
 
     // --- expressions ------------------------------------------------------
@@ -3891,11 +3892,11 @@ mod tests {
                 "  status drafted\n",
                 "\n",
                 "  op add notion billing/A entity {\n",
-                "    def  \"a\"\n",
+                "    def    \"a\"\n",
                 "  }\n",
                 "\n",
                 "  op edit notion billing/B value {\n",
-                "    def  \"b\"\n",
+                "    def    \"b\"\n",
                 "  }\n",
                 "\n",
                 "  op remove notion billing/C\n",

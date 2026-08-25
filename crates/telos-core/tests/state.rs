@@ -614,7 +614,7 @@ fn coverage_counts_same_named_notions_in_distinct_contexts() {
     .unwrap();
     fs::write(
         terminal.join("notions/Invoice.tel"),
-        "notion terminal/Invoice entity {\n  def  \"The terminal's local invoice projection.\"\n}\n",
+        "notion terminal/Invoice entity {\n  def    \"The terminal's local invoice projection.\"\n}\n",
     )
     .unwrap();
 

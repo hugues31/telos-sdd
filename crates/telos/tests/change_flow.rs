@@ -659,7 +659,7 @@ fn vendor_payload() -> String {
 /// `emit_notion`'s own output, unindented, the exact bytes `change diff`
 /// must report as the op's `after`.
 const VENDOR_CANONICAL: &str =
-    "notion billing/Vendor actor {\n  def  \"A party the business pays.\"\n}\n";
+    "notion billing/Vendor actor {\n  def    \"A party the business pays.\"\n}\n";
 
 /// Whether `digest` is `sha256:` followed by exactly 64 lowercase hex
 /// digits -- the shape `change diff`/`change approve` must report,
@@ -847,7 +847,7 @@ fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
            digest \"{digest}\"\n\
          \n  \
            op add notion billing/Vendor actor {{\n    \
-             def  \"A party the business pays.\"\n  \
+             def    \"A party the business pays.\"\n  \
            }}\n\
          }}\n"
     );

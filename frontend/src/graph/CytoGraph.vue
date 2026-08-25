@@ -16,6 +16,7 @@ import {
 } from './elements';
 import { runCompoundLayout } from './layout';
 import type { VisibleGraphEdge, VisibleGraphRelation } from './projection';
+import type { GraphFocusRequest } from './search';
 import { collapsedIdsSignature } from './collapse';
 import { buildGraphStylesheet } from './stylesheet';
 
@@ -25,6 +26,7 @@ const props = defineProps<{
   relationFilter: RelationFilter;
   collapsedIds: string[];
   selection: GraphSelection | null;
+  focusRequest: GraphFocusRequest | null;
 }>();
 
 const emit = defineEmits<{
@@ -38,6 +40,7 @@ const container = ref<HTMLElement | null>(null);
 let cy: Core | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let themeObserver: MutationObserver | null = null;
+let currentLayout: Promise<boolean> = Promise.resolve(false);
 
 function selectionFromElement(element: SingularElementReturnValue): GraphSelection {
   if (element.group() === 'nodes') {
@@ -92,11 +95,25 @@ function fitGraph(): void {
   cy?.fit(undefined, 32);
 }
 
-function relayoutGraph(): void {
-  if (!cy) return;
-  void runCompoundLayout(cy).catch((error: unknown) => {
+function relayoutGraph(): Promise<boolean> {
+  if (!cy) return Promise.resolve(false);
+  currentLayout = runCompoundLayout(cy).catch((error: unknown) => {
     console.error('ELK graph layout failed', error);
+    return false;
   });
+  return currentLayout;
+}
+
+async function focusAfterLayout(
+  request: GraphFocusRequest,
+  layout: Promise<boolean> = currentLayout,
+): Promise<void> {
+  await layout;
+  if (!cy || props.focusRequest?.token !== request.token) return;
+
+  const element = cy.getElementById(nodeId(request.key));
+  if (element.empty()) return;
+  cy.animate({ center: { eles: element }, duration: 250 });
 }
 
 watch(
@@ -107,6 +124,13 @@ watch(
 watch(
   () => props.selection,
   (selection) => applySelectedHighlight(selection),
+);
+
+watch(
+  () => props.focusRequest?.token,
+  () => {
+    if (props.focusRequest) void focusAfterLayout(props.focusRequest);
+  },
 );
 
 watch(
@@ -121,9 +145,10 @@ watch(
       cy?.elements().remove();
       cy?.add(buildGraphElements(props.nodes, props.edges, collapsedIdSet()));
     });
-    relayoutGraph();
+    const layout = relayoutGraph();
     applyFilter(props.relationFilter);
     applySelectedHighlight(props.selection);
+    if (props.focusRequest) void focusAfterLayout(props.focusRequest, layout);
   },
 );
 
@@ -167,8 +192,9 @@ onMounted(() => {
   });
 
   applyFilter(props.relationFilter);
-  relayoutGraph();
+  const layout = relayoutGraph();
   applySelectedHighlight(props.selection);
+  if (props.focusRequest) void focusAfterLayout(props.focusRequest, layout);
 
   resizeObserver = new ResizeObserver(() => cy?.resize());
   resizeObserver.observe(container.value);
@@ -196,7 +222,7 @@ onBeforeUnmount(() => {
   <div class="cyto-graph">
     <div class="cyto-graph__toolbar" aria-label="Graph controls">
       <button type="button" data-graph-action="fit" @click="fitGraph">Fit</button>
-      <button type="button" data-graph-action="relayout" @click="relayoutGraph">Re-layout</button>
+      <button type="button" data-graph-action="relayout" @click="relayoutGraph()">Re-layout</button>
       <button type="button" data-graph-action="expand-all" @click="emit('expand-all')">
         Expand all
       </button>

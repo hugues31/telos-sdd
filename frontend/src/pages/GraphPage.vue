@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import type { RouteLocationRaw } from 'vue-router';
+import { useRoute, type RouteLocationRaw } from 'vue-router';
 
 import EmptyState from '../components/EmptyState.vue';
 import EntityLink from '../components/EntityLink.vue';
+import GraphFinder from '../components/GraphFinder.vue';
 import KindPill from '../components/KindPill.vue';
 import { scenarioToIntent, snapshot } from '../data/snapshot';
-import type { GraphKey } from '../data/types';
+import type { GraphKey, GraphNodeView } from '../data/types';
 import CytoGraph from '../graph/CytoGraph.vue';
 import type { RelationFilter } from '../graph/elements';
 import {
@@ -19,8 +20,15 @@ import {
 } from '../graph/collapse';
 import { projectVisibleGraph } from '../graph/projection';
 import { relationLabel, relationOptionsFor } from '../graph/relations';
+import {
+  expandAncestorsForNode,
+  graphFocusFromQuery,
+  type GraphFocusRequest,
+} from '../graph/search';
 import { useGraphSelection } from '../graph/selection';
+import { entityDestination } from '../search/destinations';
 
+const route = useRoute();
 const rawNodes = computed(() => snapshot.value.snapshot.nodes);
 const rawEdges = computed(() => snapshot.value.snapshot.edges);
 const collapseStorage = typeof window === 'undefined' ? null : safeSessionStorage(window);
@@ -34,6 +42,8 @@ const nodes = computed(() => visibleGraph.value.nodes);
 const edges = computed(() => visibleGraph.value.edges);
 const { selected, setSelection } = useGraphSelection(nodes, edges);
 const relationFilter = ref<RelationFilter>('all');
+const focusRequest = ref<GraphFocusRequest | null>(null);
+let focusToken = 0;
 
 function persistCollapsedIds(next: Set<string>): void {
   collapsedIds.value = next;
@@ -52,9 +62,28 @@ function collapseAll(): void {
   persistCollapsedIds(new Set(containerNodeIds(rawNodes.value)));
 }
 
+function chooseNode(node: GraphNodeView): void {
+  persistCollapsedIds(expandAncestorsForNode(rawNodes.value, collapsedIds.value, node.key));
+  setSelection({ type: 'node', entity: node.key, label: node.label });
+  focusRequest.value = { key: node.key, token: ++focusToken };
+}
+
 watch(rawNodes, (nextNodes) => {
   persistCollapsedIds(normalizeCollapsedIds(nextNodes, collapsedIds.value));
 });
+
+watch(
+  [() => route.query.focusKind, () => route.query.focusId, rawNodes],
+  () => {
+    const key = graphFocusFromQuery(route.query);
+    if (!key) return;
+    const node = rawNodes.value.find(
+      (candidate) => candidate.key.kind === key.kind && candidate.key.id === key.id,
+    );
+    if (node) chooseNode(node);
+  },
+  { immediate: true },
+);
 
 const relationOptions = computed(() => relationOptionsFor(edges.value));
 
@@ -80,35 +109,18 @@ const summary = computed(() => {
   return `${connectedNodeCount.value} connected nodes · ${matchingEdges.value.length} of ${edges.value.length} relations`;
 });
 
-function entityDestination(entity: GraphKey): RouteLocationRaw | null {
-  switch (entity.kind) {
-    case 'context':
-      return { name: 'contexts', hash: `#context-${entity.id}` };
-    case 'capability':
-      return { name: 'contexts', hash: `#capability-${entity.id.replace('/', '-')}` };
-    case 'intent':
-      return { name: 'intent-detail', params: { id: entity.id } };
-    case 'scenario': {
-      const parent = scenarioToIntent.value.get(entity.id);
-      return parent
-        ? { name: 'intent-detail', params: { id: parent }, hash: `#scenario-${entity.id}` }
-        : null;
-    }
-    case 'notion':
-      return { name: 'glossary', hash: `#notion-${entity.id}` };
-    case 'constraint':
-      return { name: 'coverage', hash: `#constraint-${entity.id}` };
-    default:
-      return null;
-  }
+function destinationForEntity(entity: GraphKey): RouteLocationRaw | null {
+  const scenarioParent =
+    entity.kind === 'scenario' ? scenarioToIntent.value.get(entity.id) : undefined;
+  return entityDestination(entity, scenarioParent);
 }
 
 const openDestination = computed<RouteLocationRaw | null>(() => {
   if (!selected.value) return null;
-  if (selected.value.type === 'node') return entityDestination(selected.value.entity);
+  if (selected.value.type === 'node') return destinationForEntity(selected.value.entity);
 
-  const source = entityDestination(selected.value.source);
-  const target = entityDestination(selected.value.target);
+  const source = destinationForEntity(selected.value.source);
+  const target = destinationForEntity(selected.value.target);
   if (source && !target) return source;
   if (target && !source) return target;
   return null;
@@ -124,14 +136,17 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
         <p class="graph-page__summary">{{ summary }}</p>
       </div>
 
-      <label class="relation-filter">
-        <span>Relation</span>
-        <select v-model="relationFilter" aria-label="Filter graph by relation">
-          <option v-for="option in relationOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-      </label>
+      <div class="graph-page__filters">
+        <GraphFinder :nodes="rawNodes" @choose="chooseNode" />
+        <label class="relation-filter">
+          <span>Relation</span>
+          <select v-model="relationFilter" aria-label="Filter graph by relation">
+            <option v-for="option in relationOptions" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+      </div>
     </div>
 
     <EmptyState
@@ -152,6 +167,7 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
           :relation-filter="relationFilter"
           :collapsed-ids="[...collapsedIds]"
           :selection="selected"
+          :focus-request="focusRequest"
           @select="setSelection($event)"
           @toggle-container="toggleContainer"
           @expand-all="expandAll"
@@ -233,6 +249,12 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
 .graph-page__summary {
   margin: 0;
   font-size: 0.875rem;
+}
+
+.graph-page__filters {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
 }
 
 .graph-page__notice {
@@ -358,6 +380,22 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
 @media (max-width: 52rem) {
   .graph-page__workspace {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 40rem) {
+  .graph-page__heading,
+  .graph-page__filters {
+    align-items: stretch;
+  }
+
+  .graph-page__filters {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .relation-filter {
+    justify-content: space-between;
   }
 }
 </style>

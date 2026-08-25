@@ -1948,7 +1948,7 @@ fn a_staged_config_glob_is_effective_before_reconcile_writes_it() {
     stage(
         tmp.path(),
         &["config", "--change", "CHG-0001", "--json"],
-        r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":[]},"test":{"cmd":""},"policy":{"tdd":"strict"},"agents":{"hosts":[]}}"#,
+        r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":[]},"test":{"cmd":""},"policy":{"tdd":"strict"},"gherkin":{"enabled":false},"agents":{"hosts":[]}}"#,
     );
     approve(tmp.path());
 
@@ -1967,6 +1967,7 @@ fn stage_corpus_config(dir: &Path, test_cmd: &str) {
             "tests": {"globs": ["tests/**/*.rs"]},
             "test": {"cmd": test_cmd},
             "policy": {"tdd": "strict"},
+            "gherkin": {"enabled": false},
             "agents": {"hosts": []}
         })
         .to_string(),
@@ -2150,6 +2151,7 @@ fn telos_test_uses_the_approved_config_staged_by_the_owning_change() {
             "tests": {"globs": ["tests/**/*.rs"]},
             "test": {"cmd": RUNNER},
             "policy": {"tdd": "strict"},
+            "gherkin": {"enabled": false},
             "agents": {"hosts": []}
         })
         .to_string(),

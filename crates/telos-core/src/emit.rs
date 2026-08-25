@@ -681,6 +681,7 @@ pub fn emit_op(op: &StagedOp) -> String {
                     crate::config::TddPolicy::Advisory => "advisory",
                 }
             );
+            w!(out, "  gherkin    {}\n", config.gherkin.enabled);
             for host in &config.agents.hosts {
                 w!(
                     out,

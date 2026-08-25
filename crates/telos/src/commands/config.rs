@@ -4,7 +4,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use telos_core::changes::{read_change, write_change};
-use telos_core::config::{AgentHost, AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg};
+use telos_core::config::{
+    AgentHost, AgentsCfg, Config, GherkinCfg, Globs, Policy, TddPolicy, TestCfg,
+};
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::model::{ChangeStatus, StagedOp};
 use telos_core::workspace::Workspace;
@@ -21,6 +23,7 @@ struct ConfigPayload {
     tests: PayloadGlobs,
     test: PayloadTest,
     policy: PayloadPolicy,
+    gherkin: PayloadGherkin,
     agents: PayloadAgents,
 }
 
@@ -40,6 +43,15 @@ struct PayloadTest {
 #[serde(deny_unknown_fields)]
 struct PayloadPolicy {
     tdd: TddPolicy,
+}
+
+/// Required like every sibling: the payload is a wholesale replacement, and
+/// `stage` documents it as "a complete configuration JSON object". A field
+/// that could be omitted would make a partial document look complete.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayloadGherkin {
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +105,9 @@ fn stage(ctx: &Ctx, change: &str, raw: &str) -> CmdResult {
         },
         policy: Policy {
             tdd: payload.policy.tdd,
+        },
+        gherkin: GherkinCfg {
+            enabled: payload.gherkin.enabled,
         },
         agents: AgentsCfg {
             hosts: payload.agents.hosts,

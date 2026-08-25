@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use telos_core::config::{
-    AgentHost as ConfigAgentHost, AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg,
+    AgentHost as ConfigAgentHost, AgentsCfg, Config, GherkinCfg, Globs, Policy, TddPolicy, TestCfg,
 };
 use telos_core::emit::emit_config;
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
@@ -754,6 +754,7 @@ fn initial_config_bytes(hosts: &[AgentHost]) -> Result<Vec<u8>, TelosError> {
         policy: Policy {
             tdd: TddPolicy::Strict,
         },
+        gherkin: GherkinCfg::default(),
         agents: AgentsCfg {
             hosts: hosts
                 .iter()

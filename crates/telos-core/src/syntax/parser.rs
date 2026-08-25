@@ -13,7 +13,7 @@
 
 use std::str::FromStr;
 
-use crate::config::{AgentHost, AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg};
+use crate::config::{AgentHost, AgentsCfg, Config, GherkinCfg, Globs, Policy, TddPolicy, TestCfg};
 use crate::error::{Diagnostic, ErrorCode};
 use crate::git::Oid;
 use crate::ids::{
@@ -1781,6 +1781,7 @@ impl<'a> P<'a> {
             tests: Globs::default(),
             test: TestCfg::default(),
             policy: Policy::default(),
+            gherkin: GherkinCfg::default(),
             agents: AgentsCfg::default(),
         };
         self.skip_newlines();
@@ -1807,6 +1808,17 @@ impl<'a> P<'a> {
                     TddPolicy::Advisory
                 } else {
                     return Err(self.expected("`strict` or `advisory`"));
+                };
+            } else if self.at_kw("gherkin") {
+                self.advance();
+                config.gherkin.enabled = if self.at_kw("true") {
+                    self.advance();
+                    true
+                } else if self.at_kw("false") {
+                    self.advance();
+                    false
+                } else {
+                    return Err(self.expected("`true` or `false`"));
                 };
             } else if self.at_kw("agent_host") {
                 self.advance();

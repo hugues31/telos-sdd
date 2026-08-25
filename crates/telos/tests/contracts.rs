@@ -1069,7 +1069,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
     fs::create_dir_all(read.path().join("telos")).unwrap();
     fs::write(
         read.path().join("telos/telos.toml"),
-        "[code]\nglobs = [\"src/**/*.rs\"]\n\n[tests]\nglobs = [\"tests/**/*.rs\"]\n\n[test]\ncmd = \"cargo test {filter}\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n",
+        "[code]\nglobs = [\"src/**/*.rs\"]\n\n[tests]\nglobs = [\"tests/**/*.rs\"]\n\n[test]\ncmd = \"cargo test {filter}\"\n\n[policy]\ntdd = \"strict\"\n\n[gherkin]\nenabled = false\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n",
     )
     .unwrap();
     let output = telos(read.path(), &["config", "--json"]).output().unwrap();
@@ -1084,6 +1084,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
                 "tests": {"globs": ["tests/**/*.rs"]},
                 "test": {"cmd": "cargo test {filter}"},
                 "policy": {"tdd": "strict"},
+                "gherkin": {"enabled": false},
                 "agents": {"hosts": ["claude", "codex"]}
             },
             "error": null,
@@ -1098,7 +1099,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
     telos(write.path(), &["change", "open", "configuration update"])
         .assert()
         .success();
-    let payload = r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"advisory"},"agents":{"hosts":["claude","codex"]}}"#;
+    let payload = r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"advisory"},"gherkin":{"enabled":false},"agents":{"hosts":["claude","codex"]}}"#;
     let output = telos(write.path(), &["config", "--change", "CHG-0001", "--json"])
         .write_stdin(payload)
         .output()
@@ -1117,6 +1118,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
                     "tests":{"globs":["tests/**/*.rs"]},
                     "test":{"cmd":"cargo test {filter}"},
                     "policy":{"tdd":"advisory"},
+                    "gherkin":{"enabled":false},
                     "agents":{"hosts":["claude","codex"]}
                 }
             },

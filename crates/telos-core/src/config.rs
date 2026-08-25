@@ -38,9 +38,26 @@ pub struct Config {
     /// `[policy] tdd = "strict" | "advisory"`.
     #[serde(default)]
     pub policy: Policy,
+    /// `[gherkin] enabled = true` -- generate sealed `.feature` files.
+    #[serde(default)]
+    pub gherkin: GherkinCfg,
     /// `[agents]`: normalized host metadata. Host files are managed by init.
     #[serde(default)]
     pub agents: AgentsCfg,
+}
+
+/// `[gherkin]`: whether reconcile generates sealed Cucumber `.feature` files
+/// under `telos/features/`.
+///
+/// Off unless asked for. The directory is deliberately not configurable: the
+/// write phase reads the *effective* config, so that enabling generation
+/// takes effect in the reconcile that approves it -- and a `dir` a change
+/// could also move would then mean pruning one tree while writing another in
+/// the same transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GherkinCfg {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// `[agents]`: the host integrations initially installed for this project.
@@ -244,5 +261,28 @@ mod tests {
         };
         let error = Config::validate_transition(&base, &removed).unwrap_err();
         assert_eq!(error.code, ErrorCode::TelosIntegrityViolation);
+    }
+
+    #[test]
+    fn gherkin_generation_is_off_unless_asked_for() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(
+            !config.gherkin.enabled,
+            "a project that never mentions gherkin must not generate features"
+        );
+
+        let config: Config = toml::from_str("[gherkin]\nenabled = true\n").unwrap();
+        assert!(config.gherkin.enabled);
+    }
+
+    #[test]
+    fn gherkin_round_trips_through_the_canonical_emitter() {
+        let config: Config = toml::from_str("[gherkin]\nenabled = true\n").unwrap();
+        let emitted = emit(&config).unwrap();
+        assert!(
+            emitted.contains("[gherkin]\nenabled = true\n"),
+            "emitted config: {emitted}"
+        );
+        assert_eq!(toml::from_str::<Config>(&emitted).unwrap(), config);
     }
 }

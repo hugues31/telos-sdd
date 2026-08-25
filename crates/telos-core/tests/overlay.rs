@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tempfile::TempDir;
 
-use telos_core::config::{AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg};
+use telos_core::config::{AgentsCfg, Config, GherkinCfg, Globs, Policy, TddPolicy, TestCfg};
 use telos_core::counters::{Alloc, Counters, floors};
 use telos_core::error::{Diagnostic, ErrorCode};
 use telos_core::ids::{
@@ -48,6 +48,7 @@ fn apply_config_ops_uses_the_last_typed_edit_and_normalizes_sets() {
         policy: Policy {
             tdd: TddPolicy::Advisory,
         },
+        gherkin: GherkinCfg::default(),
         agents: AgentsCfg::default(),
     };
     let second = Config {
@@ -63,6 +64,7 @@ fn apply_config_ops_uses_the_last_typed_edit_and_normalizes_sets() {
         policy: Policy {
             tdd: TddPolicy::Strict,
         },
+        gherkin: GherkinCfg::default(),
         agents: AgentsCfg::default(),
     };
 

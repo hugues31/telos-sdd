@@ -583,6 +583,7 @@ fn rebuild_status_uses_the_approved_staged_runner() {
         "tests": {"globs": ["tests/**/*.rs"]},
         "test": {"cmd": "git hash-object .staged-green"},
         "policy": {"tdd": "strict"},
+        "gherkin": {"enabled": false},
         "agents": {"hosts": []}
     });
     let output = telos(tmp.path(), &["config", "--change", "CHG-0001", "--json"])

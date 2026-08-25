@@ -37,6 +37,7 @@ fn stage_drafted_config_change(root: &Path, hosts: &[&str]) {
                 "tests": {"globs": ["tests/**/*.rs"]},
                 "test": {"cmd": "cargo test {filter}"},
                 "policy": {"tdd": "advisory"},
+                "gherkin": {"enabled": false},
                 "agents": {"hosts": hosts},
             })
             .to_string(),
@@ -143,7 +144,7 @@ fn init_persists_normalized_agent_hosts_in_project_configuration() {
 
     assert_eq!(
         read(tmp.path(), "telos/telos.toml"),
-        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
+        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[gherkin]\nenabled = false\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
     );
 }
 
@@ -966,6 +967,7 @@ fn guard_denies_tokens_made_stale_while_the_native_prompt_is_open() {
             "tests": {"globs": ["tests/**/*.rs"]},
             "test": {"cmd": "cargo test {filter}"},
             "policy": {"tdd": "advisory"},
+            "gherkin": {"enabled": false},
             "agents": {"hosts": []},
         })
         .to_string(),

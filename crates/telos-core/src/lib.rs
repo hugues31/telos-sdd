@@ -7,6 +7,7 @@ pub mod counters;
 pub mod emit;
 pub mod error;
 pub mod exec;
+pub mod gherkin;
 pub mod git;
 pub mod globs;
 pub mod graph;

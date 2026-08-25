@@ -1,11 +1,7 @@
 <script setup lang="ts">
-// Route: /intent/:id. Layout order matches the brief: the `telos` line is
-// the lede, up top before anything else; the canonical `.tel` source sits
-// behind a closed <details> (its `<pre class="tel-source">` is the one
-// substitution point a later task swaps for a TelCode syntax-highlighting
-// component — nothing else on this page touches `.canonical`); then
-// relations, notions, constraints, implementations and scenarios each get
-// their own section.
+// Route: /intent/:id. Rust projects display-ready canonical fragments for
+// the statement and scenarios, so this page can show complete behavior
+// without parsing or reconstructing the .tel grammar in the frontend.
 import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 
@@ -24,19 +20,29 @@ const intentId = computed(() => {
 });
 
 const intent = computed(() => intentById.value.get(intentId.value));
+const ownerEntity = computed<GraphKey | null>(() => {
+  if (!intent.value) return null;
+  return {
+    kind: intent.value.owner.includes('/') ? 'capability' : 'context',
+    id: intent.value.owner,
+  };
+});
 
-// The "Relations" section below shows edges touching this intent whose
-// relation kind has no dedicated, more complete section further down:
-// `uses` -> Notions, `constrains` -> Constraints (which must include
-// *global* constraints too — those never get a `constrains` edge, see the
-// snapshot builder comment in public/data.js — so it reads intent.constraints
-// directly rather than edges), `verifies` -> Scenarios, `implements` ->
-// Implementations. What's left standing (currently just `requires`) is the
-// one relation IntentView exposes no typed field for at all.
-const COVERED_RELATIONS = new Set<GraphRelation>(['uses', 'constrains', 'verifies', 'implements']);
+const RELATION_LABELS = {
+  refines: { outgoing: 'Refines', incoming: 'Refined by' },
+  requires: { outgoing: 'Requires', incoming: 'Required by' },
+  excludes: { outgoing: 'Excludes', incoming: 'Excluded by' },
+} as const;
+
+type IntentRelation = keyof typeof RELATION_LABELS;
+type RelationDirection = 'outgoing' | 'incoming';
+
+function isIntentRelation(relation: GraphRelation): relation is IntentRelation {
+  return relation in RELATION_LABELS;
+}
 
 interface RelationGroup {
-  relation: GraphRelation;
+  relation: IntentRelation;
   entities: GraphKey[];
 }
 
@@ -44,8 +50,9 @@ function groupByRelation(
   edges: GraphEdgeView[],
   pick: (edge: GraphEdgeView) => GraphKey,
 ): RelationGroup[] {
-  const map = new Map<GraphRelation, GraphKey[]>();
+  const map = new Map<IntentRelation, GraphKey[]>();
   for (const edge of edges) {
+    if (!isIntentRelation(edge.relation)) continue;
     const group = map.get(edge.relation);
     if (group) {
       group.push(pick(edge));
@@ -61,7 +68,7 @@ const outgoingRelations = computed<RelationGroup[]>(() => {
     (edge) =>
       edge.from.kind === 'intent' &&
       edge.from.id === intentId.value &&
-      !COVERED_RELATIONS.has(edge.relation),
+      isIntentRelation(edge.relation),
   );
   return groupByRelation(edges, (edge) => edge.to);
 });
@@ -71,29 +78,38 @@ const incomingRelations = computed<RelationGroup[]>(() => {
     (edge) =>
       edge.to.kind === 'intent' &&
       edge.to.id === intentId.value &&
-      !COVERED_RELATIONS.has(edge.relation),
+      isIntentRelation(edge.relation),
   );
   return groupByRelation(edges, (edge) => edge.from);
 });
 
-function relationLabel(relation: GraphRelation): string {
-  return relation.charAt(0).toUpperCase() + relation.slice(1);
+function relationLabel(relation: IntentRelation, direction: RelationDirection): string {
+  return RELATION_LABELS[relation][direction];
 }
 </script>
 
 <template>
   <section class="page intent-detail">
     <template v-if="intent">
+      <RouterLink to="/intents" class="intent-detail__back">← All intents</RouterLink>
       <div class="intent-detail__heading">
-        <h1>{{ intent.id }} — {{ intent.title }}</h1>
+        <div>
+          <h1>{{ intent.id }} — {{ intent.title }}</h1>
+          <p v-if="ownerEntity" class="intent-detail__owner">
+            Owner <EntityLink :entity="ownerEntity" :show-kind="false" />
+          </p>
+        </div>
         <StatusBadge :status="intent.status" />
       </div>
       <p class="intent-detail__telos">{{ intent.telos }}</p>
 
-      <details class="intent-detail__source">
-        <summary>Canonical .tel source</summary>
-        <TelCode :source="intent.canonical" />
-      </details>
+      <section class="statement-card" aria-labelledby="statement-heading">
+        <header>
+          <h2 id="statement-heading">Statement</h2>
+          <span class="statement-card__template">{{ intent.statement.template }}</span>
+        </header>
+        <TelCode :source="intent.statement.canonical" />
+      </section>
 
       <section class="intent-detail__section" aria-labelledby="relations-heading">
         <h2 id="relations-heading">Relations</h2>
@@ -105,7 +121,9 @@ function relationLabel(relation: GraphRelation): string {
               :key="`out-${group.relation}`"
               class="relation-group__row"
             >
-              <span class="relation-group__label">{{ relationLabel(group.relation) }}</span>
+              <span class="relation-group__label">
+                {{ relationLabel(group.relation, 'outgoing') }}
+              </span>
               <EntityLink
                 v-for="entity in group.entities"
                 :key="`${entity.kind}-${entity.id}`"
@@ -120,7 +138,9 @@ function relationLabel(relation: GraphRelation): string {
               :key="`in-${group.relation}`"
               class="relation-group__row"
             >
-              <span class="relation-group__label">{{ relationLabel(group.relation) }}</span>
+              <span class="relation-group__label">
+                {{ relationLabel(group.relation, 'incoming') }}
+              </span>
               <EntityLink
                 v-for="entity in group.entities"
                 :key="`${entity.kind}-${entity.id}`"
@@ -175,6 +195,7 @@ function relationLabel(relation: GraphRelation): string {
             <span class="scenario-card__id">{{ scenario.id }}</span>
             {{ scenario.title }}
           </h3>
+          <TelCode :source="scenario.canonical" />
           <p v-if="scenario.proves.length" class="scenario-card__proof">
             Proved by
             <EntityLink
@@ -190,6 +211,11 @@ function relationLabel(relation: GraphRelation): string {
         </article>
         <p v-if="!intent.scenarios.length" class="intent-detail__muted">No scenarios yet.</p>
       </section>
+
+      <details class="intent-detail__source">
+        <summary>Full canonical .tel source</summary>
+        <TelCode :source="intent.canonical" />
+      </details>
     </template>
 
     <template v-else>
@@ -208,12 +234,28 @@ function relationLabel(relation: GraphRelation): string {
 .intent-detail__heading {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 0.75rem;
 }
 
 .intent-detail__heading h1 {
   margin: 0;
+}
+
+.intent-detail__back {
+  display: inline-block;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.intent-detail__owner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin: 0.25rem 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
 }
 
 .intent-detail__telos {
@@ -232,6 +274,38 @@ function relationLabel(relation: GraphRelation): string {
   cursor: pointer;
   color: var(--color-link);
   font-weight: 600;
+}
+
+.statement-card {
+  margin-bottom: 1.75rem;
+  padding: 1rem 1.25rem 1.25rem;
+  background: var(--color-primary-soft);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 28%, var(--color-border));
+  border-radius: 0.75rem;
+}
+
+.statement-card header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.statement-card h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.statement-card__template {
+  padding: 0.1875rem 0.5rem;
+  color: var(--color-primary-strong);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
 }
 
 .intent-detail__section {
@@ -335,12 +409,23 @@ function relationLabel(relation: GraphRelation): string {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
-  margin: 0;
+  margin: 0.875rem 0 0;
   font-size: 0.875rem;
   color: var(--color-text-muted);
 }
 
 .scenario-card__proof--unproved {
   color: var(--color-status-warn);
+}
+
+@media (max-width: 36rem) {
+  .intent-detail__heading {
+    display: grid;
+  }
+
+  .statement-card,
+  .scenario-card {
+    padding-inline: 0.875rem;
+  }
 }
 </style>

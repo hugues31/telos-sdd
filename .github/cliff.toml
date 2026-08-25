@@ -1,0 +1,38 @@
+[changelog]
+header = ""
+body = """
+{% set breaking = commits | filter(attribute="breaking", value=true) %}\
+{% if breaking | length > 0 %}
+### Breaking Changes
+{% for commit in breaking %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }}\
+{% endfor %}
+{% endif %}\
+{% set non_breaking = commits | filter(attribute="breaking", value=false) %}\
+{% for group, commits in non_breaking | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+commit_parsers = [
+  { message = "^feat", group = "<!-- 1 -->Features" },
+  { message = "^fix", group = "<!-- 2 -->Bug Fixes" },
+  { message = "^docs", group = "<!-- 3 -->Documentation" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = ".*", group = "<!-- 4 -->Maintenance" },
+]
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$'
+use_branch_tags = true
+topo_order = false
+sort_commits = "oldest"

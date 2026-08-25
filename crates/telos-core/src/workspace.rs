@@ -97,9 +97,22 @@ impl Workspace {
             }
         }
 
-        collect_tel_files_recursive(
+        collect_files_recursive(
             &self.telos_dir.join("contexts"),
             "telos/contexts",
+            ".tel",
+            &mut files,
+        )?;
+        // Generated `.feature` files are derived *specification*, like
+        // `bindings.tel`: sealed, drift-checked, and produced by reconcile
+        // rather than named by a staged op. Collected unconditionally --
+        // whether they are *produced* depends on `[gherkin] enabled`, but
+        // whether files found here are *sealed* must not, or disabling
+        // generation would silently orphan whatever is already on disk.
+        collect_files_recursive(
+            &self.telos_dir.join("features"),
+            "telos/features",
+            ".feature",
             &mut files,
         )?;
         collect_tel_files_direct(
@@ -136,9 +149,10 @@ impl Workspace {
         let mut parsed = Vec::new();
 
         for repo_path in spec_files {
-            // `telos.toml` is workspace configuration, not a `.tel` source
-            // -- it has no `TelFile` representation.
-            if repo_path.as_str() == "telos/telos.toml" {
+            // `telos.toml` is workspace configuration and a `.feature` is
+            // generated prose -- neither has a `TelFile` representation.
+            if repo_path.as_str() == "telos/telos.toml" || repo_path.as_str().ends_with(".feature")
+            {
                 continue;
             }
 
@@ -483,9 +497,10 @@ fn collect_tel_files_direct(
     Ok(())
 }
 
-fn collect_tel_files_recursive(
+pub(crate) fn collect_files_recursive(
     dir: &Path,
     prefix: &str,
+    extension: &str,
     out: &mut Vec<RepoPath>,
 ) -> Result<(), TelosError> {
     let entries = match fs::read_dir(dir) {
@@ -516,8 +531,8 @@ fn collect_tel_files_recursive(
         };
         let child_prefix = format!("{prefix}/{name}");
         if file_type.is_dir() {
-            collect_tel_files_recursive(&entry.path(), &child_prefix, out)?;
-        } else if file_type.is_file() && name.ends_with(".tel") {
+            collect_files_recursive(&entry.path(), &child_prefix, extension, out)?;
+        } else if file_type.is_file() && name.ends_with(extension) {
             out.push(RepoPath::parse(child_prefix)?);
         }
     }

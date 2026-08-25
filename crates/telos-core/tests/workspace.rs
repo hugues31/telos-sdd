@@ -344,3 +344,66 @@ fn lock_path_is_telos_lock_inside_the_telos_dir() {
 
     assert_eq!(ws.lock_path(), tmp.path().join("telos").join("telos.lock"));
 }
+
+// --- generated features --------------------------------------------------
+
+/// A generated feature, written where reconcile would put it.
+fn write_feature(root: &std::path::Path, rel: &str, content: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, content).unwrap();
+}
+
+#[test]
+fn spec_files_seals_generated_features() {
+    let tmp = copied_corpus();
+    write_feature(
+        tmp.path(),
+        "telos/features/billing/settlement/INT-0042.feature",
+        "@INT-0042\nFeature: x\n",
+    );
+
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let files: Vec<String> = ws
+        .spec_files()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().to_string())
+        .collect();
+
+    assert!(
+        files.contains(&"telos/features/billing/settlement/INT-0042.feature".to_string()),
+        "a generated feature is sealed spec: {files:?}"
+    );
+}
+
+#[test]
+fn a_feature_file_is_sealed_but_never_parsed_as_tel() {
+    let tmp = copied_corpus();
+    // Deliberately not `.tel` syntax: the parser must never see this.
+    write_feature(
+        tmp.path(),
+        "telos/features/billing/settlement/INT-0042.feature",
+        "@INT-0042\nFeature: x\n",
+    );
+
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    ws.load_model()
+        .expect("a .feature must not reach the .tel parser");
+}
+
+#[test]
+fn a_stray_non_feature_file_under_features_is_not_sealed() {
+    let tmp = copied_corpus();
+    write_feature(tmp.path(), "telos/features/README.md", "not a feature");
+
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let files: Vec<String> = ws
+        .spec_files()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().to_string())
+        .collect();
+
+    assert_eq!(files, EXPECTED_SPEC_FILES.to_vec());
+}

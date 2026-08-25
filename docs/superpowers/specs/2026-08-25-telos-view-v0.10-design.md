@@ -2,7 +2,7 @@
 
 ## Objective
 
-Ship Telos 0.10.0 as a focused usability release for `telos view`. The release makes the shared navigation usable on phones, localizes the footer build date, adds graph node finding, makes intent details faithfully expose their canonical `.tel` behavior, clarifies glossary consumers, and aligns the interface with the blue/cyan logo.
+Ship Telos 0.10.0 as a focused usability release for `telos view`. The release makes the shared navigation usable on phones, adds keyboard-first global search, localizes the footer build date, adds graph node finding, makes intent details faithfully expose their canonical `.tel` behavior, clarifies glossary consumers, and aligns the interface with the blue/cyan logo.
 
 ## Scope
 
@@ -12,6 +12,7 @@ The release changes the embedded Vue application, its serialized view contract, 
 
 - The Rust model and canonical emitter remain the source of truth for `.tel` meaning and formatting.
 - Vue receives display-ready canonical fragments; it does not parse `.tel` or mirror the complete Rust AST.
+- Global navigation search and graph finding share one search index and ranking implementation.
 - Search finds and focuses graph nodes without removing unrelated graph structure.
 - Existing glossary cards remain the primary notion presentation.
 - Blue is the brand color. Green is reserved for healthy or successful state.
@@ -58,6 +59,23 @@ Desktop navigation remains inline. At viewport widths of 48rem and below, the he
 - a menu button with an accessible name and `aria-expanded` state.
 
 The menu opens a full-width surface directly below the sticky header row. Links are stacked with a clear active state and touch-friendly targets. The menu closes when a destination is selected, the route changes, Escape is pressed, or a pointer interaction occurs outside the header. Opening the menu moves focus to the first navigation link; closing it with Escape returns focus to the menu button. The dropdown overlays page content, so `--header-height` continues to describe the sticky row and existing scroll margins remain correct.
+
+## Global Search
+
+The header gains a global search trigger styled as a compact search field on desktop and as a labeled search-icon button on mobile. Activating it opens a modal command palette. `Control+K` and `Command+K` open the palette on every route; `/` also opens it when focus is not inside an input, textarea, select, button, link, or editable region. The visible shortcut hint follows the current platform. Escape closes the palette and restores focus to the trigger or element that opened it.
+
+Global search indexes every `snapshot.nodes` entry: contexts, capabilities, notions, intents, scenarios, constraints, code, and tests. It uses the same case-insensitive fields, exact/prefix/substring ranking, stable snapshot-order ties, and eight-result limit as the graph finder. The shared search module owns indexing and ranking; neither search component reimplements matching.
+
+Results show kind, readable label, and stable ID. Arrow keys move through the list and Enter opens the active result, defaulting to the first result. Destinations are centralized in one helper shared with `EntityLink`:
+
+- contexts and capabilities open their anchors on the Contexts page;
+- intents open their detail route;
+- scenarios open their anchor on the owning intent;
+- notions open their Glossary anchor;
+- constraints open their Coverage anchor;
+- code and tests, which have no dedicated detail route, open the Graph and focus the corresponding node.
+
+The command palette is a navigation tool. The graph-local finder remains because it has a different primary action: selecting and centering a node without leaving the graph. Navigating to the Graph with a code/test result carries a typed focus request in route query parameters, using separate `kind` and `id` values so IDs containing punctuation or slashes remain safe. The Graph consumes a valid request once the corresponding node exists, expands ancestors, focuses it, and leaves the query intact so the result is shareable and reload-safe. Invalid or stale focus parameters do not alter the graph.
 
 ## Localized Footer Date
 
@@ -131,6 +149,8 @@ Touch targets for the mobile menu, graph results, sort headers, and filters are 
 - Invalid live snapshots preserve the last valid payload and surface the existing refresh error.
 - Invalid build dates display the original string.
 - Empty graph queries show no result popup; unmatched non-empty queries show `No matching nodes` and leave selection untouched.
+- Empty global queries show a short prompt; unmatched global queries show `No matching entities` and preserve the current route.
+- The `/` shortcut is ignored while the user is typing or interacting with an editable/control element; Escape never changes the current route.
 - A stale graph focus request is ignored after live reload.
 - Notions with no consumers say `No consumers recorded.`
 - A selected consumer type with no rows is represented by the glossary-level empty state after all filters compose.
@@ -149,6 +169,7 @@ Frontend unit tests will prove:
 
 - local date formatting for explicit locales, leap days, invalid dates, and timezone-safe component construction;
 - graph matching rank, stable ties, result limit, and collapsed-ancestor expansion;
+- global-search keyboard guards, shared result ranking, entity destinations, and typed Graph focus query parsing;
 - glossary consumer type filtering and deterministic sorting;
 - strict live-payload validation accepts the new contract and rejects missing or malformed statement/scenario fragments.
 

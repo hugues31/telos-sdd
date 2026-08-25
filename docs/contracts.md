@@ -785,12 +785,21 @@ entity's current value. `remove <kind> <key>` takes no payload.
 ```json
 { "name": "Invoice", "kind": "entity",
   "def": "A bill issued to a Customer for delivered work.",
+  "phrase": "invoice",
   "attrs": [ {"name": "state", "type": "enum", "values": ["open", "settled"]},
              {"name": "balance", "type": "money"},
              {"name": "customer", "type": "ref", "target": "Customer"} ],
   "rels":  [ {"name": "issued-to", "target": "Customer"} ] }
 ```
 `attrs`/`rels` default to `[]` when absent.
+`phrase` is the term's surface form used mid-sentence, carrying no article
+(`"invoice"`, `"payment is received"`); the engine prepends `the ` at every
+use site. It is optional for `actor`, `entity`, `value` and `state`, where it
+defaults to the `name` split on case boundaries and lowercased (`InvoiceLine`
+→ `"invoice line"`), and **required** for `event`, where no derivation can
+supply a verb. Either way the resolved value is written into the `.tel` file,
+so a derived default is visible in `telos change diff` before approval. It
+must be a single line and must not begin with `a `, `an ` or `the `.
 `type` ∈ `string|int|decimal|money|bool|date|datetime|enum|ref`;
 `enum` requires `values` (≥ 1 entry); `ref` requires `target`.
 
@@ -1468,9 +1477,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Telos v0.11.0
+      - name: Install Telos v0.12.0
         run: |
-          version=0.11.0
+          version=0.12.0
           asset="telos_${version}_linux_amd64.tar.gz"
           base="https://github.com/hugues31/telos-sdd/releases/download/v${version}"
           cd "$RUNNER_TEMP"
@@ -1485,8 +1494,8 @@ jobs:
 ```
 
 The downloaded release version is derived from the CLI package version.
-Shipping 0.11.0 therefore requires release `v0.11.0` to carry the
-`telos_0.11.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
+Shipping 0.12.0 therefore requires release `v0.12.0` to carry the
+`telos_0.12.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
 generated install step cannot succeed. The workflow reports a check but does
 not itself make GitHub treat it as required: repository branch protection
 must separately require job `sealed` before merges.

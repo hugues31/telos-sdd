@@ -179,8 +179,23 @@ function isScenario(value: unknown): boolean {
     typeof value.id === 'string' &&
     typeof value.intent === 'string' &&
     typeof value.title === 'string' &&
+    typeof value.canonical === 'string' &&
     isStringArray(value.notions) &&
     isStringArray(value.proves)
+  );
+}
+
+function isStatement(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isOneOf(value.template, [
+      'ubiquitous',
+      'event-driven',
+      'state-driven',
+      'unwanted',
+      'optional',
+    ]) &&
+    typeof value.canonical === 'string'
   );
 }
 
@@ -229,6 +244,7 @@ function isIntent(value: unknown): boolean {
     isOneOf(value.status, ['draft', 'active', 'deprecated']) &&
     typeof value.telos === 'string' &&
     typeof value.canonical === 'string' &&
+    isStatement(value.statement) &&
     isStringArray(value.notions) &&
     isArrayOf(value.constraints, isConstraintRef) &&
     isStringArray(value.implements) &&

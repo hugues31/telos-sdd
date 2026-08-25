@@ -186,6 +186,12 @@ const scn0034 = {
   id: 'SCN-0034',
   intent: 'INT-0005',
   title: 'a new invoice gets a legacy number',
+  canonical: `  scenario SCN-0034 "a new invoice gets a legacy number" {
+    given Customer { name: "ACME" }
+    when  InvoiceIssued {}
+    then  Invoice.state != cancelled
+  }
+`,
   notions: ['Customer', 'Invoice', 'InvoiceIssued'],
   proves: [],
 };
@@ -194,6 +200,12 @@ const scn0091 = {
   id: 'SCN-0091',
   intent: 'INT-0017',
   title: 'a newly issued invoice is open',
+  canonical: `  scenario SCN-0091 "a newly issued invoice is open" {
+    given Customer { name: "ACME" }
+    when  InvoiceIssued {}
+    then  Invoice.state == open
+  }
+`,
   notions: ['Customer', 'Invoice', 'InvoiceIssued'],
   proves: [],
 };
@@ -202,6 +214,12 @@ const scn0107 = {
   id: 'SCN-0107',
   intent: 'INT-0042',
   title: 'full payment settles the invoice',
+  canonical: `  scenario SCN-0107 "full payment settles the invoice" {
+    given Invoice { state: open, balance: "120.00 EUR" }
+    when  PaymentReceived { amount: "120.00 EUR" }
+    then  Invoice.state == settled
+  }
+`,
   notions: ['Invoice', 'PaymentReceived'],
   proves: ['tests/billing.rs::scn_0107_full_payment_settles_the_invoice'],
 };
@@ -210,6 +228,12 @@ const scn0108 = {
   id: 'SCN-0108',
   intent: 'INT-0042',
   title: 'a payment that exactly zeroes the balance settles the invoice',
+  canonical: `  scenario SCN-0108 "a payment that exactly zeroes the balance settles the invoice" {
+    given Invoice { state: open, balance: "42.50 EUR" }
+    when  PaymentReceived { amount: "42.50 EUR" }
+    then  Invoice.state == settled
+  }
+`,
   notions: ['Invoice', 'PaymentReceived'],
   proves: [],
 };
@@ -218,6 +242,12 @@ const scn0142 = {
   id: 'SCN-0142',
   intent: 'INT-0053',
   title: 'a due date passing on an open invoice adds a late fee',
+  canonical: `  scenario SCN-0142 "a due date passing on an open invoice adds a late fee" {
+    given Invoice { state: open, balance: "80.00 EUR" }
+    when  DueDatePassed {}
+    then  Invoice.balance != "80.00 EUR"
+  }
+`,
   notions: ['DueDatePassed', 'Invoice'],
   proves: [],
 };
@@ -226,6 +256,12 @@ const scn0143 = {
   id: 'SCN-0143',
   intent: 'INT-0053',
   title: 'a due date passing on a settled invoice adds no fee',
+  canonical: `  scenario SCN-0143 "a due date passing on a settled invoice adds no fee" {
+    given Invoice { state: settled, balance: "0.00 EUR" }
+    when  DueDatePassed {}
+    then  Invoice.balance == "0.00 EUR"
+  }
+`,
   notions: ['DueDatePassed', 'Invoice'],
   proves: [],
 };
@@ -234,6 +270,13 @@ const scn0158 = {
   id: 'SCN-0158',
   intent: 'INT-0061',
   title: 'a clerk voids an open invoice',
+  canonical: `  scenario SCN-0158 "a clerk voids an open invoice" {
+    given BillingClerk { name: "J. Reyes" }
+    given Invoice { state: open, balance: "45.00 EUR" }
+    when  InvoiceVoided {}
+    then  Invoice.state == cancelled
+  }
+`,
   notions: ['BillingClerk', 'Invoice', 'InvoiceVoided'],
   proves: ['tests/billing.rs::scn_0158_a_clerk_voids_an_open_invoice'],
 };
@@ -242,6 +285,12 @@ const scn0166 = {
   id: 'SCN-0166',
   intent: 'INT-0074',
   title: 'a partial payment lowers the balance without settling the invoice',
+  canonical: `  scenario SCN-0166 "a partial payment lowers the balance without settling the invoice" {
+    given Invoice { state: open, balance: "120.00 EUR" }
+    when  PaymentReceived { amount: "50.00 EUR" }
+    then  Invoice.state == open
+  }
+`,
   notions: ['Invoice', 'PaymentReceived'],
   proves: [],
 };
@@ -271,6 +320,13 @@ const intents = [
   }
 }
 `,
+    statement: {
+      template: 'ubiquitous',
+      canonical: `  statement ubiquitous {
+    system shall "assign every new invoice the next number in the legacy sequential counter"
+  }
+`,
+    },
     notions: ['Customer', 'Invoice', 'InvoiceIssued'],
     constraints: globalConstraintRefs,
     implements: [],
@@ -297,6 +353,14 @@ const intents = [
   }
 }
 `,
+    statement: {
+      template: 'event-driven',
+      canonical: `  statement event-driven {
+    when   InvoiceIssued on Invoice
+    system shall set Invoice.state = open
+  }
+`,
+    },
     notions: ['Customer', 'Invoice', 'InvoiceIssued'],
     constraints: globalConstraintRefs,
     implements: [],
@@ -330,6 +394,14 @@ const intents = [
   }
 }
 `,
+    statement: {
+      template: 'event-driven',
+      canonical: `  statement event-driven {
+    when   PaymentReceived on Invoice
+    system shall set Invoice.state = settled
+  }
+`,
+    },
     notions: ['Invoice', 'PaymentReceived'],
     constraints: [...globalConstraintRefs, con0011Ref],
     implements: ['src/billing/invoice.rs'],
@@ -362,6 +434,14 @@ const intents = [
   }
 }
 `,
+    statement: {
+      template: 'event-driven',
+      canonical: `  statement event-driven {
+    when   DueDatePassed on Invoice
+    system shall "add the configured late fee to Invoice.balance"
+  }
+`,
+    },
     notions: ['DueDatePassed', 'Invoice'],
     constraints: [...globalConstraintRefs, con0011Ref],
     implements: [],
@@ -389,6 +469,14 @@ const intents = [
   }
 }
 `,
+    statement: {
+      template: 'event-driven',
+      canonical: `  statement event-driven {
+    when   InvoiceVoided on Invoice
+    system shall set Invoice.state = cancelled
+  }
+`,
+    },
     notions: ['BillingClerk', 'Invoice', 'InvoiceVoided'],
     constraints: globalConstraintRefs,
     implements: ['src/billing/clerk.rs'],
@@ -416,6 +504,14 @@ const intents = [
   }
 }
 `,
+    statement: {
+      template: 'event-driven',
+      canonical: `  statement event-driven {
+    when   PaymentReceived on Invoice
+    system shall "reduce Invoice.balance by the amount received"
+  }
+`,
+    },
     notions: ['Invoice', 'PaymentReceived'],
     constraints: globalConstraintRefs,
     implements: [],

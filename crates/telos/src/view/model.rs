@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 
 use serde::Serialize;
-use telos_core::emit::{emit_owned_constraint, emit_owned_intent, emit_owned_notion};
+use telos_core::emit::{
+    emit_owned_constraint, emit_owned_intent, emit_owned_notion, emit_scenario_fragment,
+    emit_statement_fragment, statement_template,
+};
 use telos_core::graph::{NodeRef, Relation};
 use telos_core::ids::Owner;
 use telos_core::model::{
@@ -82,6 +85,7 @@ pub(crate) struct IntentView {
     pub(crate) status: String,
     pub(crate) telos: String,
     pub(crate) canonical: String,
+    pub(crate) statement: StatementView,
     pub(crate) notions: Vec<String>,
     pub(crate) constraints: Vec<ConstraintRefView>,
     pub(crate) implements: Vec<String>,
@@ -89,10 +93,17 @@ pub(crate) struct IntentView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct StatementView {
+    pub(crate) template: String,
+    pub(crate) canonical: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ScenarioView {
     pub(crate) id: String,
     pub(crate) intent: String,
     pub(crate) title: String,
+    pub(crate) canonical: String,
     pub(crate) notions: Vec<String>,
     pub(crate) proves: Vec<String>,
 }
@@ -223,6 +234,7 @@ impl ViewSnapshot {
                         id: scenario.id.to_string(),
                         intent: intent.id.to_string(),
                         title: scenario.title.clone(),
+                        canonical: emit_scenario_fragment(scenario),
                         notions: uses_from(model, &NodeRef::Scenario(scenario.id)),
                         proves: intent_proofs
                             .iter()
@@ -247,6 +259,10 @@ impl ViewSnapshot {
                     status: intent_status(intent.status).to_string(),
                     telos: intent.telos.clone(),
                     canonical: emit_owned_intent(owner, intent),
+                    statement: StatementView {
+                        template: statement_template(&intent.statement).to_string(),
+                        canonical: emit_statement_fragment(&intent.statement),
+                    },
                     notions: notion_names,
                     constraints: applicable_constraints(model, intent.id)
                         .into_iter()
@@ -851,7 +867,27 @@ mod tests {
             .find(|intent| intent.id == IntentId(42).to_string())
             .unwrap();
         assert_eq!(intent.implements, ["src/billing/invoice.rs"]);
+        assert_eq!(intent.statement.template, "event-driven");
+        assert_eq!(
+            intent.statement.canonical,
+            concat!(
+                "  statement event-driven {\n",
+                "    when   PaymentReceived on Invoice\n",
+                "    system shall set Invoice.state = settled\n",
+                "  }\n",
+            )
+        );
         assert_eq!(intent.scenarios[0].id, "SCN-0107");
+        assert_eq!(
+            intent.scenarios[0].canonical,
+            concat!(
+                "  scenario SCN-0107 \"full payment settles the invoice\" {\n",
+                "    given Invoice { state: open, balance: \"120.00 EUR\" }\n",
+                "    when  PaymentReceived { amount: \"120.00 EUR\" }\n",
+                "    then  Invoice.state == settled\n",
+                "  }\n",
+            )
+        );
         assert_eq!(
             intent.scenarios[0].proves,
             ["tests/billing.rs::scn_0107_full_payment_settles_the_invoice"]

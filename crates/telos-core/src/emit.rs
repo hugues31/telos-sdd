@@ -328,6 +328,19 @@ fn emit_statement(out: &mut String, s: &Statement) {
     w!(out, "{INDENT}}}\n");
 }
 
+/// The canonical block of one statement, alone: exactly the bytes
+/// [`emit_intent`] writes for it, indentation included.
+pub fn emit_statement_fragment(statement: &Statement) -> String {
+    let mut out = String::new();
+    emit_statement(&mut out, statement);
+    out
+}
+
+/// The canonical template keyword for a statement.
+pub fn statement_template(statement: &Statement) -> &'static str {
+    template(statement)
+}
+
 fn template(s: &Statement) -> &'static str {
     match s {
         Statement::Ubiquitous { .. } => "ubiquitous",
@@ -727,7 +740,7 @@ pub fn emit_journal_entry(e: &JournalEntry) -> String {
 /// makes that comparison sound -- spans differ between a parsed scenario and
 /// a staged one and would defeat structural equality, and the emitter has no
 /// notion of them.
-pub(crate) fn emit_scenario_fragment(s: &Scenario) -> String {
+pub fn emit_scenario_fragment(s: &Scenario) -> String {
     let mut out = String::new();
     emit_scenario(&mut out, s);
     out
@@ -904,7 +917,9 @@ fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{CapabilityRef, ConstraintId, ContextId, NotionName, Owner, RepoPath};
+    use crate::ids::{
+        CapabilityRef, ConstraintId, ContextId, FieldName, NotionName, Owner, RepoPath,
+    };
     use crate::model::{ContextDependency, NotionMapping};
     use crate::span::{Sp, Span};
 
@@ -942,6 +957,111 @@ mod tests {
             requires: vec![],
             excludes: vec![],
             scenarios: vec![],
+        }
+    }
+
+    fn sp_notion(value: &str) -> Sp<NotionName> {
+        Sp {
+            node: NotionName::new(value).unwrap(),
+            span: Span::default(),
+        }
+    }
+
+    fn invoice_state() -> AttrRef {
+        AttrRef {
+            notion: sp_notion("Invoice"),
+            attr: Sp {
+                node: FieldName::new("state").unwrap(),
+                span: Span::default(),
+            },
+        }
+    }
+
+    fn open_symbol() -> Literal {
+        Literal::Symbol(Sp {
+            node: "open".to_string(),
+            span: Span::default(),
+        })
+    }
+
+    fn free_action() -> Action {
+        Action::Free("track invoices".to_string())
+    }
+
+    #[test]
+    fn standalone_statement_fragments_cover_every_template_exactly() {
+        let condition = Expr::Cmp {
+            op: CmpOp::Eq,
+            lhs: Operand::Ref(invoice_state()),
+            rhs: Operand::Lit(open_symbol()),
+        };
+        let cases = vec![
+            (
+                Statement::Ubiquitous {
+                    action: free_action(),
+                },
+                "ubiquitous",
+                "  statement ubiquitous {\n    system shall \"track invoices\"\n  }\n",
+            ),
+            (
+                Statement::EventDriven {
+                    event: sp_notion("InvoiceIssued"),
+                    on: Some(sp_notion("Invoice")),
+                    action: free_action(),
+                },
+                "event-driven",
+                concat!(
+                    "  statement event-driven {\n",
+                    "    when   InvoiceIssued on Invoice\n",
+                    "    system shall \"track invoices\"\n",
+                    "  }\n",
+                ),
+            ),
+            (
+                Statement::StateDriven {
+                    subject: invoice_state(),
+                    value: open_symbol(),
+                    action: free_action(),
+                },
+                "state-driven",
+                concat!(
+                    "  statement state-driven {\n",
+                    "    while  Invoice.state == open\n",
+                    "    system shall \"track invoices\"\n",
+                    "  }\n",
+                ),
+            ),
+            (
+                Statement::Unwanted {
+                    condition,
+                    action: free_action(),
+                },
+                "unwanted",
+                concat!(
+                    "  statement unwanted {\n",
+                    "    if     Invoice.state == open\n",
+                    "    system shall \"track invoices\"\n",
+                    "  }\n",
+                ),
+            ),
+            (
+                Statement::Optional {
+                    feature: FieldName::new("audit").unwrap(),
+                    action: free_action(),
+                },
+                "optional",
+                concat!(
+                    "  statement optional {\n",
+                    "    where  audit\n",
+                    "    system shall \"track invoices\"\n",
+                    "  }\n",
+                ),
+            ),
+        ];
+
+        for (statement, expected_template, expected_fragment) in cases {
+            assert_eq!(statement_template(&statement), expected_template);
+            assert_eq!(emit_statement_fragment(&statement), expected_fragment);
         }
     }
 

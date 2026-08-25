@@ -86,6 +86,22 @@ mod tests {
         assert_eq!(value["meta"]["mode"], "live");
         assert_eq!(value["snapshot"]["dashboard"]["state"], "coherent");
         assert_eq!(value["snapshot"]["intents"][0]["id"], "INT-0017");
+        assert_eq!(
+            value["snapshot"]["intents"][0]["statement"]["template"],
+            "event-driven"
+        );
+        assert!(
+            value["snapshot"]["intents"][0]["statement"]["canonical"]
+                .as_str()
+                .unwrap()
+                .contains("statement event-driven")
+        );
+        assert!(
+            value["snapshot"]["scenarios"][0]["canonical"]
+                .as_str()
+                .unwrap()
+                .contains("scenario SCN-0091")
+        );
     }
 
     #[test]

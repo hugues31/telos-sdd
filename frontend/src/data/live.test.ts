@@ -70,6 +70,10 @@ function addOwnedGraphFixture(payload: TelosPayload): void {
       status: 'active',
       telos: 'Invoices record obligations.',
       canonical: 'intent INT-1',
+      statement: {
+        template: 'event-driven',
+        canonical: '  statement event-driven {\n  }\n',
+      },
       notions: [],
       constraints: [],
       implements: [],
@@ -596,6 +600,14 @@ describe('live reload controller', () => {
         ]),
     ],
     [
+      'intent entries missing canonical statements',
+      (payload: TelosPayload) => {
+        addOwnedGraphFixture(payload);
+        delete (payload.snapshot.intents[0] as Partial<TelosPayload['snapshot']['intents'][number]>)
+          .statement;
+      },
+    ],
+    [
       'intent nested scenario entries',
       (payload: any) =>
         (payload.snapshot.intents = [
@@ -620,6 +632,26 @@ describe('live reload controller', () => {
         (payload.snapshot.scenarios = [
           { id: 'SCN-1', intent: 'INT-1', title: 'Scenario', notions: [null], proves: [] },
         ]),
+    ],
+    [
+      'scenario entries missing canonical source',
+      (payload: TelosPayload) => {
+        addOwnedGraphFixture(payload);
+        const scenario: any = {
+          id: 'SCN-1',
+          intent: 'INT-1',
+          title: 'Scenario',
+          notions: [],
+          proves: [],
+        };
+        payload.snapshot.intents[0].scenarios = [scenario];
+        payload.snapshot.scenarios = [scenario];
+        payload.snapshot.nodes.push({
+          key: { kind: 'scenario', id: 'SCN-1' },
+          label: 'Scenario',
+          parent: { kind: 'capability', id: 'billing/invoicing' },
+        });
+      },
     ],
     [
       'constraint entries',

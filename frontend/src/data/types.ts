@@ -89,6 +89,17 @@ export interface NotionView {
 // --- intents & scenarios --------------------------------------------------
 
 export type IntentStatus = 'draft' | 'active' | 'deprecated';
+export type StatementTemplate =
+  | 'ubiquitous'
+  | 'event-driven'
+  | 'state-driven'
+  | 'unwanted'
+  | 'optional';
+
+export interface StatementView {
+  template: StatementTemplate;
+  canonical: string;
+}
 
 export interface ConstraintRefView {
   id: string;
@@ -101,6 +112,7 @@ export interface ScenarioView {
   id: string;
   intent: string;
   title: string;
+  canonical: string;
   notions: string[];
   proves: string[];
 }
@@ -112,6 +124,7 @@ export interface IntentView {
   status: IntentStatus;
   telos: string;
   canonical: string;
+  statement: StatementView;
   notions: string[];
   constraints: ConstraintRefView[];
   implements: string[];

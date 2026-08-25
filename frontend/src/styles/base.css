@@ -79,6 +79,23 @@ pre {
   outline-offset: 2px;
 }
 
+::selection {
+  color: var(--color-text);
+  background: var(--color-primary-soft);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Minimal placeholder markup. Used directly (raw HTML, no Vue) by the "no
  * data" fallback in src/main.ts, which renders before Vue ever mounts.
  * src/components/EmptyState.vue reuses `.empty-state` as its own root class

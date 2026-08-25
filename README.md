@@ -24,7 +24,15 @@ generates no application code, and requires no hosted service.
 
 ## Why Telos?
 
-Telos turns fleeting AI prompts into a deterministic development contract:
+**Tired of coding agents breaking existing behavior every time you ask for a
+new feature?**
+
+Telos is built on a simple spec-first principle: if your intent, scenarios,
+constraints, and test evidence are detailed enough, a fresh agent—with no chat
+history or hidden project knowledge—should be able to rebuild the software.
+
+The specification is the durable source of truth. The current code is one
+verified implementation of it.
 
 - **Durable intent** versioned with the repository.
 - **Focused context** for developers and coding agents.
@@ -32,9 +40,6 @@ Telos turns fleeting AI prompts into a deterministic development contract:
 - **Test evidence** linked to the same test failing, then passing in strict TDD
   mode.
 - **Drift detection** across specifications and production code.
-
-It gives coding agents bounded context and verifies results without another
-model call.
 
 ## How it works
 

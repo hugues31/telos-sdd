@@ -207,17 +207,44 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
             "telos change open",
             "telos impact",
             "telos pack",
+            "Domain-language review",
+            "While a material ambiguity exists, stage nothing",
+            "Ask exactly one question",
+            "stop immediately",
+            "Domain review",
+            "Perform the final request classification",
+            "telos add",
             "telos change diff",
+            "Show `result.digest`",
             "telos change approve",
+            "Do not answer the native prompt",
         ],
     );
+    assert!(challenger.contains("Language delta"));
+    assert!(challenger.contains("newly introduced domain terms"));
+    assert!(challenger.contains("owning context and capability"));
+    assert!(challenger.contains("actor, entity, value, event, or state"));
+    assert!(challenger.contains("observable business outcome"));
+    assert!(challenger.contains("business trigger"));
+    assert!(challenger.contains("affected invariants"));
+    assert!(challenger.contains("one nominal case"));
+    assert!(challenger.contains("synonyms"));
+    assert!(challenger.contains("overloaded terms"));
+    assert!(challenger.contains("technical terms presented as domain concepts"));
+    assert!(challenger.contains("command, event, state, and entity"));
+    assert!(challenger.contains("at least one relevant edge, negative, or failure case"));
+    assert!(challenger.contains("correct context and capability"));
+    assert!(challenger.contains("the question that reduces uncertainty the most"));
+    assert!(challenger.contains("Remaining material questions: none"));
+    assert!(challenger.contains("repeat the Domain-language review"));
+    assert!(challenger.contains("turn an assumption into a decision"));
+    assert!(challenger.contains("behavioral contract, not an engine-enforced guarantee"));
     assert!(challenger.contains("Never edit application code"));
     assert!(challenger.contains("Never approve a change yourself"));
     assert!(challenger.contains(
         "immediately invoke `telos change approve <CHG-id> --expected-digest <result.digest>`"
     ));
     assert!(challenger.contains("fails closed if it is missing or stale"));
-    assert!(challenger.contains("Do not answer the native prompt"));
     assert!(challenger.contains("ends only after triggering the native approval prompt"));
     assert!(challenger.contains("opens the prompt; it does not grant approval"));
     assert!(challenger.contains("Do not continue until the human answers"));

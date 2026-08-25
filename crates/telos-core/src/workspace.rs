@@ -89,13 +89,7 @@ impl Workspace {
             if actual.exists() && legacy != "constraints-legacy" {
                 return Err(TelosError::new(
                     ErrorCode::TelosLayoutViolation,
-                    format!(
-                        "legacy layout `{}` is not supported by Telos 0.9",
-                        actual
-                            .strip_prefix(&self.repo_root)
-                            .unwrap_or(&actual)
-                            .display()
-                    ),
+                    format!("legacy layout `telos/{legacy}` is not supported by Telos 0.9"),
                 )
                 .hint(
                     "move specifications under telos/contexts/<context>/ and regenerate telos.lock",

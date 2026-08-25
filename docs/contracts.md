@@ -415,8 +415,10 @@ are ids -- `@INT-0042` on the feature, `@SCN-0107` on each scenario -- so a
 runner filters by tag and a binding stays id-based. It is a read command:
 `next_actions` is always `[]`.
 
-It writes nothing and seals nothing. `telos/features/` is not created, and
-`telos.lock` is untouched.
+The *command* writes nothing and seals nothing: it prints. Whether the files
+themselves are written and sealed is a separate question, governed by
+`[gherkin] enabled` — see the `config` section. With generation off,
+`telos/features/` is never created at all.
 
 ```json
 { "features": [ { "path": "telos/features/billing/settlement/INT-0042.feature",
@@ -1075,6 +1077,7 @@ JSON output is the complete typed configuration:
     "tests": {"globs": ["tests/**/*.rs"]},
     "test": {"cmd": "cargo test {filter}"},
     "policy": {"tdd": "strict"},
+    "gherkin": {"enabled": false},
     "agents": {"hosts": ["claude", "codex"]}
   },
   "error": null,
@@ -1088,6 +1091,24 @@ glob are `TELOS_PARSE_ERROR`. `policy.tdd` is exactly `"strict"` or
 `"advisory"`. The normalized, sorted/deduplicated `agents.hosts` must equal
 the current value: `telos config` preserves this `init --agents` project
 metadata and never installs or deletes host artifacts.
+
+`gherkin.enabled` (default `false`) turns on generated Cucumber features.
+When true, `change reconcile` writes one `.feature` per intent under
+`telos/features/<context>/<capability>/<INT-id>.feature` and seals each one
+under `[spec]` in `telos.lock`. Like every other section it is **required** in
+the payload: the write is a wholesale replacement, so a document missing a
+section is not a configuration.
+
+Those files are *derived specification*, the same species as `bindings.tel`:
+reconcile produces them from the model, no staged op names them, and editing
+one by hand is `TELOS_DRIFT_DETECTED` with the usual `adopt` / `revert`
+exits. An intent that is removed or moved has its feature deleted in the same
+reconcile, and setting `enabled` back to `false` removes the whole tree in the
+transaction that does so — so turning generation off can never leave orphaned
+sealed files behind. The directory is fixed rather than configurable: the
+write phase reads the *effective* config so that enabling generation takes
+effect in the reconcile that approves it, and a movable directory would then
+mean pruning one tree while writing another.
 
 The target change must exist and be `open` or `drafted`. The ordinary
 unclaimed-drift and one-file/one-change claim gates run first. Success stages
@@ -1109,6 +1130,7 @@ reconcile's globs, test runner, and TDD policy.
       "tests": {"globs": ["tests/**/*.rs"]},
       "test": {"cmd": "cargo test {filter}"},
       "policy": {"tdd": "advisory"},
+      "gherkin": {"enabled": false},
       "agents": {"hosts": ["claude", "codex"]}
     }
   },

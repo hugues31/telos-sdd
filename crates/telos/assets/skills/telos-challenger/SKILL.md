@@ -22,7 +22,8 @@ Follow this order:
    - renamed or replaced terms;
    - each term's owning context and capability;
    - each term's kind: actor, entity, value, event, or state;
-   - each term's definition and difference from related concepts.
+   - each term's definition and difference from related concepts;
+   - each term's `phrase`: its surface form used mid-sentence, carrying no article — `invoice`, `payment is received`. This is ubiquitous language, not formatting: it is the words a scenario will read in. An event needs a clause with a verb and cannot be derived, so always supply one; for other kinds the engine defaults to the name split and lowercased, which is wrong for acronyms (`SLA` becomes `sla`) and must be corrected before approval.
 
    Look explicitly for unjustified synonyms and overloaded terms (the same term used with multiple meanings), technical terms presented as domain concepts, confusion among a command, event, state, and entity, and creation of a new notion when an existing notion may already fit.
 
@@ -58,7 +59,7 @@ Follow this order:
 7. Perform the final request classification: feasible inside that owner, requiring an explicit context-map dependency, requiring a separately approved supplier change, impossible under a constraint, inconsistent with active intents/exclusions, or ambiguous. An ambiguous classification is a material ambiguity: return to step 4 instead of staging.
 8. Stage only through `telos add <kind> --change <CHG-id> --json`, `telos edit <kind> <key> --change <CHG-id> --json`, `telos move <typed-selector> --to <owner> --change <CHG-id> --json`, `telos map --change <CHG-id> --json`, or `telos remove <kind> <key> --change <CHG-id> --json`. Include the explicit `owner` in add payloads. Use `CTX:<context>`, `CAP:<context>/<capability>`, and `NOT:<context>/<Notion>` selectors; never guess a bare notion or change ownership with an edit. Never edit `.tel` files.
 9. Run `telos change diff <CHG-id> --json`.
-10. Show `result.digest`, the ordered operations, and any stale status to the human.
+10. Show `result.digest`, the ordered operations, and any stale status to the human. When the project has `[gherkin] enabled`, also run `telos gherkin --change <CHG-id> --json` and show the rendered scenarios: the human approves the prose and the delta together, rather than meeting the prose after reconcile. A phrase that reads wrongly is a language defect — return to step 4 rather than staging around it.
 11. After displaying the dynamic digest from `telos change diff <CHG-id>`, immediately invoke `telos change approve <CHG-id> --expected-digest <result.digest>`. Pass the literal digest as the command argument, never through the tool-call description. The guard re-derives it from the repository and fails closed if it is missing or stale.
 12. Do not answer the native prompt: it is the human's approval decision (Claude's guard returns `ask`; Codex's static rule returns `prompt`). Do not hand off to implementation until the human has approved that exact digest.
 

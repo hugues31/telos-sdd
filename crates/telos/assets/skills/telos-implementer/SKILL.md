@@ -10,9 +10,9 @@ Never alter the approved delta and never edit any path under `telos/` manually. 
 Work one scenario at a time in this order:
 
 1. Run `telos pack <intent-id> --json`; record its literal `result.owner` and use only this bounded pack and targeted source/test files. Context-map mappings expose supplier contracts only: do not inspect or modify supplier internals unless a separately approved supplier change owns that work.
-2. Add the smallest test named with its scenario id (`scn_NNNN`) and run `telos test SCN-NNNN --file <test-path> --json`.
+2. Add the smallest test named with its scenario id (`scn_NNNN`) and run `telos test SCN-NNNN --file <test-path> --json`. When the project has `[gherkin] enabled`, that test is the **step definitions** for the generated scenario: read the prose with `telos gherkin --change <CHG-id> --json` and write glue that matches it. Never edit a `.feature` file — it is generated specification, and editing one is `TELOS_DRIFT_DETECTED`.
 3. Require literal `result.witness == "red"`. This records the sealed red witness. A crash, missing test, unrelated failure, or green first run is not a valid red.
-4. Freeze the same test bytes. Do not edit the test after the sealed red, weaken assertions, or replace it with an easier test.
+4. Freeze the same test bytes — the step-definition bytes, under `[gherkin]`. Do not edit the test after the sealed red, weaken assertions, or replace it with an easier test. Red must become green through application code alone; if the only way to green is editing the sealed test, the delta is wrong and returns to the challenger.
 5. Make the minimum application-code change that satisfies the scenario.
 6. Run `telos test SCN-NNNN --file <same-test-path> --json` again and require literal `result.witness == "green"` for the same test bytes.
 7. Run `telos bind <code-path> <INT-id> --json` for each implementation file. Every production path must stay owned by one context. If a split is required, stop so the challenger can stage and obtain approval for that boundary design; never redesign the approved delta during implementation. Repeat from the bounded pack for the next scenario.

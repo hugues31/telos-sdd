@@ -496,13 +496,27 @@ therefore do not invalidate a prior approval. Re-running appends evidence.
 
 ### Display and runner-template execution
 
-The `command` result preserves literal `{filter}` substitution and
-trailing-whitespace trim for stable display bytes. That display is diagnostic,
-not a shell-replay instruction. `[test] cmd` is parsed into one direct process
-argument vector: whitespace separates words, single/double quotes group a
-word, backslash quotes one following non-newline character, and `{filter}` may
-be one whole argument or part of a word such as `module::{filter}`. The filter
-is inserted as uninterpreted argument data and is never evaluated by a shell.
+The `command` result preserves literal `{filter}` and `{features}`
+substitution and trailing-whitespace trim for stable display bytes. That
+display is diagnostic, not a shell-replay instruction. `[test] cmd` is parsed
+into one direct process argument vector: whitespace separates words,
+single/double quotes group a word, backslash quotes one following non-newline
+character, and either placeholder may be one whole argument or part of a word
+such as `module::{filter}` or `{features}/billing/INT-0042.feature`. Both are
+inserted as uninterpreted argument data and are never evaluated by a shell.
+
+`{features}` is a directory of freshly-rendered `.feature` files describing
+the model about to be proved. It is a temporary directory, not
+`telos/features/`, because of *when* a runner starts: reconcile proves a
+change before writing it, so the sealed tree still describes the pre-change
+model while the code under test already describes the post-change one, and a
+brand-new intent's scenario is not on disk at all until its change
+reconciles. The directory exists only for the duration of the run.
+
+With `[gherkin]` off — the default — `{features}` substitutes to nothing and
+its token drops from the argument vector entirely, exactly as an empty
+`{filter}` does. A project that does not generate features sees no change to
+its runner command.
 
 The template fails closed with `TELOS_PARSE_ERROR` if it contains shell
 operators, command/backtick or arithmetic substitution, unmatched quotes,

@@ -2271,6 +2271,10 @@ fn rebinding_a_pair_the_sealed_file_already_holds_leaves_it_unchanged() {
 /// requires, and `fresh()` seals an empty billing domain with empty globs and
 /// no runner -- so those are the base values reproduced here.
 fn approved_change_enabling_gherkin() -> tempfile::TempDir {
+    approved_change_with_gherkin(true, "")
+}
+
+fn approved_change_with_gherkin(enabled: bool, cmd: &str) -> tempfile::TempDir {
     let tmp = fresh();
     open_change(tmp.path());
     stage(
@@ -2294,9 +2298,9 @@ fn approved_change_enabling_gherkin() -> tempfile::TempDir {
         &json!({
             "code": {"globs": []},
             "tests": {"globs": []},
-            "test": {"cmd": ""},
+            "test": {"cmd": cmd},
             "policy": {"tdd": "strict"},
-            "gherkin": {"enabled": true},
+            "gherkin": {"enabled": enabled},
             "agents": {"hosts": []}
         })
         .to_string(),
@@ -2423,5 +2427,63 @@ fn disabling_generation_removes_the_whole_tree() {
     assert!(
         !lock.contains("telos/features/"),
         "no feature may remain sealed after disabling: {lock}"
+    );
+}
+
+// --- {features} reaches the runner ---------------------------------------
+
+/// A runner that succeeds only if it was handed a features directory holding
+/// the *staged* scenario. Its exit status is the assertion, so the red/green
+/// witness the envelope already carries is the whole signal.
+const GREP_STAGED: &str =
+    "grep -q \"the invoice with state open\" {features}/billing/settlement/INT-0001.feature";
+
+/// A file for `--file` to point at, so `telos test` skips discovery.
+fn write_proof_file(dir: &Path) -> &'static str {
+    fs::create_dir_all(dir.join("tests")).unwrap();
+    fs::write(dir.join("tests/scn.rs"), "fn scn_0001() {}\n").unwrap();
+    "tests/scn.rs"
+}
+
+#[test]
+fn the_runner_is_handed_features_that_are_not_on_disk_yet() {
+    let tmp = approved_change_with_gherkin(true, GREP_STAGED);
+    let proof = write_proof_file(tmp.path());
+
+    // The change has not reconciled, so INT-0001 has no `.feature` anywhere
+    // on disk -- it exists only inside CHG-0001.
+    assert!(!tmp.path().join("telos/features").exists());
+
+    let out = telos(tmp.path(), &["test", "SCN-0001", "--file", proof, "--json"])
+        .output()
+        .unwrap();
+    let envelope = json_stdout(&out);
+    assert_eq!(
+        envelope["result"]["witness"],
+        json!("green"),
+        "the runner must be handed the staged render: {envelope}"
+    );
+}
+
+#[test]
+fn the_features_token_is_inert_when_generation_is_off() {
+    let tmp = approved_change_with_gherkin(false, GREP_STAGED);
+    let proof = write_proof_file(tmp.path());
+
+    let out = telos(tmp.path(), &["test", "SCN-0001", "--file", proof, "--json"])
+        .output()
+        .unwrap();
+    let envelope = json_stdout(&out);
+    assert_eq!(
+        envelope["result"]["witness"],
+        json!("red"),
+        "with generation off there is no directory to grep: {envelope}"
+    );
+    assert!(
+        !envelope["result"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("{features}"),
+        "the displayed command must not still show the placeholder: {envelope}"
     );
 }

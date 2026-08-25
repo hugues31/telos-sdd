@@ -2,13 +2,15 @@
 import { computed } from 'vue';
 
 import { snapshot } from '../data/snapshot';
+import { formatLocalDate } from '../format/date';
 
 const meta = computed(() => snapshot.value.meta);
+const buildDate = computed(() => formatLocalDate(meta.value.build_date));
 </script>
 
 <template>
   <footer class="app-footer">
-    <div class="app-footer__inner">telos {{ meta.version }} · built {{ meta.build_date }}</div>
+    <div class="app-footer__inner">telos {{ meta.version }} · built {{ buildDate }}</div>
   </footer>
 </template>
 

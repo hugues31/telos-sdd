@@ -9,6 +9,24 @@ permissions:
   contents: read
 
 jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install git-cliff and smoke-test the configuration
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4
+        with:
+          version: "v2.13.1"
+          config: .github/cliff.toml
+          args: --latest --strip header
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          OUTPUT: ${{ runner.temp }}/release-notes.md
+      - name: Test conventional release notes
+        run: .github/scripts/test-release-notes.sh "$RUNNER_TEMP/git-cliff/bin/git-cliff"
+
   frontend:
     runs-on: ubuntu-latest
     steps:

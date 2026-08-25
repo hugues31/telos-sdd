@@ -1,6 +1,13 @@
 import { reactive } from 'vue';
 
-import { GRAPH_RELATIONS, type TelosMode, type TelosPayload } from './types';
+import {
+  GRAPH_RELATIONS,
+  type GraphKey,
+  type GraphNodeView,
+  type TelosMode,
+  type TelosPayload,
+  type ViewSnapshot,
+} from './types';
 
 export interface LiveStatus {
   generation: number;
@@ -149,6 +156,7 @@ function isNotion(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value.name === 'string' &&
+    typeof value.owner === 'string' &&
     isOneOf(value.kind, ['actor', 'entity', 'value', 'event', 'state']) &&
     typeof value.definition === 'string' &&
     typeof value.canonical === 'string'
@@ -176,10 +184,47 @@ function isScenario(value: unknown): boolean {
   );
 }
 
+function isContext(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const health = value.health;
+  return (
+    typeof value.id === 'string' &&
+    isOneOf(value.kind, ['core', 'supporting', 'generic']) &&
+    typeof value.title === 'string' &&
+    typeof value.definition === 'string' &&
+    isArrayOf(
+      value.capabilities,
+      (capability) =>
+        isRecord(capability) &&
+        typeof capability.id === 'string' &&
+        typeof capability.title === 'string' &&
+        typeof capability.definition === 'string',
+    ) &&
+    isArrayOf(
+      value.dependencies,
+      (dependency) =>
+        isRecord(dependency) &&
+        typeof dependency.supplier === 'string' &&
+        isArrayOf(
+          dependency.mappings,
+          (mapping) =>
+            isRecord(mapping) &&
+            typeof mapping.from === 'string' &&
+            typeof mapping.to === 'string',
+        ),
+    ) &&
+    isRecord(health) &&
+    [health.intents, health.active_intents, health.scenarios, health.proved_scenarios].every(
+      isCount,
+    )
+  );
+}
+
 function isIntent(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
+    typeof value.owner === 'string' &&
     typeof value.title === 'string' &&
     isOneOf(value.status, ['draft', 'active', 'deprecated']) &&
     typeof value.telos === 'string' &&
@@ -195,6 +240,7 @@ function isConstraint(value: unknown): boolean {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
+    typeof value.owner === 'string' &&
     isOneOf(value.kind, ['stack', 'architecture', 'quality', 'security', 'convention']) &&
     typeof value.title === 'string' &&
     typeof value.scope === 'string' &&
@@ -210,16 +256,146 @@ function isProof(value: unknown): boolean {
   return isRecord(value) && typeof value.test === 'string' && typeof value.scenario === 'string';
 }
 
-function isGraphKey(value: unknown): boolean {
+function isGraphKey(value: unknown): value is GraphKey {
   return (
     isRecord(value) &&
-    isOneOf(value.kind, ['notion', 'intent', 'scenario', 'constraint', 'code', 'test']) &&
+    isOneOf(value.kind, [
+      'context',
+      'capability',
+      'notion',
+      'intent',
+      'scenario',
+      'constraint',
+      'code',
+      'test',
+    ]) &&
     typeof value.id === 'string'
   );
 }
 
-function isGraphNode(value: unknown): boolean {
-  return isRecord(value) && isGraphKey(value.key) && typeof value.label === 'string';
+function isGraphNode(value: unknown): value is GraphNodeView {
+  if (!isRecord(value) || typeof value.label !== 'string') return false;
+
+  const key = value.key;
+  if (!isGraphKey(key)) return false;
+
+  const parent = value.parent;
+  const hasContainerParent =
+    isGraphKey(parent) && (parent.kind === 'context' || parent.kind === 'capability');
+  switch (key.kind) {
+    case 'context':
+    case 'code':
+    case 'test':
+      return parent === null;
+    case 'capability':
+      return isGraphKey(parent) && parent.kind === 'context';
+    case 'notion':
+    case 'intent':
+    case 'scenario':
+      return hasContainerParent;
+    case 'constraint':
+      return parent === null || hasContainerParent;
+  }
+
+  return false;
+}
+
+function graphKeyId(value: GraphKey): string {
+  return `${value.kind}:${value.id}`;
+}
+
+function graphParentsExist(nodes: GraphNodeView[]): boolean {
+  const ids = new Set(nodes.map((node) => graphKeyId(node.key)));
+
+  return nodes.every((node) => node.parent === null || ids.has(graphKeyId(node.parent)));
+}
+
+function sameGraphKey(left: GraphKey | null, right: GraphKey | null): boolean {
+  return left === null
+    ? right === null
+    : right !== null && left.kind === right.kind && left.id === right.id;
+}
+
+function graphHierarchyMatchesSnapshot(snapshot: ViewSnapshot): boolean {
+  const expectedParents = new Map<string, GraphKey | null>();
+  const ownerKeys = new Map<string, GraphKey>();
+
+  function addExpected(key: GraphKey, parent: GraphKey | null): boolean {
+    const id = graphKeyId(key);
+    if (expectedParents.has(id)) return false;
+    expectedParents.set(id, parent);
+    return true;
+  }
+
+  for (const context of snapshot.contexts) {
+    const contextKey: GraphKey = { kind: 'context', id: context.id };
+    if (!addExpected(contextKey, null) || ownerKeys.has(context.id)) return false;
+    ownerKeys.set(context.id, contextKey);
+  }
+  for (const context of snapshot.contexts) {
+    const contextKey = ownerKeys.get(context.id);
+    if (!contextKey) return false;
+    for (const capability of context.capabilities) {
+      const capabilityKey: GraphKey = { kind: 'capability', id: capability.id };
+      if (!addExpected(capabilityKey, contextKey) || ownerKeys.has(capability.id)) return false;
+      ownerKeys.set(capability.id, capabilityKey);
+    }
+  }
+
+  function parentForOwner(owner: string): GraphKey | null | undefined {
+    if (owner === 'project') return null;
+    return ownerKeys.get(owner);
+  }
+
+  for (const notion of snapshot.notions) {
+    const parent = parentForOwner(notion.owner);
+    if (parent === undefined || !addExpected({ kind: 'notion', id: notion.name }, parent)) {
+      return false;
+    }
+  }
+
+  const intentOwner = new Map<string, GraphKey>();
+  for (const intent of snapshot.intents) {
+    const parent = parentForOwner(intent.owner);
+    if (
+      parent === undefined ||
+      parent === null ||
+      intentOwner.has(intent.id) ||
+      !addExpected({ kind: 'intent', id: intent.id }, parent)
+    ) {
+      return false;
+    }
+    intentOwner.set(intent.id, parent);
+  }
+
+  for (const scenario of snapshot.scenarios) {
+    const parent = intentOwner.get(scenario.intent);
+    if (!parent || !addExpected({ kind: 'scenario', id: scenario.id }, parent)) return false;
+  }
+
+  for (const constraint of snapshot.constraints) {
+    const parent = parentForOwner(constraint.owner);
+    if (parent === undefined || !addExpected({ kind: 'constraint', id: constraint.id }, parent)) {
+      return false;
+    }
+  }
+
+  const seen = new Set<string>();
+  for (const node of snapshot.nodes) {
+    const id = graphKeyId(node.key);
+    if (seen.has(id)) return false;
+    seen.add(id);
+
+    if (node.key.kind === 'code' || node.key.kind === 'test') {
+      if (node.parent !== null) return false;
+      continue;
+    }
+
+    if (!expectedParents.has(id)) return false;
+    if (!sameGraphKey(node.parent, expectedParents.get(id) ?? null)) return false;
+  }
+
+  return [...expectedParents.keys()].every((id) => seen.has(id));
 }
 
 function isGraphEdge(value: unknown): boolean {
@@ -246,6 +422,7 @@ function isTelosPayload(value: unknown): value is TelosPayload {
   return (
     isDashboard(snapshot.dashboard) &&
     isCoverage(snapshot.coverage) &&
+    isArrayOf(snapshot.contexts, isContext) &&
     isArrayOf(snapshot.notions, isNotion) &&
     isArrayOf(snapshot.intents, isIntent) &&
     isArrayOf(snapshot.scenarios, isScenario) &&
@@ -253,6 +430,8 @@ function isTelosPayload(value: unknown): value is TelosPayload {
     isArrayOf(snapshot.implementations, isImplementation) &&
     isArrayOf(snapshot.proofs, isProof) &&
     isArrayOf(snapshot.nodes, isGraphNode) &&
+    graphParentsExist(snapshot.nodes as GraphNodeView[]) &&
+    graphHierarchyMatchesSnapshot(snapshot as unknown as ViewSnapshot) &&
     isArrayOf(snapshot.edges, isGraphEdge)
   );
 }

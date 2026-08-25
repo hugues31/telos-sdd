@@ -30,10 +30,12 @@ use crate::model::TelosModel;
 use crate::repo_fs::RepoFs;
 use crate::workspace::Workspace;
 
+pub const LOCK_VERSION: u32 = 2;
+
 /// A parsed or in-memory `telos.lock`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lock {
-    /// Lock file format version -- `1`.
+    /// Lock file format version -- `2`.
     pub version: u32,
     /// The tool that produced this lock, e.g. `"telos 0.7.0"`.
     pub tool: String,
@@ -71,6 +73,18 @@ impl Lock {
                 format!("{}: {e}", path.display()),
             )
         })?;
+        if raw.version != LOCK_VERSION {
+            return Err(TelosError::new(
+                ErrorCode::TelosParseError,
+                format!(
+                    "{}: unsupported lock format version {}; expected {}",
+                    path.display(),
+                    raw.version,
+                    LOCK_VERSION
+                ),
+            )
+            .hint("run `telos reconcile --full` with Telos 0.9 to regenerate telos.lock"));
+        }
 
         let sealed_by = raw
             .sealed_by
@@ -215,7 +229,7 @@ pub fn seal(
     let spec_digest = Lock::compute_digest(&spec);
 
     Ok(Lock {
-        version: 1,
+        version: LOCK_VERSION,
         tool: format!("telos {}", crate::VERSION),
         sealed_by,
         spec_digest,
@@ -295,6 +309,31 @@ mod tests {
         assert_eq!(
             digest,
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn read_rejects_the_v1_lock_format_with_an_actionable_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("telos.lock");
+        std::fs::write(
+            &path,
+            concat!(
+                "version = 1\n",
+                "tool = \"telos 0.9.0\"\n",
+                "spec_digest = \"sha256:old\"\n",
+                "\n[spec]\n",
+                "\n[code]\n",
+            ),
+        )
+        .unwrap();
+
+        let error = Lock::read(&path).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TelosParseError);
+        assert!(error.message.contains("lock format version 1"));
+        assert_eq!(
+            error.hint.as_deref(),
+            Some("run `telos reconcile --full` with Telos 0.9 to regenerate telos.lock")
         );
     }
 

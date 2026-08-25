@@ -223,7 +223,9 @@ fn export_writes_the_embedded_spa_and_sealed_billing_payload() {
 #[test]
 fn export_refuses_drift_before_creating_the_destination() {
     let tmp = with_fixture();
-    let intent = tmp.path().join("telos/intents/INT-0042.tel");
+    let intent = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
     fs::write(
         &intent,
         format!("{}\n", fs::read_to_string(&intent).unwrap()),

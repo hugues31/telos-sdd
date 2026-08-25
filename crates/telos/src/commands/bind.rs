@@ -35,7 +35,7 @@
 //!   `require_unclaimed`.
 //! - **A path under `telos/` is refused with the grammar's own wording.**
 //!   `parse_change_file` would reject a hand-written `bind` line naming one
-//!   anyway (`code_path_outside_the_spec_tree`) -- `telos/bindings.tel`
+//!   anyway (`code_path_outside_the_spec_tree`) -- a context `bindings.tel`
 //!   above all, since every reconcile rewrites it wholesale and journal
 //!   paths count as change claims. Answering
 //!   with the identical message here, before anything is written, means a
@@ -127,17 +127,24 @@ fn known_intents(project: &Project) -> Result<BTreeSet<IntentId>, TelosError> {
 
     let mut known: BTreeSet<IntentId> = BTreeSet::new();
     for (_, file) in &base {
-        if let TelFile::Intent(intent) = file {
-            known.insert(intent.id);
+        match file {
+            TelFile::OwnedIntent { intent, .. } | TelFile::Intent(intent) => {
+                known.insert(intent.id);
+            }
+            _ => {}
         }
     }
     for change in &project.parsed {
         for op in &change.ops {
             match op {
-                StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => {
+                StagedOp::AddOwnedIntent { intent: i, .. }
+                | StagedOp::EditOwnedIntent { intent: i, .. }
+                | StagedOp::MoveIntent { intent: i, .. }
+                | StagedOp::AddIntent(i)
+                | StagedOp::EditIntent(i) => {
                     known.insert(i.id);
                 }
-                StagedOp::RemoveIntent(id) => {
+                StagedOp::RemoveOwnedIntent { id, .. } | StagedOp::RemoveIntent(id) => {
                     known.remove(id);
                 }
                 _ => {}
@@ -181,7 +188,11 @@ fn parse_repo_path(arg: &str) -> Result<RepoPath, TelosError> {
 fn owner_of(changes: &[Change], intent: IntentId) -> Option<&Change> {
     changes.iter().find(|change| {
         change.ops.iter().any(|op| match op {
-            StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => i.id == intent,
+            StagedOp::AddOwnedIntent { intent: i, .. }
+            | StagedOp::EditOwnedIntent { intent: i, .. }
+            | StagedOp::MoveIntent { intent: i, .. }
+            | StagedOp::AddIntent(i)
+            | StagedOp::EditIntent(i) => i.id == intent,
             _ => false,
         })
     })

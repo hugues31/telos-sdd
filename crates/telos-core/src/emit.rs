@@ -25,11 +25,12 @@
 //! (the empty bindings file excepted -- an empty file is zero bytes).
 //! Nothing here touches the filesystem: callers decide where bytes go.
 
-use crate::ids::{FieldName, IntentId, ScenarioId};
+use crate::ids::{FieldName, IntentId, Owner, ScenarioId};
 use crate::model::{
-    Action, Attr, AttrRef, AttrType, Binding, Change, CmpOp, Constraint, ConstraintKind, Expr,
-    InstanceStep, Intent, IntentStatus, JournalEntry, Literal, Notion, NotionKind, Operand, Rel,
-    Rule, Scenario, Scope, StagedOp, Statement, TelFile,
+    Action, Attr, AttrRef, AttrType, Binding, Capability, Change, CmpOp, Constraint,
+    ConstraintKind, Context, ContextKind, ContextMap, Expr, InstanceStep, Intent, IntentStatus,
+    JournalEntry, Literal, Notion, NotionKind, Operand, Rel, Rule, Scenario, Scope, StagedOp,
+    Statement, TelFile,
 };
 use crate::{
     config::Config,
@@ -91,10 +92,70 @@ mod width {
 /// Emits one parsed file in canonical form.
 pub fn emit_file(f: &TelFile) -> String {
     match f {
+        TelFile::Context(context) => emit_context(context),
+        TelFile::Capability(capability) => emit_capability(capability),
+        TelFile::OwnedNotion { owner, notion } => emit_owned_notion(owner, notion),
+        TelFile::OwnedIntent { owner, intent } => emit_owned_intent(owner, intent),
+        TelFile::OwnedConstraint { owner, constraint } => {
+            emit_owned_constraint(owner.as_ref(), constraint)
+        }
+        TelFile::ContextBindings { bindings, .. } => emit_bindings(bindings),
+        TelFile::ContextMap(map) => emit_context_map(map),
         TelFile::Notion(n) => emit_notion(n),
         TelFile::Intent(i) => emit_intent(i),
         TelFile::Constraint(c) => emit_constraint(c),
         TelFile::Bindings(b) => emit_bindings(b),
+    }
+}
+
+// --- strategic domain ---------------------------------------------------
+
+pub fn emit_context(context: &Context) -> String {
+    format!(
+        "context {} {} {} {{\n  def {}\n}}\n",
+        context.id,
+        context_kind(context.kind),
+        quote(&context.title),
+        quote(&context.def)
+    )
+}
+
+pub fn emit_capability(capability: &Capability) -> String {
+    format!(
+        "capability {} {} {{\n  def {}\n}}\n",
+        capability.id,
+        quote(&capability.title),
+        quote(&capability.def)
+    )
+}
+
+pub fn emit_context_map(map: &ContextMap) -> String {
+    let mut dependencies: Vec<_> = map.dependencies.iter().collect();
+    dependencies.sort_by(|a, b| (&a.consumer, &a.supplier).cmp(&(&b.consumer, &b.supplier)));
+    let mut out = String::from("context-map {\n");
+    for dependency in dependencies {
+        w!(
+            out,
+            "  dependency {} on {} {{\n",
+            dependency.consumer,
+            dependency.supplier
+        );
+        let mut mappings: Vec<_> = dependency.mappings.iter().collect();
+        mappings.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+        for mapping in mappings {
+            w!(out, "    map {} -> {}\n", mapping.from, mapping.to);
+        }
+        out.push_str("  }\n");
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn context_kind(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Core => "core",
+        ContextKind::Supporting => "supporting",
+        ContextKind::Generic => "generic",
     }
 }
 
@@ -129,6 +190,14 @@ pub fn emit_notion(n: &Notion) -> String {
 
     out.push_str("}\n");
     out
+}
+
+pub fn emit_owned_notion(owner: &Owner, notion: &Notion) -> String {
+    emit_notion(notion).replacen(
+        &format!("notion {} ", notion.name),
+        &format!("notion {owner}/{} ", notion.name),
+        1,
+    )
 }
 
 fn notion_kind(k: NotionKind) -> &'static str {
@@ -190,6 +259,14 @@ pub fn emit_intent(i: &Intent) -> String {
 
     out.push_str("}\n");
     out
+}
+
+pub fn emit_owned_intent(owner: &Owner, intent: &Intent) -> String {
+    emit_intent(intent).replacen(
+        &format!("intent {} ", intent.id),
+        &format!("intent {} in {owner} ", intent.id),
+        1,
+    )
 }
 
 fn intent_status(s: IntentStatus) -> &'static str {
@@ -354,6 +431,34 @@ pub fn emit_constraint(c: &Constraint) -> String {
     out
 }
 
+pub fn emit_owned_constraint(owner: Option<&Owner>, constraint: &Constraint) -> String {
+    let scope = match owner {
+        None => "project".to_string(),
+        Some(owner) if owner.capability.is_some() => format!("capability {owner}"),
+        Some(owner) => format!("context {owner}"),
+    };
+    let mut out = String::new();
+    w!(
+        out,
+        "constraint {} in {} {} {} {{\n",
+        constraint.id,
+        scope,
+        constraint_kind(constraint.kind),
+        quote(&constraint.title)
+    );
+    keyword(&mut out, 1, "rule", width::CONSTRAINT);
+    match &constraint.rule {
+        Rule::Text(text) => w!(out, "{}\n", quote(text)),
+        Rule::Machine(expr) => w!(out, "{}\n", emit_expr(expr)),
+    }
+    if let Some(check) = &constraint.check {
+        keyword(&mut out, 1, "check", width::CONSTRAINT);
+        w!(out, "{}\n", quote(check));
+    }
+    out.push_str("}\n");
+    out
+}
+
 fn constraint_kind(k: ConstraintKind) -> &'static str {
     match k {
         ConstraintKind::Stack => "stack",
@@ -466,6 +571,72 @@ pub fn emit_change(c: &Change) -> String {
 /// `remove` and `accept` have no entity block and are one line each.
 pub fn emit_op(op: &StagedOp) -> String {
     match op {
+        StagedOp::AddContext(context) => format!("op add {}", emit_context(context)),
+        StagedOp::EditContext(context) => format!("op edit {}", emit_context(context)),
+        StagedOp::RemoveContext(id) => format!("op remove context {id}\n"),
+        StagedOp::AddCapability(capability) => {
+            format!("op add {}", emit_capability(capability))
+        }
+        StagedOp::EditCapability(capability) => {
+            format!("op edit {}", emit_capability(capability))
+        }
+        StagedOp::RemoveCapability(id) => format!("op remove capability {id}\n"),
+        StagedOp::AddOwnedNotion { owner, notion } => {
+            format!("op add {}", emit_owned_notion(owner, notion))
+        }
+        StagedOp::EditOwnedNotion { owner, notion } => {
+            format!("op edit {}", emit_owned_notion(owner, notion))
+        }
+        StagedOp::RemoveOwnedNotion { owner, name } => {
+            format!("op remove notion {owner}/{name}\n")
+        }
+        StagedOp::AddOwnedIntent { owner, intent } => {
+            format!("op add {}", emit_owned_intent(owner, intent))
+        }
+        StagedOp::EditOwnedIntent { owner, intent } => {
+            format!("op edit {}", emit_owned_intent(owner, intent))
+        }
+        StagedOp::RemoveOwnedIntent { owner, id } => {
+            format!("op remove intent {id} from {owner}\n")
+        }
+        StagedOp::AddOwnedConstraint { owner, constraint } => format!(
+            "op add {}",
+            emit_owned_constraint(owner.as_ref(), constraint)
+        ),
+        StagedOp::EditOwnedConstraint { owner, constraint } => format!(
+            "op edit {}",
+            emit_owned_constraint(owner.as_ref(), constraint)
+        ),
+        StagedOp::RemoveOwnedConstraint { owner, id } => format!(
+            "op remove constraint {id} from {}\n",
+            owner
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "project".to_string())
+        ),
+        StagedOp::EditContextMap(map) => format!("op edit {}", emit_context_map(map)),
+        StagedOp::MoveNotion { from, to, notion } => format!(
+            "op move from {from} to {to} {}",
+            emit_owned_notion(to, notion)
+        ),
+        StagedOp::MoveIntent { from, to, intent } => format!(
+            "op move from {from} to {to} {}",
+            emit_owned_intent(to, intent)
+        ),
+        StagedOp::MoveConstraint {
+            from,
+            to,
+            constraint,
+        } => format!(
+            "op move from {} to {} {}",
+            from.as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "project".to_string()),
+            to.as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "project".to_string()),
+            emit_owned_constraint(to.as_ref(), constraint)
+        ),
         StagedOp::AddNotion(n) => format!("op add {}", emit_notion(n)),
         StagedOp::EditNotion(n) => format!("op edit {}", emit_notion(n)),
         StagedOp::RemoveNotion(name) => format!("op remove notion {name}\n"),
@@ -733,7 +904,8 @@ fn quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{ConstraintId, NotionName, RepoPath};
+    use crate::ids::{CapabilityRef, ConstraintId, ContextId, NotionName, Owner, RepoPath};
+    use crate::model::{ContextDependency, NotionMapping};
     use crate::span::{Sp, Span};
 
     fn notion() -> Notion {
@@ -797,6 +969,68 @@ mod tests {
         assert_eq!(
             emit_file(&TelFile::Bindings(bindings.clone())),
             emit_bindings(&bindings)
+        );
+    }
+
+    #[test]
+    fn emits_canonical_domain_headers_and_context_map() {
+        let pet = Context {
+            id: ContextId::new("pet").unwrap(),
+            kind: ContextKind::Core,
+            title: "Pet".to_string(),
+            def: "Virtual pet rules.".to_string(),
+        };
+        assert_eq!(
+            emit_context(&pet),
+            "context pet core \"Pet\" {\n  def \"Virtual pet rules.\"\n}\n"
+        );
+
+        let care = Capability {
+            id: "pet/care".parse::<CapabilityRef>().unwrap(),
+            title: "Care".to_string(),
+            def: "Care for a pet.".to_string(),
+        };
+        assert_eq!(
+            emit_capability(&care),
+            "capability pet/care \"Care\" {\n  def \"Care for a pet.\"\n}\n"
+        );
+
+        let owner = Owner::capability("pet/care".parse().unwrap());
+        assert!(
+            emit_owned_intent(&owner, &intent())
+                .starts_with("intent INT-0042 in pet/care \"Invoices settle\" {\n")
+        );
+        assert_eq!(
+            emit_owned_constraint(
+                Some(&Owner::context(ContextId::new("pet").unwrap())),
+                &constraint()
+            ),
+            concat!(
+                "constraint CON-0003 in context pet architecture \"Hexagonal boundaries\" {\n",
+                "  rule  \"No adapter imports.\"\n",
+                "}\n",
+            )
+        );
+
+        let map = ContextMap {
+            dependencies: vec![ContextDependency {
+                consumer: ContextId::new("terminal").unwrap(),
+                supplier: ContextId::new("pet").unwrap(),
+                mappings: vec![NotionMapping {
+                    from: "pet/Pet".parse().unwrap(),
+                    to: "terminal/PetView".parse().unwrap(),
+                }],
+            }],
+        };
+        assert_eq!(
+            emit_context_map(&map),
+            concat!(
+                "context-map {\n",
+                "  dependency terminal on pet {\n",
+                "    map pet/Pet -> terminal/PetView\n",
+                "  }\n",
+                "}\n",
+            )
         );
     }
 
@@ -1076,9 +1310,9 @@ mod tests {
                 order,
                 vec![
                     "  op accept \"telos/telos.toml\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"",
-                    "  op remove constraint CON-0003",
-                    "  op edit intent INT-0017 \"Issuing an invoice opens it\" {",
-                    "  op add notion Invoice entity {",
+                    "  op remove constraint CON-0003 from billing",
+                    "  op edit intent INT-0017 in billing/invoicing \"Issuing an invoice opens it\" {",
+                    "  op add notion billing/Invoice entity {",
                 ]
             );
         }

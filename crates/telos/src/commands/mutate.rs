@@ -44,13 +44,16 @@ use serde_json::{Value, json};
 use telos_core::changes::{read_change, write_change};
 use telos_core::counters::{Alloc, write_counters};
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::ids::{ChangeId, ConstraintId, IntentId, NotionName, RepoPath, ScenarioId};
+use telos_core::ids::{
+    CapabilityId, CapabilityRef, ChangeId, ConstraintId, ContextId, EntityRef, IntentId, NotionRef,
+    Owner, RepoPath, ScenarioId,
+};
 use telos_core::model::{
-    Change, ChangeStatus, Constraint, Intent, Notion, StagedOp, TelFile, constraint_path,
-    intent_path, notion_path,
+    Capability, Change, ChangeStatus, Constraint, Context, ContextKind, Intent, Notion, StagedOp,
+    TelFile,
 };
 use telos_core::overlay::{
-    apply_ops, apply_ops_idempotent, find_file, notions_of, parse_base, unknown_entity,
+    apply_ops, apply_ops_idempotent, notions_of, parse_base, unknown_entity,
     validate_ops_idempotent,
 };
 use telos_core::payload::{
@@ -69,6 +72,8 @@ use crate::envelope::{CmdResult, Outcome};
 /// [`StagedOp::entity`] reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum EntityKind {
+    Context,
+    Capability,
     Notion,
     Intent,
     Constraint,
@@ -85,19 +90,43 @@ pub fn add(ctx: &Ctx, kind: EntityKind, change: &str, payload: &str) -> CmdResul
     let payload = payload_json(payload)?;
 
     let (op, scenario_ids) = match kind {
-        EntityKind::Notion => (StagedOp::AddNotion(notion_from_json(&payload)?), Vec::new()),
-        EntityKind::Intent => {
-            let notions = notions_of(&staging.base);
-            let (intent, ids) = intent_from_json(&payload, &notions, staging.alloc()?)?;
-            (StagedOp::AddIntent(intent), ids)
-        }
-        EntityKind::Constraint => (
-            StagedOp::AddConstraint(constraint_from_json(&payload, staging.alloc()?)?),
+        EntityKind::Context => (
+            StagedOp::AddContext(context_from_json(&payload)?),
             Vec::new(),
         ),
+        EntityKind::Capability => (
+            StagedOp::AddCapability(capability_from_json(&payload)?),
+            Vec::new(),
+        ),
+        EntityKind::Notion => {
+            let (owner, entity_payload) = owned_payload(&payload, false)?;
+            (
+                StagedOp::AddOwnedNotion {
+                    owner,
+                    notion: notion_from_json(&entity_payload)?,
+                },
+                Vec::new(),
+            )
+        }
+        EntityKind::Intent => {
+            let (owner, entity_payload) = owned_payload(&payload, true)?;
+            let notions = notions_of(&staging.base);
+            let (intent, ids) = intent_from_json(&entity_payload, &notions, staging.alloc()?)?;
+            (StagedOp::AddOwnedIntent { owner, intent }, ids)
+        }
+        EntityKind::Constraint => {
+            let (owner, entity_payload) = constraint_payload(&payload)?;
+            (
+                StagedOp::AddOwnedConstraint {
+                    owner,
+                    constraint: constraint_from_json(&entity_payload, staging.alloc()?)?,
+                },
+                Vec::new(),
+            )
+        }
     };
 
-    staging.finish(op, Some(scenario_ids))
+    staging.finish(op, Some(scenario_ids), true)
 }
 
 /// `telos edit <kind> <key> --change CHG-NNNN`, payload on stdin.
@@ -109,33 +138,73 @@ pub fn edit(ctx: &Ctx, kind: EntityKind, key: &str, change: &str, payload: &str)
     let payload = payload_json(payload)?;
 
     let (op, scenario_ids) = match kind {
-        EntityKind::Notion => {
-            let name = parse_notion_name(key)?;
-            let base = staging.notion(&name)?.clone();
-            let patched = patch_notion(&base, &payload)?;
-            if patched.name != name {
-                return Err(rename_refused("notion", key, patched.name.as_str()));
+        EntityKind::Context => {
+            let id = ContextId::new(key)?;
+            let context = context_from_json(&payload)?;
+            if context.id != id {
+                return Err(rename_refused("context", key, context.id.as_str()));
             }
-            (StagedOp::EditNotion(patched), Vec::new())
+            staging.context(&id)?;
+            (StagedOp::EditContext(context), Vec::new())
+        }
+        EntityKind::Capability => {
+            let id: CapabilityRef = key.parse()?;
+            let capability = capability_from_json(&payload)?;
+            if capability.id != id {
+                return Err(rename_refused(
+                    "capability",
+                    key,
+                    &capability.id.to_string(),
+                ));
+            }
+            staging.capability(&id)?;
+            (StagedOp::EditCapability(capability), Vec::new())
+        }
+        EntityKind::Notion => {
+            let reference = parse_notion_ref(key)?;
+            let (owner, base) = staging.notion(&reference)?;
+            let (_, entity_payload) = optional_owned_payload(&payload, owner.clone())?;
+            let patched = patch_notion(base, &entity_payload)?;
+            if patched.name != reference.notion {
+                return Err(rename_refused(
+                    "notion",
+                    &reference.to_string(),
+                    patched.name.as_str(),
+                ));
+            }
+            (
+                StagedOp::EditOwnedNotion {
+                    owner: owner.clone(),
+                    notion: patched,
+                },
+                Vec::new(),
+            )
         }
         EntityKind::Intent => {
             let id = parse_id::<IntentId>(key, "an intent id")?;
-            let base = staging.intent(id)?.clone();
+            let (owner, base) = staging.intent(id)?;
+            let (_, entity_payload) = optional_owned_payload(&payload, owner.clone())?;
             let notions = notions_of(&staging.base);
-            let (intent, ids) = patch_intent(&base, &payload, &notions, staging.alloc()?)?;
-            (StagedOp::EditIntent(intent), ids)
+            let base = base.clone();
+            let owner = owner.clone();
+            let (intent, ids) = patch_intent(&base, &entity_payload, &notions, staging.alloc()?)?;
+            (StagedOp::EditOwnedIntent { owner, intent }, ids)
         }
         EntityKind::Constraint => {
             let id = parse_id::<ConstraintId>(key, "a constraint id")?;
-            let base = staging.constraint(id)?.clone();
+            let (owner, base) = staging.constraint(id)?;
+            let (_, entity_payload) = optional_constraint_payload(&payload, owner.clone())?;
             (
-                StagedOp::EditConstraint(patch_constraint(&base, &payload)?),
+                StagedOp::EditOwnedConstraint {
+                    owner: owner.clone(),
+                    constraint: patch_constraint(base, &entity_payload)?,
+                },
                 Vec::new(),
             )
         }
     };
 
-    staging.finish(op, Some(scenario_ids))
+    staging.finish(op, Some(scenario_ids), true)
 }
 
 /// `telos remove <kind> <key> --change CHG-NNNN`. No payload.
@@ -148,14 +217,112 @@ pub fn remove(ctx: &Ctx, kind: EntityKind, key: &str, change: &str) -> CmdResult
     let staging = Staging::begin(ctx, change)?;
 
     let op = match kind {
-        EntityKind::Notion => StagedOp::RemoveNotion(parse_notion_name(key)?),
-        EntityKind::Intent => StagedOp::RemoveIntent(parse_id::<IntentId>(key, "an intent id")?),
+        EntityKind::Context => StagedOp::RemoveContext(ContextId::new(key)?),
+        EntityKind::Capability => StagedOp::RemoveCapability(key.parse()?),
+        EntityKind::Notion => {
+            let reference = parse_notion_ref(key)?;
+            let (owner, _) = staging.notion(&reference)?;
+            StagedOp::RemoveOwnedNotion {
+                owner: owner.clone(),
+                name: reference.notion,
+            }
+        }
+        EntityKind::Intent => {
+            let id = parse_id::<IntentId>(key, "an intent id")?;
+            let (owner, _) = staging.intent(id)?;
+            StagedOp::RemoveOwnedIntent {
+                owner: owner.clone(),
+                id,
+            }
+        }
         EntityKind::Constraint => {
-            StagedOp::RemoveConstraint(parse_id::<ConstraintId>(key, "a constraint id")?)
+            let id = parse_id::<ConstraintId>(key, "a constraint id")?;
+            let (owner, _) = staging.constraint(id)?;
+            StagedOp::RemoveOwnedConstraint {
+                owner: owner.clone(),
+                id,
+            }
         }
     };
 
-    staging.finish(op, None)
+    staging.finish(op, None, false)
+}
+
+pub fn move_entity(ctx: &Ctx, target: &str, to: &str, change: &str) -> CmdResult {
+    let staging = Staging::begin(ctx, change)?;
+    let target: EntityRef = target.parse().map_err(|_| {
+        TelosError::new(
+            ErrorCode::TelosReferenceUnknown,
+            format!("cannot parse `{target}` as a movable typed selector"),
+        )
+    })?;
+    let destination = if to == "project" {
+        None
+    } else {
+        Some(to.parse::<Owner>()?)
+    };
+
+    let op = match target {
+        EntityRef::Notion(reference) => {
+            let (from, notion) = staging.notion(&reference)?;
+            let Some(to) = destination else {
+                return Err(TelosError::new(
+                    ErrorCode::TelosContextBoundaryViolation,
+                    "a notion cannot be owned by the project",
+                ));
+            };
+            if from.context != to.context {
+                return Err(TelosError::new(
+                    ErrorCode::TelosContextBoundaryViolation,
+                    "moving a notion across contexts would change its qualified identity",
+                )
+                .hint("add an explicit context-map mapping instead"));
+            }
+            StagedOp::MoveNotion {
+                from: from.clone(),
+                to,
+                notion: notion.clone(),
+            }
+        }
+        EntityRef::Intent(id) => {
+            let (from, intent) = staging.intent(id)?;
+            let Some(to) = destination else {
+                return Err(TelosError::new(
+                    ErrorCode::TelosContextBoundaryViolation,
+                    "an intent must belong to a capability",
+                ));
+            };
+            if to.capability.is_none() {
+                return Err(TelosError::new(
+                    ErrorCode::TelosContextBoundaryViolation,
+                    "an intent destination must have the form `context/capability`",
+                ));
+            }
+            StagedOp::MoveIntent {
+                from: from.clone(),
+                to,
+                intent: intent.clone(),
+            }
+        }
+        EntityRef::Constraint(id) => {
+            let (from, constraint) = staging.constraint(id)?;
+            StagedOp::MoveConstraint {
+                from: from.clone(),
+                to: destination,
+                constraint: constraint.clone(),
+            }
+        }
+        EntityRef::Context(_)
+        | EntityRef::Capability(_)
+        | EntityRef::Scenario(_)
+        | EntityRef::Change(_) => {
+            return Err(TelosError::new(
+                ErrorCode::TelosReferenceUnknown,
+                "`move` applies to notions, intents and constraints",
+            ));
+        }
+    };
+    staging.finish(op, None, true)
 }
 
 // --- the shared flow --------------------------------------------------------
@@ -218,25 +385,60 @@ impl Staging {
         Ok(self.alloc.as_mut().expect("just built above"))
     }
 
-    fn notion(&self, name: &NotionName) -> Result<&Notion, TelosError> {
-        match find_file(&self.base, &notion_path(name)) {
-            Some(TelFile::Notion(notion)) => Ok(notion),
-            _ => Err(unknown_entity(&self.base, "notion", name.as_str())),
-        }
+    fn context(&self, id: &ContextId) -> Result<&Context, TelosError> {
+        self.base
+            .iter()
+            .find_map(|(_, file)| match file {
+                TelFile::Context(context) if context.id == *id => Some(context),
+                _ => None,
+            })
+            .ok_or_else(|| unknown_entity(&self.base, "context", id.as_str()))
     }
 
-    fn intent(&self, id: IntentId) -> Result<&Intent, TelosError> {
-        match find_file(&self.base, &intent_path(id)) {
-            Some(TelFile::Intent(intent)) => Ok(intent),
-            _ => Err(unknown_entity(&self.base, "intent", &id.to_string())),
-        }
+    fn capability(&self, id: &CapabilityRef) -> Result<&Capability, TelosError> {
+        self.base
+            .iter()
+            .find_map(|(_, file)| match file {
+                TelFile::Capability(capability) if capability.id == *id => Some(capability),
+                _ => None,
+            })
+            .ok_or_else(|| unknown_entity(&self.base, "capability", &id.to_string()))
     }
 
-    fn constraint(&self, id: ConstraintId) -> Result<&Constraint, TelosError> {
-        match find_file(&self.base, &constraint_path(id)) {
-            Some(TelFile::Constraint(constraint)) => Ok(constraint),
-            _ => Err(unknown_entity(&self.base, "constraint", &id.to_string())),
-        }
+    fn notion(&self, reference: &NotionRef) -> Result<(&Owner, &Notion), TelosError> {
+        self.base
+            .iter()
+            .find_map(|(_, file)| match file {
+                TelFile::OwnedNotion { owner, notion }
+                    if owner.context == reference.context && notion.name == reference.notion =>
+                {
+                    Some((owner, notion))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| unknown_entity(&self.base, "notion", &reference.to_string()))
+    }
+
+    fn intent(&self, id: IntentId) -> Result<(&Owner, &Intent), TelosError> {
+        self.base
+            .iter()
+            .find_map(|(_, file)| match file {
+                TelFile::OwnedIntent { owner, intent } if intent.id == id => Some((owner, intent)),
+                _ => None,
+            })
+            .ok_or_else(|| unknown_entity(&self.base, "intent", &id.to_string()))
+    }
+
+    fn constraint(&self, id: ConstraintId) -> Result<(&Option<Owner>, &Constraint), TelosError> {
+        self.base
+            .iter()
+            .find_map(|(_, file)| match file {
+                TelFile::OwnedConstraint { owner, constraint } if constraint.id == id => {
+                    Some((owner, constraint))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| unknown_entity(&self.base, "constraint", &id.to_string()))
     }
 
     /// Steps 4-6: the claim gate, the full validation, then the two writes.
@@ -249,7 +451,15 @@ impl Staging {
     /// counted, not this op's one path: what a caller needs to know is which
     /// files this change now owns, which is also what a competing `add`
     /// would collide with.
-    fn finish(mut self, op: StagedOp, scenario_ids: Option<Vec<ScenarioId>>) -> CmdResult {
+    fn finish(
+        mut self,
+        op: StagedOp,
+        scenario_ids: Option<Vec<ScenarioId>>,
+        report_claims: bool,
+    ) -> CmdResult {
+        if let Some(source) = op.source_path() {
+            require_unclaimed(&self.project, self.change.id, &source)?;
+        }
         require_unclaimed(&self.project, self.change.id, &op.target_path())?;
 
         // Step 5 in two halves, because the two halves judge different
@@ -290,6 +500,8 @@ impl Staging {
         let mut result = json!({ "change": id, "entity": entity, "id": key });
         if let Some(scenario_ids) = scenario_ids {
             result["scenario_ids"] = json!(scenario_ids);
+        }
+        if report_claims {
             result["claims"] = json!(self.change.claims());
         }
 
@@ -347,6 +559,113 @@ fn payload_json(raw: &str) -> Result<Value, TelosError> {
     }
 }
 
+fn required_string<'a>(payload: &'a Value, field: &str) -> Result<&'a str, TelosError> {
+    payload.get(field).and_then(Value::as_str).ok_or_else(|| {
+        TelosError::new(
+            ErrorCode::TelosParseError,
+            format!("payload.{field}: expected a string"),
+        )
+    })
+}
+
+fn context_from_json(payload: &Value) -> Result<Context, TelosError> {
+    let kind = match required_string(payload, "kind")? {
+        "core" => ContextKind::Core,
+        "supporting" => ContextKind::Supporting,
+        "generic" => ContextKind::Generic,
+        other => {
+            return Err(TelosError::new(
+                ErrorCode::TelosParseError,
+                format!("payload.kind: unknown context kind `{other}`"),
+            ));
+        }
+    };
+    Ok(Context {
+        id: ContextId::new(required_string(payload, "id")?)?,
+        kind,
+        title: required_string(payload, "title")?.to_string(),
+        def: required_string(payload, "def")?.to_string(),
+    })
+}
+
+fn capability_from_json(payload: &Value) -> Result<Capability, TelosError> {
+    let context = ContextId::new(required_string(payload, "owner")?)?;
+    let capability = CapabilityId::new(required_string(payload, "id")?)?;
+    Ok(Capability {
+        id: CapabilityRef::new(context, capability),
+        title: required_string(payload, "title")?.to_string(),
+        def: required_string(payload, "def")?.to_string(),
+    })
+}
+
+fn owned_payload(payload: &Value, capability_required: bool) -> Result<(Owner, Value), TelosError> {
+    let owner: Owner = required_string(payload, "owner")?.parse()?;
+    if capability_required && owner.capability.is_none() {
+        return Err(TelosError::new(
+            ErrorCode::TelosParseError,
+            "payload.owner: an intent owner must have the form `context/capability`",
+        ));
+    }
+    let mut entity = payload.clone();
+    entity
+        .as_object_mut()
+        .expect("validated object")
+        .remove("owner");
+    Ok((owner, entity))
+}
+
+fn optional_owned_payload(payload: &Value, current: Owner) -> Result<(Owner, Value), TelosError> {
+    if payload.get("owner").is_none() {
+        return Ok((current, payload.clone()));
+    }
+    let (requested, entity) = owned_payload(payload, current.capability.is_some())?;
+    if requested != current {
+        return Err(ownership_change_refused(&current, &requested));
+    }
+    Ok((current, entity))
+}
+
+fn constraint_payload(payload: &Value) -> Result<(Option<Owner>, Value), TelosError> {
+    let raw = required_string(payload, "owner")?;
+    let owner = if raw == "project" {
+        None
+    } else {
+        Some(raw.parse()?)
+    };
+    let mut entity = payload.clone();
+    entity
+        .as_object_mut()
+        .expect("validated object")
+        .remove("owner");
+    Ok((owner, entity))
+}
+
+fn optional_constraint_payload(
+    payload: &Value,
+    current: Option<Owner>,
+) -> Result<(Option<Owner>, Value), TelosError> {
+    if payload.get("owner").is_none() {
+        return Ok((current, payload.clone()));
+    }
+    let (requested, entity) = constraint_payload(payload)?;
+    if requested != current {
+        let from = current
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "project".to_string());
+        let to = requested
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "project".to_string());
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            format!("cannot change ownership from `{from}` to `{to}` through edit"),
+        )
+        .hint("use `telos move ... --to ... --change ...`"));
+    }
+    Ok((current, entity))
+}
+
 /// A typed id argument, or `TELOS_REFERENCE_UNKNOWN` naming what was
 /// expected -- the same policy as `change abandon`'s `--change`.
 fn parse_id<T: std::str::FromStr>(key: &str, expected: &str) -> Result<T, TelosError> {
@@ -358,13 +677,24 @@ fn parse_id<T: std::str::FromStr>(key: &str, expected: &str) -> Result<T, TelosE
     })
 }
 
-fn parse_notion_name(key: &str) -> Result<NotionName, TelosError> {
-    NotionName::new(key).map_err(|_| {
-        TelosError::new(
-            ErrorCode::TelosReferenceUnknown,
-            format!("cannot parse `{key}` as a notion name"),
-        )
-    })
+fn parse_notion_ref(key: &str) -> Result<NotionRef, TelosError> {
+    key.strip_prefix("NOT:")
+        .unwrap_or(key)
+        .parse()
+        .map_err(|_| {
+            TelosError::new(
+                ErrorCode::TelosReferenceUnknown,
+                format!("cannot parse `{key}` as a qualified notion `context/Notion`"),
+            )
+        })
+}
+
+fn ownership_change_refused(from: &Owner, to: &Owner) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosIntegrityViolation,
+        format!("cannot change ownership from `{from}` to `{to}` through edit"),
+    )
+    .hint("use `telos move ... --to ... --change ...`")
 }
 
 /// An `edit` payload that changes the entity's identity is refused rather

@@ -27,8 +27,8 @@ fn json_stdout(out: &std::process::Output) -> Value {
     })
 }
 
-/// The `telos/notions/Invoice.tel` path, repeated across several tests.
-const INVOICE_TEL: &str = "telos/notions/Invoice.tel";
+/// The `telos/contexts/billing/notions/Invoice.tel` path, repeated across several tests.
+const INVOICE_TEL: &str = "telos/contexts/billing/notions/Invoice.tel";
 
 /// The exact `TELOS_DRIFT_DETECTED` hint `check --sealed` reports, frozen
 /// by `docs/contracts.md`.
@@ -251,7 +251,9 @@ fn check_sealed_on_an_intact_fixture_passes() {
 #[test]
 fn check_json_on_an_unresolvable_reference_reports_telos_reference_unknown() {
     let tmp = with_fixture();
-    let int_0042 = tmp.path().join("telos/intents/INT-0042.tel");
+    let int_0042 = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
     let content = fs::read_to_string(&int_0042).unwrap();
     assert!(
         content.contains("on Invoice"),
@@ -298,8 +300,8 @@ fn check_human_mode_lists_every_diagnostic_on_its_own_line_in_stderr() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         stderr,
-        "error[TELOS_REFERENCE_UNKNOWN]: telos/intents/INT-0042.tel: unknown notion `Invoce`; closest is `Invoice`\n\
-         telos/intents/INT-0042.tel: unknown intent `INT-9999`\n"
+        "error[TELOS_REFERENCE_UNKNOWN]: telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel: unknown notion `Invoce`; closest is `Invoice`\n\
+         telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel: unknown intent `INT-9999`\n"
     );
 }
 

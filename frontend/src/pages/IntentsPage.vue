@@ -33,6 +33,8 @@ const statusQuery = computed<IntentStatus | null>(() => {
   const value = firstQueryValue(route.query.status);
   return (statuses as string[]).includes(value) ? (value as IntentStatus) : null;
 });
+const ownerQuery = computed(() => firstQueryValue(route.query.owner));
+const owners = computed(() => [...new Set(intents.value.map((intent) => intent.owner))].sort());
 
 function setSearchQuery(value: string): void {
   router.replace({ query: { ...route.query, q: value === '' ? undefined : value } });
@@ -42,20 +44,28 @@ function setStatusQuery(value: IntentStatus | null): void {
   router.replace({ query: { ...route.query, status: value ?? undefined } });
 }
 
+function setOwnerQuery(value: string): void {
+  router.replace({ query: { ...route.query, owner: value === '' ? undefined : value } });
+}
+
 const filteredIntents = computed<IntentView[]>(() => {
   const q = searchQuery.value.trim().toLowerCase();
   return intents.value.filter((intent) => {
     if (statusQuery.value && intent.status !== statusQuery.value) return false;
+    if (ownerQuery.value && intent.owner !== ownerQuery.value) return false;
     if (!q) return true;
     return (
       intent.id.toLowerCase().includes(q) ||
       intent.title.toLowerCase().includes(q) ||
       intent.telos.toLowerCase().includes(q)
+      || intent.owner.toLowerCase().includes(q)
     );
   });
 });
 
-const isFiltered = computed(() => searchQuery.value.trim() !== '' || statusQuery.value !== null);
+const isFiltered = computed(
+  () => searchQuery.value.trim() !== '' || statusQuery.value !== null || ownerQuery.value !== '',
+);
 
 function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? '' : 's'}`;
@@ -96,6 +106,13 @@ function plural(count: number, word: string): string {
           <StatusBadge :status="status" />
         </button>
       </div>
+      <label class="owner-filter">
+        <span class="sr-only">Filter by domain owner</span>
+        <select :value="ownerQuery" @change="setOwnerQuery(($event.target as HTMLSelectElement).value)">
+          <option value="">All contexts and capabilities</option>
+          <option v-for="owner in owners" :key="owner" :value="owner">{{ owner }}</option>
+        </select>
+      </label>
     </div>
 
     <p class="intents-page__count">
@@ -112,6 +129,7 @@ function plural(count: number, word: string): string {
             <StatusBadge :status="intent.status" />
           </div>
           <div class="intent-row__meta">
+            <span>{{ intent.owner }}</span>
             <span>{{ plural(intent.scenarios.length, 'scenario') }}</span>
             <span>{{ plural(intent.notions.length, 'notion') }}</span>
           </div>
@@ -151,6 +169,8 @@ function plural(count: number, word: string): string {
   flex-wrap: wrap;
   gap: 0.5rem;
 }
+
+.owner-filter select { padding: 0.5rem 0.7rem; border: 1px solid var(--color-border); border-radius: 0.45rem; color: var(--color-text); background: var(--color-surface); }
 
 .status-filter__option {
   display: inline-flex;

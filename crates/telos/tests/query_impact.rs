@@ -9,6 +9,41 @@ use serde_json::{Value, json};
 
 use common::{telos, with_fixture};
 
+#[test]
+fn query_requires_qualified_vocabulary_and_reports_domain_owners() {
+    let tmp = with_fixture();
+    let out = telos(
+        tmp.path(),
+        &[
+            "query",
+            "intent",
+            "--context",
+            "billing",
+            "--capability",
+            "settlement",
+            "--using",
+            "NOT:billing/Invoice",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(
+        json_stdout(&out)["result"]["items"],
+        json!([{"id": "INT-0042", "owner": "billing/settlement"}])
+    );
+
+    let bare = telos(
+        tmp.path(),
+        &["query", "intent", "--using", "Invoice", "--json"],
+    )
+    .output()
+    .unwrap();
+    let error = json_stdout(&bare);
+    assert_eq!(error["ok"], json!(false));
+    assert_eq!(error["error"]["code"], json!("TELOS_PARSE_ERROR"));
+}
+
 /// Parses a command's stdout as a JSON envelope.
 fn json_stdout(out: &std::process::Output) -> Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
@@ -24,7 +59,23 @@ fn items(out: &std::process::Output) -> Vec<String> {
         .as_array()
         .expect("items is an array")
         .iter()
-        .map(|v| v.as_str().expect("item is a string").to_string())
+        .map(|value| {
+            if let Some(item) = value.as_str() {
+                return item.to_string();
+            }
+            if let Some(id) = value.get("id").and_then(Value::as_str) {
+                return id.to_string();
+            }
+            let name = &value["name"];
+            if let Some(name) = name.as_str() {
+                return name.to_string();
+            }
+            format!(
+                "{}/{}",
+                name["context"].as_str().expect("notion context"),
+                name["notion"].as_str().expect("notion name")
+            )
+        })
         .collect()
 }
 
@@ -39,7 +90,13 @@ fn query_intent_using_invoice_matches_both_intents() {
 
     let out = telos(
         tmp.path(),
-        &["query", "intent", "--using", "Invoice", "--json"],
+        &[
+            "query",
+            "intent",
+            "--using",
+            "NOT:billing/Invoice",
+            "--json",
+        ],
     )
     .output()
     .unwrap();
@@ -64,7 +121,7 @@ fn query_intent_triggered_by_payment_received_matches_only_int_0042() {
             "query",
             "intent",
             "--triggered-by",
-            "PaymentReceived",
+            "NOT:billing/PaymentReceived",
             "--json",
         ],
     )
@@ -94,9 +151,9 @@ fn query_intent_combines_status_using_and_triggered_by_in_and() {
             "--status",
             "active",
             "--using",
-            "Invoice",
+            "NOT:billing/Invoice",
             "--triggered-by",
-            "InvoiceIssued",
+            "NOT:billing/InvoiceIssued",
             "--json",
         ],
     )
@@ -139,7 +196,13 @@ fn query_scenario_using_invoice_matches_both_scenarios() {
 
     let out = telos(
         tmp.path(),
-        &["query", "scenario", "--using", "Invoice", "--json"],
+        &[
+            "query",
+            "scenario",
+            "--using",
+            "NOT:billing/Invoice",
+            "--json",
+        ],
     )
     .output()
     .unwrap();
@@ -169,7 +232,10 @@ fn query_notion_kind_event_matches_the_two_events() {
         "expected exit 0, got {:?}",
         out.status
     );
-    assert_eq!(items(&out), vec!["InvoiceIssued", "PaymentReceived"]);
+    assert_eq!(
+        items(&out),
+        vec!["billing/InvoiceIssued", "billing/PaymentReceived"]
+    );
 }
 
 /// `query constraint --kind architecture`: the corpus's one constraint is
@@ -204,7 +270,7 @@ fn query_intent_using_an_unknown_notion_reports_reference_unknown_with_no_hint()
 
     let out = telos(
         tmp.path(),
-        &["query", "intent", "--using", "Rogue", "--json"],
+        &["query", "intent", "--using", "NOT:billing/Rogue", "--json"],
     )
     .output()
     .unwrap();
@@ -214,7 +280,7 @@ fn query_intent_using_an_unknown_notion_reports_reference_unknown_with_no_hint()
     assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
     let message = envelope["error"]["message"].as_str().unwrap();
     assert!(
-        message.contains("unknown notion `Rogue`"),
+        message.contains("unknown notion `billing/Rogue`"),
         "message: {message}"
     );
     assert_eq!(envelope["error"]["hint"], Value::Null);
@@ -228,7 +294,7 @@ fn query_intent_using_a_close_typo_reports_a_hint() {
 
     let out = telos(
         tmp.path(),
-        &["query", "intent", "--using", "Invoic", "--json"],
+        &["query", "intent", "--using", "NOT:billing/Invoic", "--json"],
     )
     .output()
     .unwrap();
@@ -236,7 +302,10 @@ fn query_intent_using_a_close_typo_reports_a_hint() {
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
     assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
-    assert_eq!(envelope["error"]["hint"], json!("closest is `Invoice`"));
+    assert_eq!(
+        envelope["error"]["hint"],
+        json!("closest is `NOT:billing/Invoice`")
+    );
 }
 
 // --- query: inapplicable filter is a usage error ----------------------------
@@ -290,9 +359,12 @@ fn query_scenario_with_an_inapplicable_status_filter_is_a_clap_usage_error() {
 fn query_intent_human_mode_prints_id_and_title() {
     let tmp = with_fixture();
 
-    let out = telos(tmp.path(), &["query", "intent", "--using", "Invoice"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &["query", "intent", "--using", "NOT:billing/Invoice"],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -321,7 +393,10 @@ fn query_notion_human_mode_prints_bare_names() {
         out.status
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout.trim_end(), "InvoiceIssued\nPaymentReceived");
+    assert_eq!(
+        stdout.trim_end(),
+        "billing/InvoiceIssued\nbilling/PaymentReceived"
+    );
 }
 
 // --- impact: exact golden ----------------------------------------------------
@@ -378,7 +453,7 @@ fn impact_int_0017_matches_the_exact_reverse_closure() {
 fn impact_invoice_contains_the_intent_and_scenario_that_use_it_directly() {
     let tmp = with_fixture();
 
-    let out = telos(tmp.path(), &["impact", "Invoice", "--json"])
+    let out = telos(tmp.path(), &["impact", "NOT:billing/Invoice", "--json"])
         .output()
         .unwrap();
 
@@ -427,14 +502,17 @@ fn impact_unknown_intent_reports_the_numerically_closest_id() {
 fn impact_unknown_notion_reports_the_edit_distance_closest_name() {
     let tmp = with_fixture();
 
-    let out = telos(tmp.path(), &["impact", "Invoic", "--json"])
+    let out = telos(tmp.path(), &["impact", "NOT:billing/Invoic", "--json"])
         .output()
         .unwrap();
 
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
     assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
-    assert_eq!(envelope["error"]["hint"], json!("closest is `Invoice`"));
+    assert_eq!(
+        envelope["error"]["hint"],
+        json!("closest is `billing/Invoice`")
+    );
 }
 
 /// An argument that is neither a typed id nor a valid (PascalCase) notion

@@ -190,6 +190,81 @@ entity_id!(ScenarioId, "SCN");
 entity_id!(ConstraintId, "CON");
 entity_id!(ChangeId, "CHG");
 
+macro_rules! domain_id {
+    ($name:ident, $noun:literal) => {
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(s: impl Into<String>) -> Result<Self, TelosError> {
+                let s = s.into();
+                if !is_lower_kebab(&s) {
+                    return Err(TelosError::new(
+                        ErrorCode::TelosParseError,
+                        format!(concat!($noun, " id must be lower-kebab-case: `{}`"), s),
+                    ));
+                }
+                Ok(Self(s))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = TelosError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::new(s)
+            }
+        }
+    };
+}
+
+domain_id!(ContextId, "context");
+domain_id!(CapabilityId, "capability");
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct CapabilityRef {
+    pub context: ContextId,
+    pub capability: CapabilityId,
+}
+
+impl CapabilityRef {
+    pub fn new(context: ContextId, capability: CapabilityId) -> Self {
+        Self {
+            context,
+            capability,
+        }
+    }
+}
+
+impl FromStr for CapabilityRef {
+    type Err = TelosError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (context, capability) = split_qualified(s, "capability", "context/capability")?;
+        Ok(Self::new(
+            ContextId::new(context)?,
+            CapabilityId::new(capability)?,
+        ))
+    }
+}
+
+impl fmt::Display for CapabilityRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.context, self.capability)
+    }
+}
+
 /// A notion's name: PascalCase, `^[A-Z][A-Za-z0-9]*$`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -219,6 +294,103 @@ impl fmt::Display for NotionName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct NotionRef {
+    pub context: ContextId,
+    pub notion: NotionName,
+}
+
+impl NotionRef {
+    pub fn new(context: ContextId, notion: NotionName) -> Self {
+        Self { context, notion }
+    }
+}
+
+impl FromStr for NotionRef {
+    type Err = TelosError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (context, notion) = split_qualified(s, "notion", "context/Notion")?;
+        Ok(Self::new(
+            ContextId::new(context)?,
+            NotionName::new(notion)?,
+        ))
+    }
+}
+
+impl fmt::Display for NotionRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.context, self.notion)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct Owner {
+    pub context: ContextId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability: Option<CapabilityId>,
+}
+
+impl Owner {
+    pub fn context(context: ContextId) -> Self {
+        Self {
+            context,
+            capability: None,
+        }
+    }
+
+    pub fn capability(capability: CapabilityRef) -> Self {
+        Self {
+            context: capability.context,
+            capability: Some(capability.capability),
+        }
+    }
+
+    pub fn capability_ref(&self) -> Option<CapabilityRef> {
+        self.capability
+            .clone()
+            .map(|capability| CapabilityRef::new(self.context.clone(), capability))
+    }
+}
+
+impl FromStr for Owner {
+    type Err = TelosError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains('/') {
+            s.parse::<CapabilityRef>().map(Self::capability)
+        } else {
+            ContextId::new(s).map(Self::context)
+        }
+    }
+}
+
+impl fmt::Display for Owner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.capability {
+            Some(capability) => write!(f, "{}/{capability}", self.context),
+            None => self.context.fmt(f),
+        }
+    }
+}
+
+fn split_qualified<'a>(
+    s: &'a str,
+    noun: &str,
+    expected: &str,
+) -> Result<(&'a str, &'a str), TelosError> {
+    let mut parts = s.split('/');
+    let left = parts.next().unwrap_or_default();
+    let right = parts.next().unwrap_or_default();
+    if left.is_empty() || right.is_empty() || parts.next().is_some() {
+        return Err(TelosError::new(
+            ErrorCode::TelosParseError,
+            format!("{noun} reference must have the form `{expected}`: `{s}`"),
+        ));
+    }
+    Ok((left, right))
 }
 
 fn is_pascal_case(s: &str) -> bool {
@@ -286,7 +458,9 @@ fn is_lower_kebab(s: &str) -> bool {
 /// name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum EntityRef {
-    Notion(NotionName),
+    Context(ContextId),
+    Capability(CapabilityRef),
+    Notion(NotionRef),
     Intent(IntentId),
     Scenario(ScenarioId),
     Constraint(ConstraintId),
@@ -296,9 +470,8 @@ pub enum EntityRef {
 impl FromStr for EntityRef {
     type Err = TelosError;
 
-    /// Dispatches on the `INT-`/`SCN-`/`CON-`/`CHG-` prefix, delegating to
-    /// the corresponding typed `FromStr`; anything else must be a valid
-    /// PascalCase notion name.
+    /// Domain entities use explicit typed selectors. Numeric ids keep their
+    /// existing canonical prefixes.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with("INT-") {
             return s.parse::<IntentId>().map(EntityRef::Intent);
@@ -312,14 +485,30 @@ impl FromStr for EntityRef {
         if s.starts_with("CHG-") {
             return s.parse::<ChangeId>().map(EntityRef::Change);
         }
-        NotionName::new(s).map(EntityRef::Notion)
+        if let Some(value) = s.strip_prefix("CTX:") {
+            return ContextId::new(value).map(EntityRef::Context);
+        }
+        if let Some(value) = s.strip_prefix("CAP:") {
+            return value.parse::<CapabilityRef>().map(EntityRef::Capability);
+        }
+        if let Some(value) = s.strip_prefix("NOT:") {
+            return value.parse::<NotionRef>().map(EntityRef::Notion);
+        }
+        Err(TelosError::new(
+            ErrorCode::TelosParseError,
+            format!(
+                "expected a typed selector such as `CTX:…`, `CAP:…`, `NOT:…` or a numeric entity id: `{s}`"
+            ),
+        ))
     }
 }
 
 impl fmt::Display for EntityRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EntityRef::Notion(n) => n.fmt(f),
+            EntityRef::Context(id) => write!(f, "CTX:{id}"),
+            EntityRef::Capability(id) => write!(f, "CAP:{id}"),
+            EntityRef::Notion(n) => write!(f, "NOT:{n}"),
             EntityRef::Intent(i) => i.fmt(f),
             EntityRef::Scenario(s) => s.fmt(f),
             EntityRef::Constraint(c) => c.fmt(f),
@@ -331,6 +520,44 @@ impl fmt::Display for EntityRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_identifiers_are_lower_kebab_and_qualified() {
+        let pet = ContextId::new("pet").unwrap();
+        let care = CapabilityId::new("daily-care").unwrap();
+
+        assert_eq!(pet.to_string(), "pet");
+        assert_eq!(care.to_string(), "daily-care");
+        assert!(ContextId::new("Pet").is_err());
+        assert!(CapabilityId::new("daily_care").is_err());
+
+        let capability: CapabilityRef = "pet/daily-care".parse().unwrap();
+        assert_eq!(capability.context, pet);
+        assert_eq!(capability.capability, care);
+        assert_eq!(capability.to_string(), "pet/daily-care");
+
+        let notion: NotionRef = "pet/Pet".parse().unwrap();
+        assert_eq!(notion.to_string(), "pet/Pet");
+        assert_eq!(notion.context, ContextId::new("pet").unwrap());
+        assert_eq!(notion.notion, NotionName::new("Pet").unwrap());
+    }
+
+    #[test]
+    fn entity_selectors_require_explicit_domain_prefixes() {
+        assert_eq!(
+            "CTX:pet".parse::<EntityRef>().unwrap(),
+            EntityRef::Context(ContextId::new("pet").unwrap())
+        );
+        assert_eq!(
+            "CAP:pet/care".parse::<EntityRef>().unwrap(),
+            EntityRef::Capability("pet/care".parse().unwrap())
+        );
+        assert_eq!(
+            "NOT:pet/Pet".parse::<EntityRef>().unwrap(),
+            EntityRef::Notion("pet/Pet".parse().unwrap())
+        );
+        assert!("Invoice".parse::<EntityRef>().is_err());
+    }
 
     #[test]
     fn new_and_as_str_round_trip() {
@@ -464,10 +691,7 @@ mod tests {
 
     #[test]
     fn entity_ref_parses_bare_pascal_case_as_notion() {
-        assert_eq!(
-            "Invoice".parse::<EntityRef>().unwrap(),
-            EntityRef::Notion(NotionName::new("Invoice").unwrap())
-        );
+        assert!("Invoice".parse::<EntityRef>().is_err());
     }
 
     #[test]
@@ -495,8 +719,8 @@ mod tests {
     fn entity_ref_display_delegates_to_inner_display() {
         assert_eq!(EntityRef::Scenario(ScenarioId(107)).to_string(), "SCN-0107");
         assert_eq!(
-            EntityRef::Notion(NotionName::new("Invoice").unwrap()).to_string(),
-            "Invoice"
+            EntityRef::Notion("billing/Invoice".parse().unwrap()).to_string(),
+            "NOT:billing/Invoice"
         );
     }
 

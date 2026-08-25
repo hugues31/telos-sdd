@@ -1,9 +1,12 @@
 use std::collections::BTreeSet;
 
 use serde::Serialize;
-use telos_core::emit::{emit_constraint, emit_intent, emit_notion};
+use telos_core::emit::{emit_owned_constraint, emit_owned_intent, emit_owned_notion};
 use telos_core::graph::{NodeRef, Relation};
-use telos_core::model::{Binding, ConstraintKind, IntentStatus, NotionKind, Scope, TelosModel};
+use telos_core::ids::Owner;
+use telos_core::model::{
+    Binding, ConstraintKind, ContextKind, IntentStatus, NotionKind, Scope, TelosModel,
+};
 use telos_core::state::{DriftKind, ProjectStateKind, StateReport, coverage as model_coverage};
 
 use crate::projection::{applicable_constraints, implementations, proofs};
@@ -12,6 +15,7 @@ use crate::projection::{applicable_constraints, implementations, proofs};
 pub(crate) struct ViewSnapshot {
     pub(crate) dashboard: DashboardView,
     pub(crate) coverage: CoverageView,
+    pub(crate) contexts: Vec<ContextView>,
     pub(crate) notions: Vec<NotionView>,
     pub(crate) intents: Vec<IntentView>,
     pub(crate) scenarios: Vec<ScenarioView>,
@@ -64,6 +68,7 @@ pub(crate) struct CoverageRowView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct NotionView {
     pub(crate) name: String,
+    pub(crate) owner: String,
     pub(crate) kind: String,
     pub(crate) definition: String,
     pub(crate) canonical: String,
@@ -72,6 +77,7 @@ pub(crate) struct NotionView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct IntentView {
     pub(crate) id: String,
+    pub(crate) owner: String,
     pub(crate) title: String,
     pub(crate) status: String,
     pub(crate) telos: String,
@@ -102,10 +108,49 @@ pub(crate) struct ConstraintRefView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ConstraintView {
     pub(crate) id: String,
+    pub(crate) owner: String,
     pub(crate) kind: String,
     pub(crate) title: String,
     pub(crate) scope: String,
     pub(crate) canonical: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ContextView {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) definition: String,
+    pub(crate) capabilities: Vec<CapabilityView>,
+    pub(crate) dependencies: Vec<ContextDependencyView>,
+    pub(crate) health: ContextHealthView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CapabilityView {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) definition: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ContextDependencyView {
+    pub(crate) supplier: String,
+    pub(crate) mappings: Vec<NotionMappingView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct NotionMappingView {
+    pub(crate) from: String,
+    pub(crate) to: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ContextHealthView {
+    pub(crate) intents: u32,
+    pub(crate) active_intents: u32,
+    pub(crate) scenarios: u32,
+    pub(crate) proved_scenarios: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -123,6 +168,8 @@ pub(crate) struct ProofView {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "kind", content = "id", rename_all = "lowercase")]
 pub(crate) enum GraphKey {
+    Context(String),
+    Capability(String),
     Notion(String),
     Intent(String),
     Scenario(String),
@@ -135,6 +182,7 @@ pub(crate) enum GraphKey {
 pub(crate) struct GraphNodeView {
     pub(crate) key: GraphKey,
     pub(crate) label: String,
+    pub(crate) parent: Option<GraphKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -147,13 +195,17 @@ pub(crate) struct GraphEdgeView {
 impl ViewSnapshot {
     pub(crate) fn build(state: &StateReport, model: &TelosModel) -> Self {
         let notions = model
-            .notions
-            .values()
-            .map(|notion| NotionView {
-                name: notion.name.to_string(),
-                kind: notion_kind(notion.kind).to_string(),
-                definition: notion.def.clone(),
-                canonical: emit_notion(notion),
+            .domain_notions
+            .iter()
+            .filter_map(|(reference, notion)| {
+                let owner = model.notion_owners.get(reference)?;
+                Some(NotionView {
+                    name: reference.to_string(),
+                    owner: owner.to_string(),
+                    kind: notion_kind(notion.kind).to_string(),
+                    definition: notion.def.clone(),
+                    canonical: emit_owned_notion(owner, notion),
+                })
             })
             .collect();
 
@@ -161,7 +213,8 @@ impl ViewSnapshot {
         let intents: Vec<IntentView> = model
             .intents
             .values()
-            .map(|intent| {
+            .filter_map(|intent| {
+                let owner = model.intent_owners.get(&intent.id)?;
                 let intent_proofs = proofs(model, intent);
                 let scenario_views: Vec<ScenarioView> = intent
                     .scenarios
@@ -187,12 +240,13 @@ impl ViewSnapshot {
                 notion_names.sort();
                 notion_names.dedup();
 
-                IntentView {
+                Some(IntentView {
                     id: intent.id.to_string(),
+                    owner: owner.to_string(),
                     title: intent.title.clone(),
                     status: intent_status(intent.status).to_string(),
                     telos: intent.telos.clone(),
-                    canonical: emit_intent(intent),
+                    canonical: emit_owned_intent(owner, intent),
                     notions: notion_names,
                     constraints: applicable_constraints(model, intent.id)
                         .into_iter()
@@ -200,7 +254,13 @@ impl ViewSnapshot {
                             id: entry.constraint.id.to_string(),
                             title: entry.constraint.title.clone(),
                             scope: entry.scope.to_string(),
-                            canonical: emit_constraint(entry.constraint),
+                            canonical: model
+                                .constraint_owners
+                                .get(&entry.constraint.id)
+                                .map(|owner| {
+                                    emit_owned_constraint(owner.as_ref(), entry.constraint)
+                                })
+                                .unwrap_or_default(),
                         })
                         .collect(),
                     implements: implementations(model, intent.id)
@@ -208,7 +268,7 @@ impl ViewSnapshot {
                         .map(|path| path.to_string())
                         .collect(),
                     scenarios: scenario_views,
-                }
+                })
             })
             .collect();
         scenarios.sort_by(|a, b| a.id.cmp(&b.id));
@@ -216,19 +276,100 @@ impl ViewSnapshot {
         let constraints = model
             .constraints
             .values()
-            .map(|constraint| ConstraintView {
-                id: constraint.id.to_string(),
-                kind: constraint_kind(constraint.kind).to_string(),
-                title: constraint.title.clone(),
-                scope: match &constraint.scope {
-                    Scope::Global => "global".to_string(),
-                    Scope::Intents(ids) => ids
-                        .iter()
-                        .map(|id| id.node.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                },
-                canonical: emit_constraint(constraint),
+            .filter_map(|constraint| {
+                let owner = model.constraint_owners.get(&constraint.id)?;
+                Some(ConstraintView {
+                    id: constraint.id.to_string(),
+                    owner: owner
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "project".to_string()),
+                    kind: constraint_kind(constraint.kind).to_string(),
+                    title: constraint.title.clone(),
+                    scope: match &constraint.scope {
+                        Scope::Global => "global".to_string(),
+                        Scope::Intents(ids) => ids
+                            .iter()
+                            .map(|id| id.node.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    },
+                    canonical: emit_owned_constraint(owner.as_ref(), constraint),
+                })
+            })
+            .collect();
+
+        let contexts = model
+            .contexts
+            .values()
+            .map(|context| {
+                let capabilities = model
+                    .capabilities
+                    .values()
+                    .filter(|capability| capability.id.context == context.id)
+                    .map(|capability| CapabilityView {
+                        id: capability.id.to_string(),
+                        title: capability.title.clone(),
+                        definition: capability.def.clone(),
+                    })
+                    .collect();
+                let dependencies = model
+                    .context_map
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| dependency.consumer == context.id)
+                    .map(|dependency| ContextDependencyView {
+                        supplier: dependency.supplier.to_string(),
+                        mappings: dependency
+                            .mappings
+                            .iter()
+                            .map(|mapping| NotionMappingView {
+                                from: mapping.from.to_string(),
+                                to: mapping.to.to_string(),
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                let owned_intents: Vec<_> = model
+                    .intents
+                    .values()
+                    .filter(|intent| {
+                        model
+                            .intent_owners
+                            .get(&intent.id)
+                            .is_some_and(|owner| owner.context == context.id)
+                    })
+                    .collect();
+                let scenarios = owned_intents
+                    .iter()
+                    .map(|intent| intent.scenarios.len() as u32)
+                    .sum();
+                let proved_scenarios = owned_intents
+                    .iter()
+                    .flat_map(|intent| &intent.scenarios)
+                    .filter(|scenario| {
+                        model.bindings.iter().any(|binding| {
+                            matches!(binding, Binding::Proves { scenario: held, .. } if held.node == scenario.id)
+                        })
+                    })
+                    .count() as u32;
+                ContextView {
+                    id: context.id.to_string(),
+                    kind: context_kind(context.kind).to_string(),
+                    title: context.title.clone(),
+                    definition: context.def.clone(),
+                    capabilities,
+                    dependencies,
+                    health: ContextHealthView {
+                        intents: owned_intents.len() as u32,
+                        active_intents: owned_intents
+                            .iter()
+                            .filter(|intent| intent.status == IntentStatus::Active)
+                            .count() as u32,
+                        scenarios,
+                        proved_scenarios,
+                    },
+                }
             })
             .collect();
 
@@ -323,6 +464,7 @@ impl ViewSnapshot {
                     .collect(),
             },
             coverage,
+            contexts,
             notions,
             intents,
             scenarios,
@@ -338,6 +480,9 @@ impl ViewSnapshot {
 impl From<&NodeRef> for GraphKey {
     fn from(node: &NodeRef) -> Self {
         match node {
+            NodeRef::Context(id) => Self::Context(id.to_string()),
+            NodeRef::Capability(id) => Self::Capability(id.to_string()),
+            NodeRef::QualifiedNotion(name) => Self::Notion(name.to_string()),
             NodeRef::Notion(name) => Self::Notion(name.to_string()),
             NodeRef::Intent(id) => Self::Intent(id.to_string()),
             NodeRef::Scenario(id) => Self::Scenario(id.to_string()),
@@ -350,7 +495,19 @@ impl From<&NodeRef> for GraphKey {
 
 fn model_nodes(model: &TelosModel) -> BTreeSet<NodeRef> {
     let mut nodes = BTreeSet::new();
-    nodes.extend(model.notions.keys().cloned().map(NodeRef::Notion));
+    nodes.extend(model.contexts.keys().cloned().map(NodeRef::Context));
+    nodes.extend(model.capabilities.keys().cloned().map(NodeRef::Capability));
+    if model.domain_notions.is_empty() {
+        nodes.extend(model.notions.keys().cloned().map(NodeRef::Notion));
+    } else {
+        nodes.extend(
+            model
+                .domain_notions
+                .keys()
+                .cloned()
+                .map(NodeRef::QualifiedNotion),
+        );
+    }
     nodes.extend(model.intents.keys().copied().map(NodeRef::Intent));
     nodes.extend(model.scenario_owner.keys().copied().map(NodeRef::Scenario));
     nodes.extend(model.constraints.keys().copied().map(NodeRef::Constraint));
@@ -369,6 +526,21 @@ fn model_nodes(model: &TelosModel) -> BTreeSet<NodeRef> {
 
 fn graph_node(model: &TelosModel, node: &NodeRef) -> GraphNodeView {
     let label = match node {
+        NodeRef::Context(id) => model
+            .contexts
+            .get(id)
+            .map(|context| context.title.as_str())
+            .unwrap_or(id.as_str()),
+        NodeRef::Capability(id) => model
+            .capabilities
+            .get(id)
+            .map(|capability| capability.title.as_str())
+            .unwrap_or(""),
+        NodeRef::QualifiedNotion(name) => model
+            .domain_notions
+            .get(name)
+            .map(|notion| notion.def.as_str())
+            .unwrap_or(name.notion.as_str()),
         NodeRef::Notion(name) => model
             .notions
             .get(name)
@@ -394,6 +566,33 @@ fn graph_node(model: &TelosModel, node: &NodeRef) -> GraphNodeView {
     GraphNodeView {
         key: GraphKey::from(node),
         label: label.to_string(),
+        parent: graph_parent(model, node),
+    }
+}
+
+fn owner_key(owner: &Owner) -> GraphKey {
+    match owner.capability_ref() {
+        Some(capability) => GraphKey::Capability(capability.to_string()),
+        None => GraphKey::Context(owner.context.to_string()),
+    }
+}
+
+fn graph_parent(model: &TelosModel, node: &NodeRef) -> Option<GraphKey> {
+    match node {
+        NodeRef::Capability(id) => Some(GraphKey::Context(id.context.to_string())),
+        NodeRef::QualifiedNotion(id) => model.notion_owners.get(id).map(owner_key),
+        NodeRef::Intent(id) => model.intent_owners.get(id).map(owner_key),
+        NodeRef::Scenario(id) => model
+            .scenario_owner
+            .get(id)
+            .and_then(|intent| model.intent_owners.get(intent))
+            .map(owner_key),
+        NodeRef::Constraint(id) => model
+            .constraint_owners
+            .get(id)
+            .and_then(Option::as_ref)
+            .map(owner_key),
+        NodeRef::Context(_) | NodeRef::Notion(_) | NodeRef::Code(_) | NodeRef::Test(_) => None,
     }
 }
 
@@ -404,6 +603,7 @@ fn uses_from(model: &TelosModel, node: &NodeRef) -> Vec<String> {
         .iter()
         .filter_map(|(relation, target)| match (relation, target) {
             (Relation::Uses, NodeRef::Notion(name)) => Some(name.to_string()),
+            (Relation::Uses, NodeRef::QualifiedNotion(name)) => Some(name.to_string()),
             _ => None,
         })
         .collect()
@@ -443,6 +643,14 @@ fn notion_kind(kind: NotionKind) -> &'static str {
     }
 }
 
+fn context_kind(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Core => "core",
+        ContextKind::Supporting => "supporting",
+        ContextKind::Generic => "generic",
+    }
+}
+
 fn constraint_kind(kind: ConstraintKind) -> &'static str {
     match kind {
         ConstraintKind::Stack => "stack",
@@ -463,33 +671,43 @@ pub(crate) fn all_relations_fixture_model() -> TelosModel {
     let source =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telos-core/tests/corpus/billing");
     let fixture = tempfile::tempdir().expect("temporary relation fixture");
-    for directory in ["telos/notions", "telos/intents", "telos/constraints"] {
+    for directory in [
+        "telos/contexts/billing/notions",
+        "telos/contexts/billing/capabilities/invoicing/notions",
+        "telos/contexts/billing/capabilities/invoicing/intents",
+        "telos/contexts/billing/capabilities/settlement/notions",
+        "telos/contexts/billing/capabilities/settlement/intents",
+        "telos/contexts/billing/constraints",
+    ] {
         fs::create_dir_all(fixture.path().join(directory)).unwrap();
     }
     for relative in [
         "telos/telos.toml",
-        "telos/notions/Customer.tel",
-        "telos/notions/Invoice.tel",
-        "telos/notions/InvoiceIssued.tel",
-        "telos/notions/PaymentReceived.tel",
-        "telos/intents/INT-0017.tel",
-        "telos/bindings.tel",
+        "telos/context-map.tel",
+        "telos/contexts/billing/context.tel",
+        "telos/contexts/billing/bindings.tel",
+        "telos/contexts/billing/notions/Customer.tel",
+        "telos/contexts/billing/notions/Invoice.tel",
+        "telos/contexts/billing/capabilities/invoicing/capability.tel",
+        "telos/contexts/billing/capabilities/invoicing/notions/InvoiceIssued.tel",
+        "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
+        "telos/contexts/billing/capabilities/settlement/capability.tel",
+        "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel",
     ] {
         fs::copy(source.join(relative), fixture.path().join(relative)).unwrap();
     }
-    let intent = fs::read_to_string(source.join("telos/intents/INT-0042.tel"))
+    let intent_path = "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel";
+    let intent = fs::read_to_string(source.join(intent_path))
         .unwrap()
         .replace(
             "  requires INT-0017",
             "  refines INT-0017\n  requires INT-0017\n  excludes INT-0017",
         );
-    fs::write(fixture.path().join("telos/intents/INT-0042.tel"), intent).unwrap();
-    let constraint = fs::read_to_string(source.join("telos/constraints/CON-0003.tel"))
-        .unwrap()
-        .replace("  scope global", "  scope INT-0042");
-    fs::write(
-        fixture.path().join("telos/constraints/CON-0003.tel"),
-        constraint,
+    fs::write(fixture.path().join(intent_path), intent).unwrap();
+    let constraint_path = "telos/contexts/billing/constraints/CON-0003.tel";
+    fs::copy(
+        source.join(constraint_path),
+        fixture.path().join(constraint_path),
     )
     .unwrap();
 
@@ -501,6 +719,7 @@ pub(crate) fn all_relations_fixture_model() -> TelosModel {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use telos_core::graph::{NodeRef, Relation};
@@ -514,7 +733,9 @@ mod tests {
 
     fn graph_key_id(key: &GraphKey) -> &str {
         match key {
-            GraphKey::Notion(id)
+            GraphKey::Context(id)
+            | GraphKey::Capability(id)
+            | GraphKey::Notion(id)
             | GraphKey::Intent(id)
             | GraphKey::Scenario(id)
             | GraphKey::Constraint(id)
@@ -540,6 +761,72 @@ mod tests {
             open_changes: vec![],
         };
         ViewSnapshot::build(&state, &model)
+    }
+
+    fn graph_parent(snapshot: &ViewSnapshot, key: GraphKey) -> Option<GraphKey> {
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.key == key)
+            .unwrap_or_else(|| panic!("missing graph node {key:?}"))
+            .parent
+            .clone()
+    }
+
+    #[test]
+    fn snapshot_assigns_authoritative_compound_parents() {
+        let snapshot = fixture_snapshot();
+
+        assert_eq!(
+            graph_parent(&snapshot, GraphKey::Context("billing".to_string())),
+            None
+        );
+        assert_eq!(
+            graph_parent(
+                &snapshot,
+                GraphKey::Capability("billing/invoicing".to_string())
+            ),
+            Some(GraphKey::Context("billing".to_string()))
+        );
+        assert_eq!(
+            graph_parent(&snapshot, GraphKey::Notion("billing/Customer".to_string())),
+            Some(GraphKey::Context("billing".to_string()))
+        );
+        assert_eq!(
+            graph_parent(
+                &snapshot,
+                GraphKey::Notion("billing/InvoiceIssued".to_string())
+            ),
+            Some(GraphKey::Capability("billing/invoicing".to_string()))
+        );
+        assert_eq!(
+            graph_parent(&snapshot, GraphKey::Intent("INT-0017".to_string())),
+            Some(GraphKey::Capability("billing/invoicing".to_string()))
+        );
+        assert_eq!(
+            graph_parent(&snapshot, GraphKey::Scenario("SCN-0091".to_string())),
+            Some(GraphKey::Capability("billing/invoicing".to_string()))
+        );
+        assert_eq!(
+            graph_parent(&snapshot, GraphKey::Constraint("CON-0003".to_string())),
+            Some(GraphKey::Context("billing".to_string()))
+        );
+        assert_eq!(
+            graph_parent(
+                &snapshot,
+                GraphKey::Code("src/billing/invoice.rs".to_string())
+            ),
+            None
+        );
+        assert_eq!(
+            graph_parent(
+                &snapshot,
+                GraphKey::Test(
+                    "tests/billing.rs::scn_0107_full_payment_settles_the_invoice".to_string()
+                )
+            ),
+            None
+        );
     }
 
     #[test]
@@ -587,7 +874,12 @@ mod tests {
                 .iter()
                 .map(|notion| notion.name.as_str())
                 .collect::<Vec<_>>(),
-            ["Customer", "Invoice", "InvoiceIssued", "PaymentReceived"]
+            [
+                "billing/Customer",
+                "billing/Invoice",
+                "billing/InvoiceIssued",
+                "billing/PaymentReceived",
+            ]
         );
         assert_eq!(
             snapshot
@@ -639,10 +931,13 @@ mod tests {
                 .map(|node| graph_key_id(&node.key))
                 .collect::<Vec<_>>(),
             [
-                "Customer",
-                "Invoice",
-                "InvoiceIssued",
-                "PaymentReceived",
+                "billing",
+                "billing/invoicing",
+                "billing/settlement",
+                "billing/Customer",
+                "billing/Invoice",
+                "billing/InvoiceIssued",
+                "billing/PaymentReceived",
                 "INT-0017",
                 "INT-0042",
                 "SCN-0091",
@@ -665,18 +960,31 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             [
-                ("INT-0017", "uses", "Invoice"),
-                ("INT-0017", "uses", "InvoiceIssued"),
+                ("billing/invoicing", "belongs-to", "billing"),
+                ("billing/settlement", "belongs-to", "billing"),
+                ("billing/Customer", "belongs-to", "billing"),
+                ("billing/Invoice", "belongs-to", "billing"),
+                ("billing/InvoiceIssued", "belongs-to", "billing/invoicing"),
+                (
+                    "billing/PaymentReceived",
+                    "belongs-to",
+                    "billing/settlement"
+                ),
+                ("INT-0017", "belongs-to", "billing/invoicing"),
+                ("INT-0017", "uses", "billing/Invoice"),
+                ("INT-0017", "uses", "billing/InvoiceIssued"),
+                ("INT-0042", "belongs-to", "billing/settlement"),
                 ("INT-0042", "requires", "INT-0017"),
-                ("INT-0042", "uses", "Invoice"),
-                ("INT-0042", "uses", "PaymentReceived"),
+                ("INT-0042", "uses", "billing/Invoice"),
+                ("INT-0042", "uses", "billing/PaymentReceived"),
                 ("SCN-0091", "verifies", "INT-0017"),
-                ("SCN-0091", "uses", "Customer"),
-                ("SCN-0091", "uses", "Invoice"),
-                ("SCN-0091", "uses", "InvoiceIssued"),
+                ("SCN-0091", "uses", "billing/Customer"),
+                ("SCN-0091", "uses", "billing/Invoice"),
+                ("SCN-0091", "uses", "billing/InvoiceIssued"),
                 ("SCN-0107", "verifies", "INT-0042"),
-                ("SCN-0107", "uses", "Invoice"),
-                ("SCN-0107", "uses", "PaymentReceived"),
+                ("SCN-0107", "uses", "billing/Invoice"),
+                ("SCN-0107", "uses", "billing/PaymentReceived"),
+                ("CON-0003", "belongs-to", "billing"),
                 ("src/billing/invoice.rs", "implements", "INT-0042"),
                 (
                     "tests/billing.rs::scn_0107_full_payment_settles_the_invoice",
@@ -768,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn validated_model_projects_all_eight_relations_in_graph_order() {
+    fn validated_model_projects_strategic_and_tactical_relations() {
         let model = super::all_relations_fixture_model();
         let snapshot = ViewSnapshot::build(
             &StateReport {
@@ -779,101 +1087,33 @@ mod tests {
             &model,
         );
 
+        let relations: BTreeSet<_> = snapshot
+            .edges
+            .iter()
+            .map(|edge| edge.relation.as_str())
+            .collect();
         assert_eq!(
-            snapshot
-                .edges
-                .iter()
-                .map(|edge| (edge.from.clone(), edge.relation.as_str(), edge.to.clone()))
-                .collect::<Vec<_>>(),
-            [
-                (
-                    GraphKey::Intent("INT-0017".to_string()),
-                    "uses",
-                    GraphKey::Notion("Invoice".to_string())
-                ),
-                (
-                    GraphKey::Intent("INT-0017".to_string()),
-                    "uses",
-                    GraphKey::Notion("InvoiceIssued".to_string())
-                ),
-                (
-                    GraphKey::Intent("INT-0042".to_string()),
-                    "refines",
-                    GraphKey::Intent("INT-0017".to_string())
-                ),
-                (
-                    GraphKey::Intent("INT-0042".to_string()),
-                    "requires",
-                    GraphKey::Intent("INT-0017".to_string())
-                ),
-                (
-                    GraphKey::Intent("INT-0042".to_string()),
-                    "excludes",
-                    GraphKey::Intent("INT-0017".to_string())
-                ),
-                (
-                    GraphKey::Intent("INT-0042".to_string()),
-                    "uses",
-                    GraphKey::Notion("Invoice".to_string())
-                ),
-                (
-                    GraphKey::Intent("INT-0042".to_string()),
-                    "uses",
-                    GraphKey::Notion("PaymentReceived".to_string())
-                ),
-                (
-                    GraphKey::Scenario("SCN-0091".to_string()),
-                    "verifies",
-                    GraphKey::Intent("INT-0017".to_string())
-                ),
-                (
-                    GraphKey::Scenario("SCN-0091".to_string()),
-                    "uses",
-                    GraphKey::Notion("Customer".to_string())
-                ),
-                (
-                    GraphKey::Scenario("SCN-0091".to_string()),
-                    "uses",
-                    GraphKey::Notion("Invoice".to_string())
-                ),
-                (
-                    GraphKey::Scenario("SCN-0091".to_string()),
-                    "uses",
-                    GraphKey::Notion("InvoiceIssued".to_string())
-                ),
-                (
-                    GraphKey::Scenario("SCN-0107".to_string()),
-                    "verifies",
-                    GraphKey::Intent("INT-0042".to_string())
-                ),
-                (
-                    GraphKey::Scenario("SCN-0107".to_string()),
-                    "uses",
-                    GraphKey::Notion("Invoice".to_string())
-                ),
-                (
-                    GraphKey::Scenario("SCN-0107".to_string()),
-                    "uses",
-                    GraphKey::Notion("PaymentReceived".to_string())
-                ),
-                (
-                    GraphKey::Constraint("CON-0003".to_string()),
-                    "constrains",
-                    GraphKey::Intent("INT-0042".to_string())
-                ),
-                (
-                    GraphKey::Code("src/billing/invoice.rs".to_string()),
-                    "implements",
-                    GraphKey::Intent("INT-0042".to_string())
-                ),
-                (
-                    GraphKey::Test(
-                        "tests/billing.rs::scn_0107_full_payment_settles_the_invoice".to_string(),
-                    ),
-                    "proves",
-                    GraphKey::Scenario("SCN-0107".to_string()),
-                ),
-            ]
+            relations,
+            BTreeSet::from([
+                "belongs-to",
+                "refines",
+                "requires",
+                "excludes",
+                "verifies",
+                "uses",
+                "implements",
+                "proves",
+            ])
         );
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.from == GraphKey::Capability("billing/invoicing".to_string())
+                && edge.relation == "belongs-to"
+                && edge.to == GraphKey::Context("billing".to_string())
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.from == GraphKey::Intent("INT-0042".to_string())
+                && edge.relation == "uses"
+                && edge.to == GraphKey::Notion("billing/Invoice".to_string())
+        }));
     }
 }

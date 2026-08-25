@@ -22,8 +22,12 @@ use std::path::{Path, PathBuf};
 
 use telos_core::emit::{
     emit_bindings, emit_constraint, emit_expr, emit_file, emit_intent, emit_literal,
+    emit_owned_intent,
 };
-use telos_core::ids::{ConstraintId, FieldName, IntentId, NotionName, RepoPath, ScenarioId};
+use telos_core::ids::{
+    CapabilityId, CapabilityRef, ConstraintId, ContextId, FieldName, IntentId, NotionName, Owner,
+    RepoPath, ScenarioId,
+};
 use telos_core::model::{
     Action, AttrRef, Binding, CmpOp, Constraint, ConstraintKind, Expr, InstanceStep, Intent,
     IntentStatus, Literal, Operand, Rule, Scenario, Scope, Statement, TelFile, TestRef,
@@ -31,7 +35,9 @@ use telos_core::model::{
 use telos_core::span::{Sp, Span};
 use telos_core::syntax::{
     parse_bindings_file, parse_constraint_file, parse_expr, parse_intent_file, parse_notion_file,
+    parse_owned_intent_file,
 };
+use telos_core::workspace::parse_spec_file;
 
 // --- corpus helpers ------------------------------------------------------
 
@@ -79,26 +85,8 @@ fn read_corpus(rel: &str) -> String {
 /// Parses a corpus file with the rule its location calls for:
 /// one file = one entity, `bindings.tel` excepted.
 fn parse_corpus(rel: &str, src: &str) -> TelFile {
-    /// A parse failure in a fixture is a bug in the fixture: report which
-    /// file, and stop.
-    fn ok<T, E>(rel: &str, result: Result<T, Vec<E>>) -> T {
-        match result {
-            Ok(node) => node,
-            Err(diags) => panic!("{rel} must parse, got {} diagnostic(s)", diags.len()),
-        }
-    }
     let path = RepoPath::new(rel);
-    if rel.ends_with("bindings.tel") {
-        TelFile::Bindings(ok(rel, parse_bindings_file(&path, src)))
-    } else if rel.contains("notions/") {
-        TelFile::Notion(ok(rel, parse_notion_file(&path, src)))
-    } else if rel.contains("intents/") {
-        TelFile::Intent(ok(rel, parse_intent_file(&path, src)))
-    } else if rel.contains("constraints/") {
-        TelFile::Constraint(ok(rel, parse_constraint_file(&path, src)))
-    } else {
-        panic!("{rel}: no parse rule for this location");
-    }
+    parse_spec_file(&path, src).unwrap_or_else(|diags| panic!("{rel} must parse, got {diags:#?}"))
 }
 
 // --- 1. corpus idempotence ----------------------------------------------
@@ -110,14 +98,18 @@ fn corpus_holds_exactly_the_payload_schema_tel_files() {
     assert_eq!(
         corpus_tel_files(),
         vec![
-            "telos/bindings.tel",
-            "telos/constraints/CON-0003.tel",
-            "telos/intents/INT-0017.tel",
-            "telos/intents/INT-0042.tel",
-            "telos/notions/Customer.tel",
-            "telos/notions/Invoice.tel",
-            "telos/notions/InvoiceIssued.tel",
-            "telos/notions/PaymentReceived.tel",
+            "telos/context-map.tel",
+            "telos/contexts/billing/bindings.tel",
+            "telos/contexts/billing/capabilities/invoicing/capability.tel",
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
+            "telos/contexts/billing/capabilities/invoicing/notions/InvoiceIssued.tel",
+            "telos/contexts/billing/capabilities/settlement/capability.tel",
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+            "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel",
+            "telos/contexts/billing/constraints/CON-0003.tel",
+            "telos/contexts/billing/context.tel",
+            "telos/contexts/billing/notions/Customer.tel",
+            "telos/contexts/billing/notions/Invoice.tel",
         ]
     );
 }
@@ -157,11 +149,11 @@ fn invoice_notion_is_byte_exact_down_to_its_padding() {
     // The reference file for round-trip guarantees, spelled out: keyword padding (`def  `,
     // `attr `, `rel  `), attr-name padding (`state` to `balance`'s width),
     // enum rendering, 2-space indent.
-    let src = read_corpus("telos/notions/Invoice.tel");
+    let src = read_corpus("telos/contexts/billing/notions/Invoice.tel");
     assert_eq!(
         src,
         concat!(
-            "notion Invoice entity {\n",
+            "notion billing/Invoice entity {\n",
             "  def  \"A bill issued to a Customer for delivered work.\"\n",
             "  attr state   enum(open, settled, cancelled)\n",
             "  attr balance money\n",
@@ -170,7 +162,10 @@ fn invoice_notion_is_byte_exact_down_to_its_padding() {
         )
     );
     assert_eq!(
-        emit_file(&parse_corpus("telos/notions/Invoice.tel", &src)),
+        emit_file(&parse_corpus(
+            "telos/contexts/billing/notions/Invoice.tel",
+            &src
+        )),
         src
     );
 }
@@ -237,7 +232,7 @@ fn scenario(id: u32, title: &str) -> Scenario {
     }
 }
 
-/// `SCN-0107` of `telos/intents/INT-0042.tel`, rebuilt in code.
+/// `SCN-0107` of `telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel`, rebuilt in code.
 fn corpus_scenario() -> Scenario {
     Scenario {
         id: ScenarioId(107),
@@ -259,7 +254,7 @@ fn corpus_scenario() -> Scenario {
 
 /// An intent built entirely in code, with `Default` spans: nothing here ever
 /// came from a source file, so nothing can be echoed back from one. It is
-/// `telos/intents/INT-0042.tel`, to the byte.
+/// `telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel`, to the byte.
 fn programmatic_intent() -> Intent {
     Intent {
         id: IntentId(42),
@@ -281,22 +276,33 @@ fn programmatic_intent() -> Intent {
     }
 }
 
+fn settlement_owner() -> Owner {
+    Owner::capability(CapabilityRef::new(
+        ContextId::new("billing").unwrap(),
+        CapabilityId::new("settlement").unwrap(),
+    ))
+}
+
 #[test]
 fn programmatic_intent_survives_emit_parse_emit() {
-    let once = emit_intent(&programmatic_intent());
-    let reparsed = parse_intent_file(&RepoPath::new("telos/intents/INT-0042.tel"), &once)
-        .expect("the emitter's output must parse");
-    let twice = emit_intent(&reparsed);
+    let owner = settlement_owner();
+    let once = emit_owned_intent(&owner, &programmatic_intent());
+    let (reparsed_owner, reparsed) = parse_owned_intent_file(
+        &RepoPath::new("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"),
+        &once,
+    )
+    .expect("the emitter's output must parse");
+    let twice = emit_owned_intent(&reparsed_owner, &reparsed);
     assert_eq!(once, twice);
 }
 
 #[test]
 fn programmatic_intent_emits_the_corpus_bytes() {
-    // Same intent as `telos/intents/INT-0042.tel`: an in-code model and a
+    // Same intent as `telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel`: an in-code model and a
     // parsed one must be indistinguishable once emitted.
     assert_eq!(
-        emit_intent(&programmatic_intent()),
-        read_corpus("telos/intents/INT-0042.tel")
+        emit_owned_intent(&settlement_owner(), &programmatic_intent()),
+        read_corpus("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel")
     );
 }
 
@@ -537,7 +543,8 @@ fn an_empty_bindings_file_emits_nothing() {
     // empty file is zero bytes, not a lone newline.
     assert_eq!(emit_bindings(&[]), "");
     assert_eq!(emit_file(&TelFile::Bindings(vec![])), "");
-    let parsed = parse_bindings_file(&RepoPath::new("telos/bindings.tel"), "").unwrap();
+    let parsed =
+        parse_bindings_file(&RepoPath::new("telos/contexts/billing/bindings.tel"), "").unwrap();
     assert_eq!(emit_bindings(&parsed), "");
 }
 
@@ -591,8 +598,11 @@ fn intent_file_with(statement: Statement) -> String {
         ..programmatic_intent()
     };
     let emitted = emit_intent(&intent);
-    let reparsed = parse_intent_file(&RepoPath::new("telos/intents/INT-0042.tel"), &emitted)
-        .unwrap_or_else(|d| panic!("must parse:\n{emitted}\n({} diagnostics)", d.len()));
+    let reparsed = parse_intent_file(
+        &RepoPath::new("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"),
+        &emitted,
+    )
+    .unwrap_or_else(|d| panic!("must parse:\n{emitted}\n({} diagnostics)", d.len()));
     assert_eq!(emit_intent(&reparsed), emitted);
     emitted
 }

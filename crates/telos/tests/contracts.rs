@@ -252,38 +252,35 @@ fn checks_error_body_stays_the_frozen_triple_even_with_several_diagnostics() {
     assert_eq!(
         error["message"],
         json!(
-            "telos/intents/INT-0042.tel: unknown notion `Invoce`; closest is `Invoice`\n\
-             telos/intents/INT-0042.tel: unknown intent `INT-9999`"
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel: unknown notion `Invoce`; closest is `Invoice`\n\
+             telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel: unknown intent `INT-9999`"
         )
     );
 }
 
 /// The three agent-facing verbs are no exception to the envelope contract.
-/// `context` exposes its bounded pack as a successful envelope, while an unowned
+/// `pack` exposes its bounded work pack as a successful envelope, while an unowned
 /// `test` or `bind` still produces a complete, precisely routable failure.
 /// These assertions deliberately use the shared sealed corpus instead of
 /// recreating a transaction fixture: this test owns the envelope contract,
 /// not the commands' lifecycle fixtures.
 #[test]
-fn context_test_and_bind_freeze_their_real_json_envelopes() {
+fn pack_test_and_bind_freeze_their_real_json_envelopes() {
     let tmp = with_fixture();
 
-    let context_out = telos(tmp.path(), &["context", "INT-0042", "--json"])
+    let pack_out = telos(tmp.path(), &["pack", "INT-0042", "--json"])
         .output()
         .unwrap();
-    assert!(
-        context_out.status.success(),
-        "context failed: {context_out:?}"
-    );
-    let context = envelope(&context_out);
-    assert_exactly_the_five_keys(&context);
-    assert_eq!(context["ok"], json!(true));
-    assert_eq!(context["command"], json!("context"));
-    assert_eq!(context["error"], Value::Null);
-    assert_eq!(context["next_actions"], json!([]));
-    let result = context["result"]
+    assert!(pack_out.status.success(), "pack failed: {pack_out:?}");
+    let pack = envelope(&pack_out);
+    assert_exactly_the_five_keys(&pack);
+    assert_eq!(pack["ok"], json!(true));
+    assert_eq!(pack["command"], json!("pack"));
+    assert_eq!(pack["error"], Value::Null);
+    assert_eq!(pack["next_actions"], json!([]));
+    let result = pack["result"]
         .as_object()
-        .expect("context result is an object");
+        .expect("pack result is an object");
     assert_eq!(
         result.keys().map(String::as_str).collect::<Vec<_>>(),
         [
@@ -292,8 +289,10 @@ fn context_test_and_bind_freeze_their_real_json_envelopes() {
             "change",
             "constraints",
             "id",
+            "mappings",
             "neighbors",
             "notions",
+            "owner",
             "scenarios",
         ]
     );
@@ -301,7 +300,7 @@ fn context_test_and_bind_freeze_their_real_json_envelopes() {
     assert_eq!(result["change"], Value::Null);
     let bindings = result["bindings"]
         .as_object()
-        .expect("context bindings is an object");
+        .expect("pack bindings is an object");
     assert_eq!(
         bindings.keys().map(String::as_str).collect::<Vec<_>>(),
         ["implements", "proves"]
@@ -475,7 +474,7 @@ fn published_error_code_parser_accepts_crlf_contracts() {
     assert!(documented.contains(&"TELOS_TEST_NOT_FOUND"));
 }
 
-/// The agent workflow surface includes bounded context, red/green witnesses,
+/// The agent workflow surface includes bounded packs, red/green witnesses,
 /// journalled bindings, and the two reconciliation gates that enforce them.
 /// Keep the published contract at least as explicit as the executable one:
 /// this is deliberately a literal, representative freeze rather than prose
@@ -485,13 +484,13 @@ fn published_contract_freezes_the_agent_workflow_surface() {
     let contracts = include_str!("../../../docs/contracts.md");
 
     for required in [
-        "`context <INT-id|SCN-id>`",
+        "`pack <INT-id|SCN-id>`",
         "`test <SCN-id|--all> [--file <path>]`",
         "`bind <path> <INT-id>`",
         "`open → drafted → approved → implementing → reconciled`",
         "journal records are digest-inert",
         "The eleven gates, frozen order",
-        "| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages `telos/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`",
+        "| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages its owning `telos/contexts/<context>/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`",
         "strict versus advisory",
         "Structurally skips gates 1–4, 7, and 8",
         "the file passed with --file does not exist: `<path>`",
@@ -563,7 +562,7 @@ fn published_contract_documents_safety_boundaries() {
 }
 
 #[test]
-fn published_command_values_are_the_exact_public_0_7_set() {
+fn published_command_values_are_the_exact_public_0_9_set() {
     let contracts = include_str!("../../../docs/contracts.md");
     let rows = markdown_table(contracts, "### Canonical `command` values");
 
@@ -571,9 +570,9 @@ fn published_command_values_are_the_exact_public_0_7_set() {
     assert_eq!(
         rows[1..].iter().map(|row| row[0]).collect::<Vec<_>>(),
         [
-            "version", "init", "config", "status", "view", "check", "show", "list", "query",
-            "impact", "context", "rebuild", "change", "add", "edit", "remove", "adopt", "revert",
-            "test", "bind",
+            "version", "init", "config", "map", "status", "view", "check", "show", "list", "query",
+            "impact", "pack", "rebuild", "change", "add", "edit", "move", "remove", "adopt",
+            "revert", "test", "bind",
         ]
     );
     assert!(rows.iter().all(|row| row.len() == 2));
@@ -1244,7 +1243,7 @@ fn rebuild_plan_and_status_use_exact_representative_envelopes() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|step| step["context"].is_object())
+            .all(|step| step["pack"].is_object())
     );
 
     let status = unsealed_fixture();
@@ -1318,10 +1317,10 @@ fn full_reconcile_freezes_active_proof_refusal_and_draft_only_zero_runner() {
     assert!(!active.path().join("telos/telos.lock").exists());
 
     let draft_only = unsealed_fixture();
-    for intent in ["INT-0017", "INT-0042"] {
-        let path = draft_only
-            .path()
-            .join(format!("telos/intents/{intent}.tel"));
+    for (intent, capability) in [("INT-0017", "invoicing"), ("INT-0042", "settlement")] {
+        let path = draft_only.path().join(format!(
+            "telos/contexts/billing/capabilities/{capability}/intents/{intent}.tel"
+        ));
         let source = fs::read_to_string(&path).unwrap();
         fs::write(path, source.replace("status active", "status draft")).unwrap();
     }

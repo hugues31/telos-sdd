@@ -34,9 +34,9 @@ five keys, in this order:
 
 - `ok` — `true` on success, `false` on failure.
 - `command` — the invoked command's name: one of `"version"`, `"init"`,
-  `"config"`, `"status"`, `"view"`, `"check"`, `"show"`, `"list"`,
-  `"query"`, `"impact"`, `"context"`, `"rebuild"`, `"change"`, `"add"`,
-  `"edit"`, `"remove"`, `"adopt"`, `"revert"`, `"test"`, `"bind"`. All six
+  `"config"`, `"map"`, `"status"`, `"view"`, `"check"`, `"show"`, `"list"`,
+  `"query"`, `"impact"`, `"pack"`, `"rebuild"`, `"change"`, `"add"`,
+  `"edit"`, `"move"`, `"remove"`, `"adopt"`, `"revert"`, `"test"`, `"bind"`. All six
   `change` subcommands (`open|list|abandon|diff|approve|reconcile`) answer
   under the single `"change"` value — the envelope names the command a
   caller invoked, and `telos change …` is one command with subcommands, the
@@ -56,7 +56,7 @@ checking whether it is there.
 
 ### Canonical `command` values
 
-This table is the complete public set in 0.7. Subcommands share their parent
+This table is the complete public set in 0.9. Subcommands share their parent
 value: both `rebuild plan` and `rebuild status` answer as `"rebuild"`, and
 every `change` subcommand answers as `"change"`. The hidden `agent-guard`
 host-hook entry point is intentionally excluded: it is not a public JSON
@@ -67,6 +67,7 @@ envelope surface.
 | `version` | `telos version` |
 | `init` | `telos init` |
 | `config` | `telos config [--change CHG-NNNN]` |
+| `map` | `telos map [--change CHG-NNNN]` |
 | `status` | `telos status` |
 | `view` | `telos view [--port N] [--export DIR]` |
 | `check` | `telos check [--sealed]` |
@@ -74,11 +75,12 @@ envelope surface.
 | `list` | `telos list` |
 | `query` | `telos query` |
 | `impact` | `telos impact` |
-| `context` | `telos context` |
+| `pack` | `telos pack` |
 | `rebuild` | `telos rebuild plan` or `telos rebuild status` |
 | `change` | `telos change ...` (including `approve <id> [--expected-digest SHA256]`) |
 | `add` | `telos add` |
 | `edit` | `telos edit` |
+| `move` | `telos move` |
 | `remove` | `telos remove` |
 | `adopt` | `telos adopt [--into CHG-NNNN] [--expected-state SHA256]` |
 | `revert` | `telos revert [--expected-state SHA256]` |
@@ -91,7 +93,7 @@ envelope surface.
 { "code": "TELOS_DRIFT_DETECTED", "message": "...", "hint": "..." }
 ```
 
-- `code` — one of the 17 [error codes](#error-codes) below, as
+- `code` — one of the stable [error codes](#error-codes) below, as
   `SCREAMING_SNAKE_CASE`.
 - `message` — a human-readable, non-localized description. Correctional
   where possible (e.g. `` unknown notion `invoice`; closest is `Invoice` ``)
@@ -243,7 +245,7 @@ parses" doesn't have an obvious meaning when *nothing* parses.)
   `change` section below.
 - `drift` — `null` when `state` isn't `"drifted"`; otherwise:
   ```json
-  { "paths": ["telos/notions/Invoice.tel"], "suggestion": "telos adopt", "token": "sha256:..." }
+  { "paths": ["telos/contexts/billing/notions/Invoice.tel"], "suggestion": "telos adopt", "token": "sha256:..." }
   ```
   `paths` is sorted, and lists every drifted path — modified, missing, or
   unsealed-but-present — without distinguishing which kind (that
@@ -368,23 +370,24 @@ id (`INT-0042`, `SCN-0107`, `CON-0003`, `CHG-0001`) or a bare notion name
 numeric-nearest hint when another change exists. `next_actions` is always
 `[]`.
 
-## `context <INT-id|SCN-id>`
+## `pack <INT-id|SCN-id>`
 
-`context` returns the bounded implementation pack for one intent. A scenario
+`pack` returns the bounded implementation pack for one intent. A scenario
 argument resolves to its owning intent; notions, constraints, and changes are
 well-formed but inapplicable (`TELOS_REFERENCE_UNKNOWN`, message
-`` `context` applies to intents and scenarios ``, null hint). It is a read
+`` `pack` applies to intents and scenarios ``, null hint). It is a read
 command: `next_actions` is always `[]`.
 
 ```json
 {
-  "id": "INT-0042", "change": null,
-  "canonical": "intent INT-0042 …\n",
+  "id": "INT-0042", "owner": {"context": "billing", "capability": "settlement"}, "change": null,
+  "canonical": "intent INT-0042 in billing/settlement …\n",
   "scenarios": [{"id": "SCN-0107", "title": "…", "proved": true}],
-  "notions": [{"name": "Invoice", "canonical": "notion Invoice …\n"}],
-  "constraints": [{"id": "CON-0003", "scope": "global", "canonical": "constraint CON-0003 …\n"}],
+  "notions": [{"name": "billing/Invoice", "canonical": "notion billing/Invoice …\n"}],
+  "constraints": [{"id": "CON-0003", "scope": "context", "canonical": "constraint CON-0003 in context billing …\n"}],
   "bindings": {"implements": ["src/billing/invoice.rs"],
                "proves": [{"scenario": "SCN-0107", "test": "tests/billing.rs::scn_0107"}]},
+  "mappings": [],
   "neighbors": [{"id": "INT-0017", "title": "…", "rel": "requires", "direction": "out"}]
 }
 ```
@@ -393,7 +396,9 @@ command: `next_actions` is always `[]`.
 the disk model. Its post-overlay model applies the owner’s operations
 idempotently, folds the owner’s journal into bindings, then re-runs semantic
 validation. Thus `proved`, `implements`, and `proves` expose live
-journalled evidence; context never uses the entire spec as a prompt. Scenarios
+journalled evidence; pack never uses the entire spec as a prompt and never
+exposes supplier internals. Required context-map mappings are published as
+contracts. Scenarios
 remain in the intent’s order; notions sort by name; constraints by id;
 implements by path; proves by `(scenario, test)`; neighbours by
 `(relation, id, direction)`. Neighbours are only one-hop `refines`,
@@ -630,7 +635,7 @@ which only happens if the complaint is always the *first* thing wrong:
 | 4 | accepted bytes (each `accept` op's blob OID must still match) | `TELOS_INTEGRITY_VIOLATION`, `` `<path>` changed since it was accepted `` / `` `<path>` was accepted but no longer exists `` |
 | 5 | effective configuration validation, then the overlay (the delta's post-spec must parse, resolve references, validate active intents and events, type-check literals, and preserve referential integrity) | invalid globs/configuration use their exact `TELOS_PARSE_ERROR` or `TELOS_INTEGRITY_VIOLATION`; otherwise whatever `TELOS_*` diagnostic the semantic pass raises first |
 | 6 | no unbound code, evaluated over the post model | `TELOS_ORPHAN_CODE` |
-| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages `telos/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`, `` sealing would drop `<path>` from the code table: no binding covers it and this change does not stage telos/bindings.tel ``; hint `` the bindings shrank outside this change; reconcile or abandon the change that claims telos/bindings.tel, or restore them with `telos revert` `` |
+| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages its owning `telos/contexts/<context>/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`; the error names the uncovered path and owning bindings file |
 | 8 | sealed red/green witness for every new or changed scenario | `TELOS_SCENARIO_RED_EXPECTED` or `TELOS_TEST_SEALED` under strict policy; warnings under advisory policy |
 | 9 | sealable structure: every active scenario has at least one `proves`, and any active obligation has a nonblank runner | `TELOS_INTEGRITY_VIOLATION`, ``active scenario SCN-NNNN has no `proves` binding``; then `TELOS_TEST_NOT_FOUND` for no runner |
 | 10 | constraint checks, for the constraints this delta puts in scope | `TELOS_CONSTRAINT_FAILED` |
@@ -647,8 +652,8 @@ immediately before and after lock publication; any later edit is observable as
 drift rather than silently becoming part of the successful seal.
 
 Only once gate 11 passes does anything reach disk: the spec `.tel` files
-(through the emitter, in staged order), then the canonical folded
-`telos/bindings.tel`, then `telos.lock`, then the change file's deletion.
+(through the emitter, in staged order), then the canonical folded per-context
+`bindings.tel` files, then `telos.lock`, then the change file's deletion.
 `counters.toml` is never touched by reconcile — every id a transaction spends
 was already persisted when the op was staged. Journal records are digest-inert:
 they move an approved change to `implementing` but do not stale its approval.
@@ -739,7 +744,7 @@ change, or from any command that reads rather than mutates.
 
 ### `result` schema
 
-`add`/`edit`: `{"change": "CHG-0001", "entity": "intent", "id": "INT-0043", "scenario_ids": ["SCN-0108"], "claims": ["telos/intents/INT-0043.tel"]}`.
+`add`/`edit`: `{"change": "CHG-0001", "entity": "intent", "id": "INT-0043", "owner": "billing/settlement", "scenario_ids": ["SCN-0108"], "claims": ["telos/contexts/billing/capabilities/settlement/intents/INT-0043.tel"]}`.
 `scenario_ids` is always present, `[]` when the op allocated none (every
 kind but `add intent`/`edit intent` growing a scenario). `claims` is the
 *whole change's* claim set with the new op counted, not just this op's own
@@ -868,7 +873,7 @@ and whatever whitespace the out-of-protocol edit introduced never reaches
 the seal. After a successful `adopt` the project is `changing`, not
 `coherent` — the drift is claimed, not yet resealed.
 
-`result`: `{"change": "CHG-0002", "ops": 1, "paths": ["telos/notions/Invoice.tel"]}`.
+`result`: `{"change": "CHG-0002", "ops": 1, "paths": ["telos/contexts/billing/notions/Invoice.tel"]}`.
 `next_actions`: `["telos change diff CHG-0002", "telos change approve CHG-0002"]`.
 
 Four refusals, each handing the caller a next step (frozen wordings in the
@@ -899,7 +904,7 @@ Every restoration/deletion uses the same validated repository path contract
 as `bind`, plus capability-rooted no-follow mutation. A symlink or parent-path
 substitution therefore refuses and never writes the outside target.
 
-`result`: `{"restored": ["telos/notions/Invoice.tel"], "deleted": []}`.
+`result`: `{"restored": ["telos/contexts/billing/notions/Invoice.tel"], "deleted": []}`.
 `next_actions`: `["telos status"]`.
 
 ## `init [--agents claude,codex] [--ci github]`
@@ -939,8 +944,8 @@ passes that exact value as `--expected-digest`; before adopt/revert, the router
 presents the relevant drift paths/token and passes the exact `--expected-state`.
 The rules themselves are static prompts, while the token is a command argument
 the guard verifies independently. A token-less, stale, compound, nested, or
-environment-wrapped human-action command fails closed. The generated context
-deliberately remains a portable bounded `telos context` pack, never a
+environment-wrapped human-action command fails closed. The generated work pack
+deliberately remains a portable bounded `telos pack`, never a
 whole-spec or host-specific prompt dump.
 
 For a canonical token-bound human-action command, the guard independently
@@ -1261,8 +1266,8 @@ project metadata rather than loading the model or graph. If a lock entry
 exists, it must be readable and the project may be `coherent` or `changing`;
 `drifted` returns `TELOS_DRIFT_DETECTED`. In `changing`, every parseable open
 change is folded by ascending change ID, journals are folded, cross-change
-claims and semantic integrity are revalidated, and each context pack still
-follows the exact public `telos context` owner resolution.
+claims and semantic integrity are revalidated, and each work pack still
+follows the exact public `telos pack` owner resolution.
 
 Spec-only discovery calls the same `config.validate_self()` used by sealed
 consumers before loading a model; an invalid glob cannot be smuggled through
@@ -1277,9 +1282,9 @@ second discovery window.
 The order is a deterministic topological order over `requires`: each direct
 prerequisite precedes its dependent, and ready ties use ascending intent ID.
 Each row has exactly `n` (one-based), `intent`, `requires` (sorted direct
-prerequisites), and `context`. `context` is the complete frozen `telos context
-INT-NNNN` result: `id`, `change`, `canonical`, `scenarios`, `notions`,
-`constraints`, `bindings`, and one-hop `neighbors`.
+prerequisites), and `pack`. `pack` is the complete frozen `telos pack
+INT-NNNN` result: `id`, `owner`, `change`, `canonical`, `scenarios`, `notions`,
+`constraints`, `bindings`, `mappings`, and one-hop `neighbors`.
 
 ```json
 {
@@ -1287,8 +1292,8 @@ INT-NNNN` result: `id`, `change`, `canonical`, `scenarios`, `notions`,
   "command": "rebuild",
   "result": {
     "steps": [
-      {"n": 1, "intent": "INT-0017", "requires": [], "context": {"id": "INT-0017", "change": null, "canonical": "...", "scenarios": [{"id": "SCN-0091", "title": "a newly issued invoice is open", "proved": false}], "notions": ["..."], "constraints": ["..."], "bindings": {"implements": [], "proves": []}, "neighbors": ["..."]}},
-      {"n": 2, "intent": "INT-0042", "requires": ["INT-0017"], "context": {"id": "INT-0042", "change": null, "canonical": "...", "scenarios": [{"id": "SCN-0107", "title": "full payment settles the invoice", "proved": false}], "notions": ["..."], "constraints": ["..."], "bindings": {"implements": [], "proves": []}, "neighbors": ["..."]}}
+      {"n": 1, "intent": "INT-0017", "requires": [], "pack": {"id": "INT-0017", "owner": {"context": "billing", "capability": "invoicing"}, "change": null, "canonical": "...", "scenarios": [{"id": "SCN-0091", "title": "a newly issued invoice is open", "proved": false}], "notions": ["..."], "constraints": ["..."], "bindings": {"implements": [], "proves": []}, "mappings": [], "neighbors": ["..."]}},
+      {"n": 2, "intent": "INT-0042", "requires": ["INT-0017"], "pack": {"id": "INT-0042", "owner": {"context": "billing", "capability": "settlement"}, "change": null, "canonical": "...", "scenarios": [{"id": "SCN-0107", "title": "full payment settles the invoice", "proved": false}], "notions": ["..."], "constraints": ["..."], "bindings": {"implements": [], "proves": []}, "mappings": [], "neighbors": ["..."]}}
     ]
   },
   "error": null,
@@ -1296,9 +1301,9 @@ INT-NNNN` result: `id`, `change`, `canonical`, `scenarios`, `notions`,
 }
 ```
 
-The `"..."` entries above denote values with the exact nested `telos context`
+The `"..."` entries above denote values with the exact nested `telos pack`
 schema, not omitted response keys; executable contract tests compare every
-real step to the full public context result.
+real step to the full public pack result.
 
 #### Status and real measurement
 
@@ -1463,9 +1468,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Telos v0.8.2
+      - name: Install Telos v0.9.0
         run: |
-          version=0.8.2
+          version=0.9.0
           asset="telos_${version}_linux_amd64.tar.gz"
           base="https://github.com/hugues31/telos-sdd/releases/download/v${version}"
           cd "$RUNNER_TEMP"
@@ -1480,8 +1485,8 @@ jobs:
 ```
 
 The downloaded release version is derived from the CLI package version.
-Shipping 0.8.2 therefore requires release `v0.8.2` to carry the
-`telos_0.8.2_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
+Shipping 0.9.0 therefore requires release `v0.9.0` to carry the
+`telos_0.9.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
 generated install step cannot succeed. The workflow reports a check but does
 not itself make GitHub treat it as required: repository branch protection
 must separately require job `sealed` before merges.

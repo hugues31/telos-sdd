@@ -80,6 +80,7 @@ export type NotionKind = 'actor' | 'entity' | 'value' | 'event' | 'state';
 
 export interface NotionView {
   name: string;
+  owner: string;
   kind: NotionKind;
   definition: string;
   canonical: string;
@@ -106,6 +107,7 @@ export interface ScenarioView {
 
 export interface IntentView {
   id: string;
+  owner: string;
   title: string;
   status: IntentStatus;
   telos: string;
@@ -122,10 +124,48 @@ export type ConstraintKind = 'stack' | 'architecture' | 'quality' | 'security' |
 
 export interface ConstraintView {
   id: string;
+  owner: string;
   kind: ConstraintKind;
   title: string;
   scope: string;
   canonical: string;
+}
+
+// --- bounded contexts -------------------------------------------------------
+
+export type ContextKind = 'core' | 'supporting' | 'generic';
+
+export interface CapabilityView {
+  id: string;
+  title: string;
+  definition: string;
+}
+
+export interface NotionMappingView {
+  from: string;
+  to: string;
+}
+
+export interface ContextDependencyView {
+  supplier: string;
+  mappings: NotionMappingView[];
+}
+
+export interface ContextHealthView {
+  intents: number;
+  active_intents: number;
+  scenarios: number;
+  proved_scenarios: number;
+}
+
+export interface ContextView {
+  id: string;
+  kind: ContextKind;
+  title: string;
+  definition: string;
+  capabilities: CapabilityView[];
+  dependencies: ContextDependencyView[];
+  health: ContextHealthView;
 }
 
 // --- bindings -----------------------------------------------------------------
@@ -142,10 +182,21 @@ export interface ProofView {
 
 // --- graph --------------------------------------------------------------------
 
-export type GraphKeyKind = 'notion' | 'intent' | 'scenario' | 'constraint' | 'code' | 'test';
+export type GraphKeyKind =
+  | 'context'
+  | 'capability'
+  | 'notion'
+  | 'intent'
+  | 'scenario'
+  | 'constraint'
+  | 'code'
+  | 'test';
 
 /** Canonical `Relation::as_str()` order in `crates/telos-core/src/graph.rs`. */
 export const GRAPH_RELATIONS = [
+  'belongs-to',
+  'depends-on',
+  'maps-to',
   'refines',
   'requires',
   'excludes',
@@ -168,6 +219,7 @@ export interface GraphKey {
 export interface GraphNodeView {
   key: GraphKey;
   label: string;
+  parent: GraphKey | null;
 }
 
 export interface GraphEdgeView {
@@ -181,6 +233,7 @@ export interface GraphEdgeView {
 export interface ViewSnapshot {
   dashboard: DashboardView;
   coverage: CoverageView;
+  contexts: ContextView[];
   notions: NotionView[];
   intents: IntentView[];
   scenarios: ScenarioView[];

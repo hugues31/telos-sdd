@@ -17,7 +17,9 @@ use tempfile::TempDir;
 use telos_core::config::{AgentsCfg, Config, Globs, Policy, TddPolicy, TestCfg};
 use telos_core::counters::{Alloc, Counters, floors};
 use telos_core::error::{Diagnostic, ErrorCode};
-use telos_core::ids::{ConstraintId, IntentId, NotionName, RepoPath};
+use telos_core::ids::{
+    CapabilityId, CapabilityRef, ConstraintId, ContextId, IntentId, NotionName, Owner, RepoPath,
+};
 use telos_core::model::{Intent, Notion, StagedOp, TelFile};
 use telos_core::overlay::{
     apply_config_ops, apply_ops, apply_ops_idempotent, notions_of, op_before_after, parse_base,
@@ -112,7 +114,9 @@ fn corpus_alloc(ws: &Workspace) -> Alloc {
 fn intent_of(base: &[(RepoPath, TelFile)], id: IntentId) -> Intent {
     base.iter()
         .find_map(|(_, file)| match file {
-            TelFile::Intent(intent) if intent.id == id => Some(intent.clone()),
+            TelFile::OwnedIntent { intent, .. } | TelFile::Intent(intent) if intent.id == id => {
+                Some(intent.clone())
+            }
             _ => None,
         })
         .unwrap_or_else(|| panic!("the corpus holds {id}"))
@@ -120,6 +124,24 @@ fn intent_of(base: &[(RepoPath, TelFile)], id: IntentId) -> Intent {
 
 fn notion(name: &str) -> NotionName {
     NotionName::new(name).unwrap()
+}
+
+fn billing_owner() -> Owner {
+    Owner::context(ContextId::new("billing").unwrap())
+}
+
+fn invoicing_owner() -> Owner {
+    Owner::capability(CapabilityRef::new(
+        ContextId::new("billing").unwrap(),
+        CapabilityId::new("invoicing").unwrap(),
+    ))
+}
+
+fn settlement_owner() -> Owner {
+    Owner::capability(CapabilityRef::new(
+        ContextId::new("billing").unwrap(),
+        CapabilityId::new("settlement").unwrap(),
+    ))
 }
 
 /// The `Refund` event notion, absent from the corpus: what an `add notion`
@@ -177,14 +199,18 @@ fn parse_base_parses_every_spec_file_and_no_configuration() {
     assert_eq!(
         paths,
         [
-            "telos/bindings.tel",
-            "telos/constraints/CON-0003.tel",
-            "telos/intents/INT-0017.tel",
-            "telos/intents/INT-0042.tel",
-            "telos/notions/Customer.tel",
-            "telos/notions/Invoice.tel",
-            "telos/notions/InvoiceIssued.tel",
-            "telos/notions/PaymentReceived.tel",
+            "telos/context-map.tel",
+            "telos/contexts/billing/bindings.tel",
+            "telos/contexts/billing/capabilities/invoicing/capability.tel",
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
+            "telos/contexts/billing/capabilities/invoicing/notions/InvoiceIssued.tel",
+            "telos/contexts/billing/capabilities/settlement/capability.tel",
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+            "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel",
+            "telos/contexts/billing/constraints/CON-0003.tel",
+            "telos/contexts/billing/context.tel",
+            "telos/contexts/billing/notions/Customer.tel",
+            "telos/contexts/billing/notions/Invoice.tel",
         ],
         "`telos.toml` is configuration, not a `.tel` source"
     );
@@ -209,15 +235,22 @@ fn notions_of_collects_the_bases_notions_by_name() {
 fn apply_ops_rejects_adding_a_notion_that_already_exists() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
-    let invoice = match find(&base, "telos/notions/Invoice.tel").unwrap() {
-        TelFile::Notion(n) => n,
+    let invoice = match find(&base, "telos/contexts/billing/notions/Invoice.tel").unwrap() {
+        TelFile::OwnedNotion { notion, .. } => notion,
         other => panic!("expected a notion, got {other:?}"),
     };
 
-    let err = apply_ops(base, &[StagedOp::AddNotion(invoice)]).unwrap_err();
+    let err = apply_ops(
+        base,
+        &[StagedOp::AddOwnedNotion {
+            owner: billing_owner(),
+            notion: invoice,
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosIntegrityViolation);
-    assert_eq!(err.message, "notion `Invoice` already exists");
+    assert_eq!(err.message, "notion `billing/Invoice` already exists");
 }
 
 #[test]
@@ -226,7 +259,14 @@ fn apply_ops_rejects_adding_an_intent_that_already_exists() {
     let base = base_of(&ws);
     let existing = intent_of(&base, IntentId(17));
 
-    let err = apply_ops(base, &[StagedOp::AddIntent(existing)]).unwrap_err();
+    let err = apply_ops(
+        base,
+        &[StagedOp::AddOwnedIntent {
+            owner: invoicing_owner(),
+            intent: existing,
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosIntegrityViolation);
     assert_eq!(err.message, "intent INT-0017 already exists");
@@ -237,11 +277,21 @@ fn apply_ops_adds_an_absent_notion_at_its_own_path() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
 
-    let overlay = apply_ops(base, &[StagedOp::AddNotion(refund_notion())]).unwrap();
+    let overlay = apply_ops(
+        base,
+        &[StagedOp::AddOwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        }],
+    )
+    .unwrap();
 
     assert_eq!(
-        find(&overlay, "telos/notions/Refund.tel"),
-        Some(TelFile::Notion(refund_notion()))
+        find(&overlay, "telos/contexts/billing/notions/Refund.tel"),
+        Some(TelFile::OwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        })
     );
 }
 
@@ -254,10 +304,20 @@ fn apply_ops_rejects_editing_a_notion_the_base_does_not_hold() {
     let mut ghost = refund_notion();
     ghost.name = notion("Invoce");
 
-    let err = apply_ops(base, &[StagedOp::EditNotion(ghost)]).unwrap_err();
+    let err = apply_ops(
+        base,
+        &[StagedOp::EditOwnedNotion {
+            owner: billing_owner(),
+            notion: ghost,
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosReferenceUnknown);
-    assert_eq!(err.message, "unknown notion `Invoce`; closest is `Invoice`");
+    assert_eq!(
+        err.message,
+        "unknown notion `billing/Invoce`; closest is `billing/Invoice`"
+    );
 }
 
 #[test]
@@ -265,7 +325,14 @@ fn apply_ops_rejects_removing_an_intent_the_base_does_not_hold() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
 
-    let err = apply_ops(base, &[StagedOp::RemoveIntent(IntentId(9999))]).unwrap_err();
+    let err = apply_ops(
+        base,
+        &[StagedOp::RemoveOwnedIntent {
+            owner: settlement_owner(),
+            id: IntentId(9999),
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosReferenceUnknown);
     assert_eq!(err.message, "unknown intent `INT-9999`");
@@ -276,7 +343,14 @@ fn apply_ops_rejects_removing_a_constraint_the_base_does_not_hold() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
 
-    let err = apply_ops(base, &[StagedOp::RemoveConstraint(ConstraintId(9))]).unwrap_err();
+    let err = apply_ops(
+        base,
+        &[StagedOp::RemoveOwnedConstraint {
+            owner: Some(billing_owner()),
+            id: ConstraintId(9),
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosReferenceUnknown);
     assert_eq!(
@@ -294,7 +368,14 @@ fn apply_ops_refuses_to_remove_an_intent_another_intent_requires() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
 
-    let err = apply_ops(base, &[StagedOp::RemoveIntent(IntentId(17))]).unwrap_err();
+    let err = apply_ops(
+        base,
+        &[StagedOp::RemoveOwnedIntent {
+            owner: invoicing_owner(),
+            id: IntentId(17),
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosIntegrityViolation);
     assert_eq!(
@@ -308,12 +389,19 @@ fn apply_ops_refuses_to_remove_a_notion_an_intent_uses() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
 
-    let err = apply_ops(base, &[StagedOp::RemoveNotion(notion("Invoice"))]).unwrap_err();
+    let err = apply_ops(
+        base,
+        &[StagedOp::RemoveOwnedNotion {
+            owner: billing_owner(),
+            name: notion("Invoice"),
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosIntegrityViolation);
     assert_eq!(
         err.message,
-        "cannot remove notion `Invoice`: INT-0017 uses it"
+        "cannot remove notion `billing/Invoice`: INT-0017 uses it"
     );
 }
 
@@ -322,8 +410,15 @@ fn apply_ops_refuses_to_remove_an_intent_a_binding_implements() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
 
-    // INT-0042 is required by nobody, but `telos/bindings.tel` implements it.
-    let err = apply_ops(base, &[StagedOp::RemoveIntent(IntentId(42))]).unwrap_err();
+    // INT-0042 is required by nobody, but `telos/contexts/billing/bindings.tel` implements it.
+    let err = apply_ops(
+        base,
+        &[StagedOp::RemoveOwnedIntent {
+            owner: settlement_owner(),
+            id: IntentId(42),
+        }],
+    )
+    .unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosIntegrityViolation);
     assert_eq!(
@@ -342,19 +437,37 @@ fn apply_ops_allows_removing_an_intent_once_its_referrers_are_gone() {
     let mut bindings = base.clone();
     // `bindings.tel` is not an entity op's target, so drop the two bindings
     // by hand: this test is about the intent-to-intent reference.
-    bindings.retain(|(path, _)| path.as_str() != "telos/bindings.tel");
+    bindings.retain(|(path, _)| path.as_str() != "telos/contexts/billing/bindings.tel");
 
     let overlay = apply_ops(
         bindings,
         &[
-            StagedOp::RemoveIntent(IntentId(42)),
-            StagedOp::RemoveIntent(IntentId(17)),
+            StagedOp::RemoveOwnedIntent {
+                owner: settlement_owner(),
+                id: IntentId(42),
+            },
+            StagedOp::RemoveOwnedIntent {
+                owner: invoicing_owner(),
+                id: IntentId(17),
+            },
         ],
     )
     .unwrap();
 
-    assert_eq!(find(&overlay, "telos/intents/INT-0017.tel"), None);
-    assert_eq!(find(&overlay, "telos/intents/INT-0042.tel"), None);
+    assert_eq!(
+        find(
+            &overlay,
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"
+        ),
+        None
+    );
+    assert_eq!(
+        find(
+            &overlay,
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"
+        ),
+        None
+    );
 }
 
 /// Nothing in the model points at a constraint, so removing one is never
@@ -364,9 +477,19 @@ fn apply_ops_removes_a_constraint_nothing_can_reference() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
 
-    let overlay = apply_ops(base, &[StagedOp::RemoveConstraint(ConstraintId(3))]).unwrap();
+    let overlay = apply_ops(
+        base,
+        &[StagedOp::RemoveOwnedConstraint {
+            owner: Some(billing_owner()),
+            id: ConstraintId(3),
+        }],
+    )
+    .unwrap();
 
-    assert_eq!(find(&overlay, "telos/constraints/CON-0003.tel"), None);
+    assert_eq!(
+        find(&overlay, "telos/contexts/billing/constraints/CON-0003.tel"),
+        None
+    );
 }
 
 // --- apply_ops: order -------------------------------------------------------
@@ -381,15 +504,24 @@ fn apply_ops_replays_its_ops_in_staged_order() {
     let overlay = apply_ops(
         base,
         &[
-            StagedOp::AddNotion(refund_notion()),
-            StagedOp::EditNotion(edited.clone()),
+            StagedOp::AddOwnedNotion {
+                owner: billing_owner(),
+                notion: refund_notion(),
+            },
+            StagedOp::EditOwnedNotion {
+                owner: billing_owner(),
+                notion: edited.clone(),
+            },
         ],
     )
     .unwrap();
 
     assert_eq!(
-        find(&overlay, "telos/notions/Refund.tel"),
-        Some(TelFile::Notion(edited))
+        find(&overlay, "telos/contexts/billing/notions/Refund.tel"),
+        Some(TelFile::OwnedNotion {
+            owner: billing_owner(),
+            notion: edited,
+        })
     );
 }
 
@@ -425,8 +557,14 @@ fn apply_ops_leaves_an_accept_op_alone() {
 /// one, in one plan.
 fn adopted_delta() -> [StagedOp; 2] {
     [
-        StagedOp::AddNotion(refund_notion()),
-        StagedOp::RemoveConstraint(ConstraintId(3)),
+        StagedOp::AddOwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        },
+        StagedOp::RemoveOwnedConstraint {
+            owner: Some(billing_owner()),
+            id: ConstraintId(3),
+        },
     ]
 }
 
@@ -461,16 +599,22 @@ fn apply_ops_idempotent_is_a_no_op_on_an_already_applied_delta() {
     // And `once` really is the post-state, not the base: the added notion is
     // there, the removed constraint is gone.
     assert_eq!(
-        find(&once, "telos/notions/Refund.tel"),
-        Some(TelFile::Notion(refund_notion()))
+        find(&once, "telos/contexts/billing/notions/Refund.tel"),
+        Some(TelFile::OwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        })
     );
-    assert_eq!(find(&once, "telos/constraints/CON-0003.tel"), None);
+    assert_eq!(
+        find(&once, "telos/contexts/billing/constraints/CON-0003.tel"),
+        None
+    );
 
     // The contrast that justifies the second function at all: the strict
     // application refuses the very same replay.
     let refused = apply_ops(once, &ops).unwrap_err();
     assert_eq!(refused.code, ErrorCode::TelosIntegrityViolation);
-    assert_eq!(refused.message, "notion `Refund` already exists");
+    assert_eq!(refused.message, "notion `billing/Refund` already exists");
 }
 
 // --- validate_ops_idempotent ------------------------------------------------
@@ -482,14 +626,27 @@ fn validate_ops_idempotent_accepts_a_notion_and_an_intent_that_uses_it() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
     let mut alloc = corpus_alloc(&ws);
-    let staged = apply_ops(base, &[StagedOp::AddNotion(refund_notion())]).unwrap();
+    let staged = apply_ops(
+        base,
+        &[StagedOp::AddOwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        }],
+    )
+    .unwrap();
     let intent = refund_intent(&notions_of(&staged), &mut alloc);
 
     let model = validate_ops_idempotent(
         &ws,
         &[
-            StagedOp::AddNotion(refund_notion()),
-            StagedOp::AddIntent(intent),
+            StagedOp::AddOwnedNotion {
+                owner: billing_owner(),
+                notion: refund_notion(),
+            },
+            StagedOp::AddOwnedIntent {
+                owner: settlement_owner(),
+                intent,
+            },
         ],
     )
     .unwrap_or_else(|diags| panic!("expected the overlay to validate, got {diags:?}"));
@@ -512,14 +669,27 @@ fn validate_ops_idempotent_judges_the_final_overlay_not_each_intermediate_state(
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
     let mut alloc = corpus_alloc(&ws);
-    let staged = apply_ops(base, &[StagedOp::AddNotion(refund_notion())]).unwrap();
+    let staged = apply_ops(
+        base,
+        &[StagedOp::AddOwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        }],
+    )
+    .unwrap();
     let intent = refund_intent(&notions_of(&staged), &mut alloc);
 
     let model = validate_ops_idempotent(
         &ws,
         &[
-            StagedOp::AddIntent(intent),
-            StagedOp::AddNotion(refund_notion()),
+            StagedOp::AddOwnedIntent {
+                owner: settlement_owner(),
+                intent,
+            },
+            StagedOp::AddOwnedNotion {
+                owner: billing_owner(),
+                notion: refund_notion(),
+            },
         ],
     )
     .unwrap_or_else(|diags| panic!("expected the overlay to validate, got {diags:?}"));
@@ -535,11 +705,25 @@ fn validate_ops_idempotent_reports_a_dangling_reference_in_a_staged_op() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
     let mut alloc = corpus_alloc(&ws);
-    let staged = apply_ops(base, &[StagedOp::AddNotion(refund_notion())]).unwrap();
+    let staged = apply_ops(
+        base,
+        &[StagedOp::AddOwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        }],
+    )
+    .unwrap();
     let intent = refund_intent(&notions_of(&staged), &mut alloc);
 
     // The notion the intent needs is never staged.
-    let diagnostics = validate_ops_idempotent(&ws, &[StagedOp::AddIntent(intent)]).unwrap_err();
+    let diagnostics = validate_ops_idempotent(
+        &ws,
+        &[StagedOp::AddOwnedIntent {
+            owner: settlement_owner(),
+            intent,
+        }],
+    )
+    .unwrap_err();
 
     assert!(
         diagnostics
@@ -550,7 +734,7 @@ fn validate_ops_idempotent_reports_a_dangling_reference_in_a_staged_op() {
     );
     assert_eq!(
         diagnostics[0].file.as_ref().map(RepoPath::as_str),
-        Some("telos/intents/INT-0043.tel")
+        Some("telos/contexts/billing/capabilities/settlement/intents/INT-0043.tel")
     );
 }
 
@@ -568,7 +752,10 @@ fn validate_ops_idempotent_reports_a_dangling_reference_in_a_staged_op() {
 fn validate_ops_idempotent_catches_a_rule_2_violation_as_an_unresolvable_reference() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
-    let ops = [StagedOp::RemoveIntent(IntentId(17))];
+    let ops = [StagedOp::RemoveOwnedIntent {
+        owner: invoicing_owner(),
+        id: IntentId(17),
+    }];
 
     // The staging path: refused, naming the referrer.
     let strict = apply_ops(base, &ops).unwrap_err();
@@ -589,7 +776,7 @@ fn validate_ops_idempotent_catches_a_rule_2_violation_as_an_unresolvable_referen
     );
     assert_eq!(
         diagnostics[0].file.as_ref().map(RepoPath::as_str),
-        Some("telos/intents/INT-0042.tel"),
+        Some("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"),
         "and locate it in the file that still points at it"
     );
 }
@@ -610,12 +797,21 @@ fn validate_ops_idempotent_with_no_op_is_the_sealed_model() {
 fn op_before_after_of_an_add_has_no_before() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
-    let ops = [StagedOp::AddNotion(refund_notion())];
+    let ops = [StagedOp::AddOwnedNotion {
+        owner: billing_owner(),
+        notion: refund_notion(),
+    }];
 
     let (before, after) = op_before_after(&base, &ops, 0);
 
     assert_eq!(before, None);
-    assert_eq!(after, Some(telos_core::emit::emit_notion(&refund_notion())));
+    assert_eq!(
+        after,
+        Some(telos_core::emit::emit_owned_notion(
+            &billing_owner(),
+            &refund_notion(),
+        ))
+    );
 }
 
 #[test]
@@ -631,15 +827,30 @@ fn op_before_after_of_an_edit_reports_both_canonical_states() {
     )
     .unwrap()
     .0;
-    let ops = [StagedOp::EditIntent(patched.clone())];
+    let ops = [StagedOp::EditOwnedIntent {
+        owner: invoicing_owner(),
+        intent: patched.clone(),
+    }];
 
     let (before, after) = op_before_after(&base, &ops, 0);
 
     assert_eq!(
         before,
-        Some(fs::read_to_string(ws.repo_root.join("telos/intents/INT-0017.tel")).unwrap())
+        Some(
+            fs::read_to_string(
+                ws.repo_root
+                    .join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel")
+            )
+            .unwrap()
+        )
     );
-    assert_eq!(after, Some(telos_core::emit::emit_intent(&patched)));
+    assert_eq!(
+        after,
+        Some(telos_core::emit::emit_owned_intent(
+            &invoicing_owner(),
+            &patched,
+        ))
+    );
     assert!(after.unwrap().contains("Reworded."));
 }
 
@@ -647,7 +858,10 @@ fn op_before_after_of_an_edit_reports_both_canonical_states() {
 fn op_before_after_of_a_remove_has_no_after() {
     let (_tmp, ws) = corpus();
     let base = base_of(&ws);
-    let ops = [StagedOp::RemoveConstraint(ConstraintId(3))];
+    let ops = [StagedOp::RemoveOwnedConstraint {
+        owner: Some(billing_owner()),
+        id: ConstraintId(3),
+    }];
 
     let (before, after) = op_before_after(&base, &ops, 0);
 
@@ -664,17 +878,32 @@ fn op_before_after_replays_the_ops_that_precede_the_target() {
     let mut edited = refund_notion();
     edited.def = "Reworded.".to_string();
     let ops = [
-        StagedOp::AddNotion(refund_notion()),
-        StagedOp::EditNotion(edited.clone()),
+        StagedOp::AddOwnedNotion {
+            owner: billing_owner(),
+            notion: refund_notion(),
+        },
+        StagedOp::EditOwnedNotion {
+            owner: billing_owner(),
+            notion: edited.clone(),
+        },
     ];
 
     let (before, after) = op_before_after(&base, &ops, 1);
 
     assert_eq!(
         before,
-        Some(telos_core::emit::emit_notion(&refund_notion()))
+        Some(telos_core::emit::emit_owned_notion(
+            &billing_owner(),
+            &refund_notion(),
+        ))
     );
-    assert_eq!(after, Some(telos_core::emit::emit_notion(&edited)));
+    assert_eq!(
+        after,
+        Some(telos_core::emit::emit_owned_notion(
+            &billing_owner(),
+            &edited,
+        ))
+    );
 }
 
 /// An `accept` op targets a path the overlay holds no entity for: nothing

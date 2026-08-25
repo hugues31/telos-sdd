@@ -139,8 +139,9 @@ use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::NodeRef;
-use crate::ids::{ConstraintId, IntentId, RepoPath, ScenarioId};
-use crate::lock::Lock;
+use crate::ids::{ConstraintId, ContextId, IntentId, NotionRef, RepoPath, ScenarioId};
+use crate::lock::{LOCK_VERSION, Lock};
+use crate::model::change::context_bindings_path;
 use crate::model::{
     Binding, Change, ChangeStatus, Constraint, IntentStatus, JournalEntry, Scope, StagedOp,
     TelFile, TelosModel, TestRef,
@@ -150,7 +151,7 @@ use crate::repo_fs::RepoFs;
 use crate::semantic::build_model;
 use crate::state::{DRIFT_HINT, compute_state};
 use crate::witness::{WitnessVerdict, required_witnesses, witness_verdict};
-use crate::workspace::{BINDINGS_PATH, Workspace};
+use crate::workspace::Workspace;
 
 /// What one reconcile did.
 #[derive(Debug)]
@@ -455,7 +456,7 @@ fn lock_from_maps(
     sealed_by: Option<crate::ids::ChangeId>,
 ) -> Lock {
     Lock {
-        version: 1,
+        version: LOCK_VERSION,
         tool: format!("telos {}", crate::VERSION),
         sealed_by,
         spec_digest: Lock::compute_digest(&spec),
@@ -840,8 +841,10 @@ fn require_no_coverage_shrink(
     // shows an approver which `implements` line the delta drops. Until then
     // what is exempted here is ownership, not a line-level review -- see the
     // doc above, which says so rather than implying otherwise.
-    let bindings_path = RepoPath::new(BINDINGS_PATH);
-    if ops.iter().any(|op| op.target_path() == bindings_path) {
+    if ops
+        .iter()
+        .any(|op| is_context_bindings_path(&op.target_path()))
+    {
         return Ok(());
     }
 
@@ -854,13 +857,18 @@ fn require_no_coverage_shrink(
         ErrorCode::TelosIntegrityViolation,
         format!(
             "sealing would drop `{dropped}` from the code table: no binding covers it \
-             and this change does not stage {BINDINGS_PATH}"
+             and this change does not stage its context bindings file"
         ),
     )
     .hint(
         "the bindings shrank outside this change; reconcile or abandon the change that \
-         claims telos/bindings.tel, or restore them with `telos revert`",
+         claims the context bindings file, or restore it with `telos revert`",
     ))
+}
+
+fn is_context_bindings_path(path: &RepoPath) -> bool {
+    let parts: Vec<&str> = path.as_str().split('/').collect();
+    matches!(parts.as_slice(), ["telos", "contexts", _, "bindings.tel"])
 }
 
 // --- gate 8: the sealed red witness -------------------------------------
@@ -1003,6 +1011,40 @@ fn impacted_nodes(ws: &Workspace, model: &TelosModel, ops: &[StagedOp]) -> BTree
     let mut nodes = BTreeSet::new();
     for op in ops {
         let (node, source) = match op {
+            StagedOp::AddContext(context) | StagedOp::EditContext(context) => {
+                (NodeRef::Context(context.id.clone()), Some(model))
+            }
+            StagedOp::RemoveContext(id) => (NodeRef::Context(id.clone()), pre.as_ref()),
+            StagedOp::AddCapability(capability) | StagedOp::EditCapability(capability) => {
+                (NodeRef::Capability(capability.id.clone()), Some(model))
+            }
+            StagedOp::RemoveCapability(id) => (NodeRef::Capability(id.clone()), pre.as_ref()),
+            StagedOp::AddOwnedNotion { owner, notion }
+            | StagedOp::EditOwnedNotion { owner, notion }
+            | StagedOp::MoveNotion {
+                to: owner, notion, ..
+            } => (
+                NodeRef::QualifiedNotion(NotionRef::new(
+                    owner.context.clone(),
+                    notion.name.clone(),
+                )),
+                Some(model),
+            ),
+            StagedOp::RemoveOwnedNotion { owner, name } => (
+                NodeRef::QualifiedNotion(NotionRef::new(owner.context.clone(), name.clone())),
+                pre.as_ref(),
+            ),
+            StagedOp::AddOwnedIntent { intent, .. }
+            | StagedOp::EditOwnedIntent { intent, .. }
+            | StagedOp::MoveIntent { intent, .. } => (NodeRef::Intent(intent.id), Some(model)),
+            StagedOp::RemoveOwnedIntent { id, .. } => (NodeRef::Intent(*id), pre.as_ref()),
+            StagedOp::AddOwnedConstraint { constraint, .. }
+            | StagedOp::EditOwnedConstraint { constraint, .. }
+            | StagedOp::MoveConstraint { constraint, .. } => {
+                (NodeRef::Constraint(constraint.id), Some(model))
+            }
+            StagedOp::RemoveOwnedConstraint { id, .. } => (NodeRef::Constraint(*id), pre.as_ref()),
+            StagedOp::EditContextMap(_) => continue,
             StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => {
                 (NodeRef::Notion(n.name.clone()), Some(model))
             }
@@ -1034,7 +1076,14 @@ fn impacted_nodes(ws: &Workspace, model: &TelosModel, ops: &[StagedOp]) -> BTree
 fn is_remove(op: &StagedOp) -> bool {
     matches!(
         op,
-        StagedOp::RemoveNotion(_) | StagedOp::RemoveIntent(_) | StagedOp::RemoveConstraint(_)
+        StagedOp::RemoveContext(_)
+            | StagedOp::RemoveCapability(_)
+            | StagedOp::RemoveOwnedNotion { .. }
+            | StagedOp::RemoveOwnedIntent { .. }
+            | StagedOp::RemoveOwnedConstraint { .. }
+            | StagedOp::RemoveNotion(_)
+            | StagedOp::RemoveIntent(_)
+            | StagedOp::RemoveConstraint(_)
     )
 }
 
@@ -1241,6 +1290,57 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
     let path = op.target_path();
 
     let content = match op {
+        StagedOp::AddContext(context) | StagedOp::EditContext(context) => {
+            emit_file(&TelFile::Context(context.clone()))
+        }
+        StagedOp::AddCapability(capability) | StagedOp::EditCapability(capability) => {
+            emit_file(&TelFile::Capability(capability.clone()))
+        }
+        StagedOp::AddOwnedNotion { owner, notion }
+        | StagedOp::EditOwnedNotion { owner, notion } => emit_file(&TelFile::OwnedNotion {
+            owner: owner.clone(),
+            notion: notion.clone(),
+        }),
+        StagedOp::AddOwnedIntent { owner, intent }
+        | StagedOp::EditOwnedIntent { owner, intent } => emit_file(&TelFile::OwnedIntent {
+            owner: owner.clone(),
+            intent: intent.clone(),
+        }),
+        StagedOp::AddOwnedConstraint { owner, constraint }
+        | StagedOp::EditOwnedConstraint { owner, constraint } => {
+            emit_file(&TelFile::OwnedConstraint {
+                owner: owner.clone(),
+                constraint: constraint.clone(),
+            })
+        }
+        StagedOp::EditContextMap(map) => emit_file(&TelFile::ContextMap(map.clone())),
+        StagedOp::MoveNotion { to, notion, .. } => {
+            if let Some(source) = op.source_path() {
+                repo_fs.remove_file(&source)?;
+            }
+            emit_file(&TelFile::OwnedNotion {
+                owner: to.clone(),
+                notion: notion.clone(),
+            })
+        }
+        StagedOp::MoveIntent { to, intent, .. } => {
+            if let Some(source) = op.source_path() {
+                repo_fs.remove_file(&source)?;
+            }
+            emit_file(&TelFile::OwnedIntent {
+                owner: to.clone(),
+                intent: intent.clone(),
+            })
+        }
+        StagedOp::MoveConstraint { to, constraint, .. } => {
+            if let Some(source) = op.source_path() {
+                repo_fs.remove_file(&source)?;
+            }
+            emit_file(&TelFile::OwnedConstraint {
+                owner: to.clone(),
+                constraint: constraint.clone(),
+            })
+        }
         StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => emit_file(&TelFile::Notion(n.clone())),
         StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => emit_file(&TelFile::Intent(i.clone())),
         StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => {
@@ -1248,7 +1348,14 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
         }
         StagedOp::EditConfig(config) => crate::emit::emit_config(config)?,
         StagedOp::Accept { .. } => return Ok(()),
-        StagedOp::RemoveNotion(_) | StagedOp::RemoveIntent(_) | StagedOp::RemoveConstraint(_) => {
+        StagedOp::RemoveContext(_)
+        | StagedOp::RemoveCapability(_)
+        | StagedOp::RemoveOwnedNotion { .. }
+        | StagedOp::RemoveOwnedIntent { .. }
+        | StagedOp::RemoveOwnedConstraint { .. }
+        | StagedOp::RemoveNotion(_)
+        | StagedOp::RemoveIntent(_)
+        | StagedOp::RemoveConstraint(_) => {
             return repo_fs.remove_file(&path);
         }
     };
@@ -1256,8 +1363,8 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
     repo_fs.write(&path, content.as_bytes())
 }
 
-/// Writes `telos/bindings.tel` from the folded model, through the
-/// emitter like every other spec file this transaction writes.
+/// Writes each context's derived `bindings.tel` from the folded model,
+/// through the emitter like every other spec file this transaction writes.
 ///
 /// The whole table is re-emitted rather than appended to: `model.bindings`
 /// already holds what the sealed file said *plus* what the journal folded in
@@ -1272,14 +1379,35 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
 /// for. (`telos init` creates the file empty, so this only ever spares a
 /// tree that was assembled by hand.)
 fn write_bindings(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
-    let path = RepoPath::new(BINDINGS_PATH);
     let repo_fs = RepoFs::open(&ws.repo_root)?;
-    if model.bindings.is_empty() && repo_fs.read_optional(&path)?.is_none() {
-        return Ok(());
+    if model.bindings.len() != model.binding_contexts.len() {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            "cannot persist bindings without an owning context",
+        ));
     }
 
-    let content = emit_file(&TelFile::Bindings(model.bindings.clone()));
-    repo_fs.write(&path, content.as_bytes())
+    let mut by_context = BTreeMap::<ContextId, Vec<Binding>>::new();
+    for (binding, context) in model.bindings.iter().zip(&model.binding_contexts) {
+        by_context
+            .entry(context.clone())
+            .or_default()
+            .push(binding.clone());
+    }
+
+    for context in model.contexts.keys() {
+        let path = context_bindings_path(context);
+        let bindings = by_context.remove(context).unwrap_or_default();
+        if bindings.is_empty() && repo_fs.read_optional(&path)?.is_none() {
+            continue;
+        }
+        let content = emit_file(&TelFile::ContextBindings {
+            context: context.clone(),
+            bindings,
+        });
+        repo_fs.write(&path, content.as_bytes())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1482,14 +1610,14 @@ mod tests {
             error.message,
             format!(
                 "sealing would drop `{CODE}` from the code table: no binding covers it \
-                 and this change does not stage telos/bindings.tel"
+                 and this change does not stage its context bindings file"
             )
         );
         assert_eq!(
             error.hint.as_deref(),
             Some(
                 "the bindings shrank outside this change; reconcile or abandon the change \
-                 that claims telos/bindings.tel, or restore them with `telos revert`"
+                 that claims the context bindings file, or restore it with `telos revert`"
             )
         );
     }
@@ -1499,7 +1627,10 @@ mod tests {
         // The `accept` op `adopt` stages *is* the review: a human approved a
         // delta whose whole content is the new bindings table.
         let previous = lock_of(&[], &[(CODE, oid("c"))]);
-        let ops = [accept(BINDINGS_PATH), accept("telos/telos.toml")];
+        let ops = [
+            accept("telos/contexts/billing/bindings.tel"),
+            accept("telos/telos.toml"),
+        ];
 
         assert!(require_no_coverage_shrink(&previous, &TelosModel::default(), &ops).is_ok());
     }

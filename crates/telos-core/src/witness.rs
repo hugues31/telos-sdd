@@ -293,7 +293,10 @@ pub fn required_witnesses(
 
     for op in ops {
         let intent_id = match op {
-            StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => i.id,
+            StagedOp::AddOwnedIntent { intent, .. }
+            | StagedOp::EditOwnedIntent { intent, .. }
+            | StagedOp::AddIntent(intent)
+            | StagedOp::EditIntent(intent) => intent.id,
             _ => continue,
         };
         let Some(post_intent) = post.intents.get(&intent_id) else {
@@ -322,7 +325,9 @@ pub fn required_witnesses(
 /// The intent named `id` among `base`'s parsed files, if any declares it.
 fn find_base_intent(base: &[(RepoPath, TelFile)], id: IntentId) -> Option<&Intent> {
     base.iter().find_map(|(_, file)| match file {
-        TelFile::Intent(intent) if intent.id == id => Some(intent),
+        TelFile::OwnedIntent { intent, .. } | TelFile::Intent(intent) if intent.id == id => {
+            Some(intent)
+        }
         _ => None,
     })
 }

@@ -11,6 +11,7 @@ import ThemeToggle from './ThemeToggle.vue';
 // from the nav itself.
 const links = [
   { to: '/', label: 'Dashboard' },
+  { to: '/contexts', label: 'Contexts' },
   { to: '/intents', label: 'Intents' },
   { to: '/graph', label: 'Graph' },
   { to: '/glossary', label: 'Glossary' },

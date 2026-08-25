@@ -58,6 +58,12 @@ enum Command {
         #[arg(long)]
         change: Option<String>,
     },
+    /// Print the bounded-context map, or stage its complete replacement.
+    Map {
+        /// The change to stage into (`CHG-0001`). The map DSL is read on stdin.
+        #[arg(long)]
+        change: Option<String>,
+    },
     /// Report the project's state against its seal and its spec coverage.
     Status,
     /// View Telos documentation locally or export a sealed static snapshot.
@@ -85,6 +91,12 @@ enum Command {
     List {
         /// Which kind of entity to list.
         kind: EntityType,
+        /// Restrict results to one bounded context.
+        #[arg(long)]
+        context: Option<String>,
+        /// Restrict results to one capability (qualified, or paired with --context).
+        #[arg(long)]
+        capability: Option<String>,
     },
     /// Answer with entities of one kind, filtered.
     Query {
@@ -100,7 +112,7 @@ enum Command {
     /// Print the bounded work pack of one intent: its scenarios, notions,
     /// applicable constraints, bindings and 1-hop neighbours -- the unit of
     /// agent context.
-    Context {
+    Pack {
         /// An intent id (`INT-0042`) or a scenario id (`SCN-0107`), which
         /// resolves to the intent that owns it.
         target: String,
@@ -129,6 +141,17 @@ enum Command {
         kind: EntityKind,
         /// The entity's natural key (`Invoice`, `INT-0042`, `CON-0003`).
         key: String,
+        /// The change to stage into (`CHG-0001`).
+        #[arg(long)]
+        change: String,
+    },
+    /// Move an owned entity to another domain owner.
+    Move {
+        /// A typed entity selector (`INT-0042`, `CON-0003`, `NOT:billing/Invoice`).
+        target: String,
+        /// Destination owner (`context`, `context/capability`, or `project`).
+        #[arg(long)]
+        to: String,
         /// The change to stage into (`CHG-0001`).
         #[arg(long)]
         change: String,
@@ -192,6 +215,7 @@ impl Command {
             Command::Init { .. } => "init",
             Command::AgentGuard { .. } => "agent-guard",
             Command::Config { .. } => "config",
+            Command::Map { .. } => "map",
             Command::Status => "status",
             Command::View { .. } => "view",
             Command::Check { .. } => "check",
@@ -199,7 +223,7 @@ impl Command {
             Command::List { .. } => "list",
             Command::Query { .. } => "query",
             Command::Impact { .. } => "impact",
-            Command::Context { .. } => "context",
+            Command::Pack { .. } => "pack",
             Command::Rebuild { .. } => "rebuild",
             // One `command` for all three verbs: the envelope names the
             // command a caller invoked, and `telos change …` is one command
@@ -209,6 +233,7 @@ impl Command {
             // argument, so each names itself.
             Command::Add { .. } => "add",
             Command::Edit { .. } => "edit",
+            Command::Move { .. } => "move",
             Command::Remove { .. } => "remove",
             // The two exits from drift, each its own command.
             Command::Adopt { .. } => "adopt",
@@ -262,6 +287,10 @@ fn execute(command: &Command) -> CmdResult {
             let payload = change.as_ref().map(|_| stdin_payload()).transpose()?;
             commands::config::run(&ctx()?, change.as_deref(), payload.as_deref())
         }
+        Command::Map { change } => {
+            let payload = change.as_ref().map(|_| stdin_payload()).transpose()?;
+            commands::map::run(&ctx()?, change.as_deref(), payload.as_deref())
+        }
         Command::Status => commands::status::run(&ctx()?),
         Command::View {
             export: Some(destination),
@@ -280,10 +309,14 @@ fn execute(command: &Command) -> CmdResult {
         }
         Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
         Command::Show { target } => commands::show::run(&ctx()?, target),
-        Command::List { kind } => commands::list::run(&ctx()?, *kind),
+        Command::List {
+            kind,
+            context,
+            capability,
+        } => commands::list::run(&ctx()?, *kind, context.as_deref(), capability.as_deref()),
         Command::Query { query } => commands::query::run(&ctx()?, query),
         Command::Impact { target } => commands::impact::run(&ctx()?, target),
-        Command::Context { target } => commands::context::run(&ctx()?, target),
+        Command::Pack { target } => commands::context::run(&ctx()?, target),
         Command::Rebuild { rebuild } => commands::rebuild::run(&ctx()?, rebuild),
         Command::Change { change } => commands::change::run(&ctx()?, change),
         Command::Add { kind, change } => {
@@ -291,6 +324,9 @@ fn execute(command: &Command) -> CmdResult {
         }
         Command::Edit { kind, key, change } => {
             commands::mutate::edit(&ctx()?, *kind, key, change, &stdin_payload()?)
+        }
+        Command::Move { target, to, change } => {
+            commands::mutate::move_entity(&ctx()?, target, to, change)
         }
         Command::Remove { kind, key, change } => {
             commands::mutate::remove(&ctx()?, *kind, key, change)

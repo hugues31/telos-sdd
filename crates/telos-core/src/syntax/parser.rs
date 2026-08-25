@@ -17,13 +17,14 @@ use crate::config::{AgentHost, AgentsCfg, Config, Globs, Policy, TddPolicy, Test
 use crate::error::{Diagnostic, ErrorCode};
 use crate::git::Oid;
 use crate::ids::{
-    ChangeId, ConstraintId, EntityRef, FieldName, IntentId, NotionName, RepoPath, ScenarioId,
+    CapabilityId, CapabilityRef, ChangeId, ConstraintId, ContextId, EntityRef, FieldName, IntentId,
+    NotionName, NotionRef, Owner, RepoPath, ScenarioId,
 };
 use crate::model::{
-    Action, Attr, AttrRef, AttrType, Binding, Change, ChangeStatus, CmpOp, Constraint,
-    ConstraintKind, Expr, InstanceStep, Intent, IntentStatus, JournalEntry, Literal, Notion,
-    NotionKind, Operand, Rel, Rule, Scenario, Scope, StagedOp, Statement, TestRef, TestRun,
-    Witness,
+    Action, Attr, AttrRef, AttrType, Binding, Capability, Change, ChangeStatus, CmpOp, Constraint,
+    ConstraintKind, Context, ContextDependency, ContextKind, ContextMap, Expr, InstanceStep,
+    Intent, IntentStatus, JournalEntry, Literal, Notion, NotionKind, NotionMapping, Operand, Rel,
+    Rule, Scenario, Scope, StagedOp, Statement, TestRef, TestRun, Witness,
 };
 use crate::span::{Sp, Span, line_col};
 use crate::suggest::closest;
@@ -37,6 +38,12 @@ const NOTION_KINDS: [(&str, NotionKind); 5] = [
     ("value", NotionKind::Value),
     ("event", NotionKind::Event),
     ("state", NotionKind::State),
+];
+
+const CONTEXT_KINDS: [(&str, ContextKind); 3] = [
+    ("core", ContextKind::Core),
+    ("supporting", ContextKind::Supporting),
+    ("generic", ContextKind::Generic),
 ];
 
 /// The `attr-type` head words, in grammar order.
@@ -169,6 +176,25 @@ pub fn parse_notion_file(path: &RepoPath, src: &str) -> Result<Notion, Vec<Diagn
     parse_file(path, src, |p: &mut P<'_>| p.notion_file())
 }
 
+pub fn parse_context_file(path: &RepoPath, src: &str) -> Result<Context, Vec<Diagnostic>> {
+    parse_file(path, src, |p: &mut P<'_>| p.context_file())
+}
+
+pub fn parse_capability_file(path: &RepoPath, src: &str) -> Result<Capability, Vec<Diagnostic>> {
+    parse_file(path, src, |p: &mut P<'_>| p.capability_file())
+}
+
+pub fn parse_context_map_file(path: &RepoPath, src: &str) -> Result<ContextMap, Vec<Diagnostic>> {
+    parse_file(path, src, |p: &mut P<'_>| p.context_map_file())
+}
+
+pub fn parse_owned_notion_file(
+    path: &RepoPath,
+    src: &str,
+) -> Result<(Owner, Notion), Vec<Diagnostic>> {
+    parse_file(path, src, |p: &mut P<'_>| p.owned_notion_file())
+}
+
 /// Parses a whole `intent` file, statement block and scenarios
 /// included.
 ///
@@ -179,9 +205,23 @@ pub fn parse_intent_file(path: &RepoPath, src: &str) -> Result<Intent, Vec<Diagn
     parse_file(path, src, |p: &mut P<'_>| p.intent_file())
 }
 
+pub fn parse_owned_intent_file(
+    path: &RepoPath,
+    src: &str,
+) -> Result<(Owner, Intent), Vec<Diagnostic>> {
+    parse_file(path, src, |p: &mut P<'_>| p.owned_intent_file())
+}
+
 /// Parses a whole `constraint` file.
 pub fn parse_constraint_file(path: &RepoPath, src: &str) -> Result<Constraint, Vec<Diagnostic>> {
     parse_file(path, src, |p: &mut P<'_>| p.constraint_file())
+}
+
+pub fn parse_owned_constraint_file(
+    path: &RepoPath,
+    src: &str,
+) -> Result<(Option<Owner>, Constraint), Vec<Diagnostic>> {
+    parse_file(path, src, |p: &mut P<'_>| p.owned_constraint_file())
 }
 
 /// Parses the `bindings.tel` file: zero or more binding lines.
@@ -286,6 +326,13 @@ impl<'a> P<'a> {
     /// `advance` never steps past it, so this never panics.
     fn peek(&self) -> &Token {
         &self.toks[self.pos]
+    }
+
+    fn at_offset_kw(&self, offset: usize, keyword: &str) -> bool {
+        matches!(
+            self.toks.get(self.pos + offset).map(|token| &token.kind),
+            Some(TokKind::LowerIdent(word)) if word == keyword
+        )
     }
 
     /// Consumes the current token, keeping `depth` in step with the braces
@@ -464,6 +511,68 @@ impl<'a> P<'a> {
         Ok(Sp { node, span })
     }
 
+    fn expect_context_id(&mut self) -> Result<ContextId, Diagnostic> {
+        let TokKind::LowerIdent(text) = &self.peek().kind else {
+            return Err(self.expected("a context id"));
+        };
+        let span = self.peek().span;
+        let id = ContextId::new(text.clone())
+            .map_err(|err| self.diag_at(span, err.message, err.hint))?;
+        self.advance();
+        Ok(id)
+    }
+
+    fn expect_capability_id(&mut self) -> Result<CapabilityId, Diagnostic> {
+        let TokKind::LowerIdent(text) = &self.peek().kind else {
+            return Err(self.expected("a capability id"));
+        };
+        let span = self.peek().span;
+        let id = CapabilityId::new(text.clone())
+            .map_err(|err| self.diag_at(span, err.message, err.hint))?;
+        self.advance();
+        Ok(id)
+    }
+
+    fn capability_ref(&mut self) -> Result<CapabilityRef, Diagnostic> {
+        let context = self.expect_context_id()?;
+        self.expect(&TokKind::Slash, "`/`")?;
+        let capability = self.expect_capability_id()?;
+        Ok(CapabilityRef::new(context, capability))
+    }
+
+    fn owner_ref(&mut self) -> Result<Owner, Diagnostic> {
+        let context = self.expect_context_id()?;
+        if self.at(&TokKind::Slash) {
+            self.advance();
+            let capability = self.expect_capability_id()?;
+            Ok(Owner::capability(CapabilityRef::new(context, capability)))
+        } else {
+            Ok(Owner::context(context))
+        }
+    }
+
+    fn notion_ref(&mut self) -> Result<NotionRef, Diagnostic> {
+        let context = self.expect_context_id()?;
+        self.expect(&TokKind::Slash, "`/`")?;
+        let notion = self.expect_notion_name()?.node;
+        Ok(NotionRef::new(context, notion))
+    }
+
+    fn owned_notion_head(&mut self) -> Result<(Owner, NotionName), Diagnostic> {
+        let context = self.expect_context_id()?;
+        self.expect(&TokKind::Slash, "`/`")?;
+        if matches!(self.peek().kind, TokKind::UpperIdent(_)) {
+            return Ok((Owner::context(context), self.expect_notion_name()?.node));
+        }
+        let capability = self.expect_capability_id()?;
+        self.expect(&TokKind::Slash, "`/`")?;
+        let notion = self.expect_notion_name()?.node;
+        Ok((
+            Owner::capability(CapabilityRef::new(context, capability)),
+            notion,
+        ))
+    }
+
     fn expect_field_name(&mut self) -> Result<Sp<FieldName>, Diagnostic> {
         let TokKind::LowerIdent(text) = &self.peek().kind else {
             return Err(self.expected("a field name"));
@@ -637,12 +746,114 @@ impl<'a> P<'a> {
         Err(self.expected("end of line"))
     }
 
+    // --- strategic domain files ------------------------------
+
+    fn context_file(&mut self) -> Result<Context, Diagnostic> {
+        let context = self.context_decl()?;
+        self.end_of_file();
+        Ok(context)
+    }
+
+    fn context_decl(&mut self) -> Result<Context, Diagnostic> {
+        self.skip_newlines();
+        self.expect_lower_kw("context")?;
+        let id = self.expect_context_id()?;
+        let kind = self.word_from_set("context kind", &CONTEXT_KINDS)?;
+        let title = self.expect_str("a context title")?.node;
+        self.expect(&TokKind::LBrace, "`{`")?;
+        self.skip_newlines();
+        let def = self.def_field()?;
+        self.skip_newlines();
+        self.expect(&TokKind::RBrace, "`}`")?;
+        Ok(Context {
+            id,
+            kind,
+            title,
+            def,
+        })
+    }
+
+    fn capability_file(&mut self) -> Result<Capability, Diagnostic> {
+        let capability = self.capability_decl()?;
+        self.end_of_file();
+        Ok(capability)
+    }
+
+    fn capability_decl(&mut self) -> Result<Capability, Diagnostic> {
+        self.skip_newlines();
+        self.expect_lower_kw("capability")?;
+        let id = self.capability_ref()?;
+        let title = self.expect_str("a capability title")?.node;
+        self.expect(&TokKind::LBrace, "`{`")?;
+        self.skip_newlines();
+        let def = self.def_field()?;
+        self.skip_newlines();
+        self.expect(&TokKind::RBrace, "`}`")?;
+        Ok(Capability { id, title, def })
+    }
+
+    fn context_map_file(&mut self) -> Result<ContextMap, Diagnostic> {
+        let map = self.context_map_decl()?;
+        self.end_of_file();
+        Ok(map)
+    }
+
+    fn context_map_decl(&mut self) -> Result<ContextMap, Diagnostic> {
+        self.skip_newlines();
+        self.expect_lower_kw("context-map")?;
+        self.expect(&TokKind::LBrace, "`{`")?;
+        self.skip_newlines();
+        let mut dependencies = Vec::new();
+        while !self.at(&TokKind::RBrace) {
+            self.expect_lower_kw("dependency")?;
+            let consumer = self.expect_context_id()?;
+            self.expect_lower_kw("on")?;
+            let supplier = self.expect_context_id()?;
+            self.expect(&TokKind::LBrace, "`{`")?;
+            self.skip_newlines();
+            let mut mappings = Vec::new();
+            while !self.at(&TokKind::RBrace) {
+                self.expect_lower_kw("map")?;
+                let from = self.notion_ref()?;
+                self.expect(&TokKind::Arrow, "`->`")?;
+                let to = self.notion_ref()?;
+                self.end_of_field()?;
+                self.skip_newlines();
+                mappings.push(NotionMapping { from, to });
+            }
+            self.advance();
+            self.end_of_field()?;
+            self.skip_newlines();
+            dependencies.push(ContextDependency {
+                consumer,
+                supplier,
+                mappings,
+            });
+        }
+        self.advance();
+        Ok(ContextMap { dependencies })
+    }
+
     // --- notion files ----------------------------------------
 
     fn notion_file(&mut self) -> Result<Notion, Diagnostic> {
         let notion = self.notion_decl()?;
         self.end_of_file();
         Ok(notion)
+    }
+
+    fn owned_notion_file(&mut self) -> Result<(Owner, Notion), Diagnostic> {
+        let owned = self.owned_notion_decl()?;
+        self.end_of_file();
+        Ok(owned)
+    }
+
+    fn owned_notion_decl(&mut self) -> Result<(Owner, Notion), Diagnostic> {
+        self.skip_newlines();
+        self.expect_lower_kw("notion")?;
+        let (owner, name) = self.owned_notion_head()?;
+        let notion = self.notion_body(name)?;
+        Ok((owner, notion))
     }
 
     /// The `notion-file` rule proper, stopping on its own closing `}`.
@@ -654,7 +865,11 @@ impl<'a> P<'a> {
     fn notion_decl(&mut self) -> Result<Notion, Diagnostic> {
         self.skip_newlines();
         self.expect_lower_kw("notion")?;
-        let name = self.expect_notion_name()?;
+        let name = self.expect_notion_name()?.node;
+        self.notion_body(name)
+    }
+
+    fn notion_body(&mut self, name: NotionName) -> Result<Notion, Diagnostic> {
         let kind = self.notion_kind()?;
         self.expect(&TokKind::LBrace, "`{`")?;
         let home = self.depth;
@@ -701,7 +916,7 @@ impl<'a> P<'a> {
         }
 
         Ok(Notion {
-            name: name.node,
+            name,
             kind,
             def,
             attrs,
@@ -809,6 +1024,23 @@ impl<'a> P<'a> {
         Ok(intent)
     }
 
+    fn owned_intent_file(&mut self) -> Result<(Owner, Intent), Diagnostic> {
+        let owned = self.owned_intent_decl()?;
+        self.end_of_file();
+        Ok(owned)
+    }
+
+    fn owned_intent_decl(&mut self) -> Result<(Owner, Intent), Diagnostic> {
+        self.skip_newlines();
+        self.expect_lower_kw("intent")?;
+        let id = self.expect_intent_id()?.node;
+        self.expect_lower_kw("in")?;
+        let owner = Owner::capability(self.capability_ref()?);
+        let title = self.expect_str("an intent title")?.node;
+        let intent = self.intent_body(id, title)?;
+        Ok((owner, intent))
+    }
+
     /// The `intent-file` rule proper, stopping on its own closing `}` --
     /// nested by an `op add|edit` of a change file, exactly as
     /// [`P::notion_decl`] is.
@@ -817,6 +1049,10 @@ impl<'a> P<'a> {
         self.expect_lower_kw("intent")?;
         let id = self.expect_intent_id()?.node;
         let title = self.expect_str("an intent title")?.node;
+        self.intent_body(id, title)
+    }
+
+    fn intent_body(&mut self, id: IntentId, title: String) -> Result<Intent, Diagnostic> {
         self.expect(&TokKind::LBrace, "`{`")?;
         let home = self.depth;
 
@@ -1152,6 +1388,35 @@ impl<'a> P<'a> {
         Ok(constraint)
     }
 
+    fn owned_constraint_file(&mut self) -> Result<(Option<Owner>, Constraint), Diagnostic> {
+        let owned = self.owned_constraint_decl()?;
+        self.end_of_file();
+        Ok(owned)
+    }
+
+    fn owned_constraint_decl(&mut self) -> Result<(Option<Owner>, Constraint), Diagnostic> {
+        self.skip_newlines();
+        self.expect_lower_kw("constraint")?;
+        let id = self.expect_constraint_id()?.node;
+        self.expect_lower_kw("in")?;
+        let owner = if self.at_kw("project") {
+            self.advance();
+            None
+        } else if self.at_kw("context") {
+            self.advance();
+            Some(Owner::context(self.expect_context_id()?))
+        } else if self.at_kw("capability") {
+            self.advance();
+            Some(Owner::capability(self.capability_ref()?))
+        } else {
+            return Err(self.expected("`project`, `context` or `capability`"));
+        };
+        let kind = self.word_from_set("constraint kind", &CONSTRAINT_KINDS)?;
+        let title = self.expect_str("a constraint title")?.node;
+        let constraint = self.constraint_body(id, kind, title, false)?;
+        Ok((owner, constraint))
+    }
+
     /// The `constraint-file` rule proper, stopping on its own closing `}`
     /// -- nested by an `op add|edit` of a change file.
     fn constraint_decl(&mut self) -> Result<Constraint, Diagnostic> {
@@ -1160,6 +1425,16 @@ impl<'a> P<'a> {
         let id = self.expect_constraint_id()?.node;
         let kind = self.word_from_set("constraint kind", &CONSTRAINT_KINDS)?;
         let title = self.expect_str("a constraint title")?.node;
+        self.constraint_body(id, kind, title, true)
+    }
+
+    fn constraint_body(
+        &mut self,
+        id: ConstraintId,
+        kind: ConstraintKind,
+        title: String,
+        has_scope_field: bool,
+    ) -> Result<Constraint, Diagnostic> {
         self.expect(&TokKind::LBrace, "`{`")?;
         let home = self.depth;
 
@@ -1168,10 +1443,15 @@ impl<'a> P<'a> {
             .recovered(home, |p| p.rule_field())
             .unwrap_or_else(|| Rule::Text(String::new()));
         self.skip_newlines();
-        let scope = self
-            .recovered(home, |p| p.scope_field())
-            .unwrap_or(Scope::Global);
-        self.skip_newlines();
+        let scope = if has_scope_field {
+            let scope = self
+                .recovered(home, |p| p.scope_field())
+                .unwrap_or(Scope::Global);
+            self.skip_newlines();
+            scope
+        } else {
+            Scope::Global
+        };
 
         let mut check = None;
         if self.at_kw("check") {
@@ -1475,7 +1755,11 @@ impl<'a> P<'a> {
             self.advance();
             return self.accept_op();
         }
-        Err(self.expected("`add`, `edit`, `remove` or `accept`"))
+        if self.at_kw("move") {
+            self.advance();
+            return self.move_op();
+        }
+        Err(self.expected("`add`, `edit`, `remove`, `move` or `accept`"))
     }
 
     fn config_op(&mut self) -> Result<StagedOp, Diagnostic> {
@@ -1541,22 +1825,114 @@ impl<'a> P<'a> {
     /// exactly as it would at the top of a file of its own.
     fn entity_decl(&mut self, verb: Verb) -> Result<StagedOp, Diagnostic> {
         let op = if self.at_kw("notion") {
-            let notion = self.notion_decl()?;
-            match verb {
-                Verb::Add => StagedOp::AddNotion(notion),
-                Verb::Edit => StagedOp::EditNotion(notion),
+            if matches!(
+                self.toks.get(self.pos + 1).map(|token| &token.kind),
+                Some(TokKind::LowerIdent(_))
+            ) {
+                let (owner, notion) = self.owned_notion_decl()?;
+                match verb {
+                    Verb::Add => StagedOp::AddOwnedNotion { owner, notion },
+                    Verb::Edit => StagedOp::EditOwnedNotion { owner, notion },
+                }
+            } else {
+                return Err(self.expected("an owner-qualified notion declaration"));
             }
         } else if self.at_kw("intent") {
-            let intent = self.intent_decl()?;
-            match verb {
-                Verb::Add => StagedOp::AddIntent(intent),
-                Verb::Edit => StagedOp::EditIntent(intent),
+            if self.at_offset_kw(2, "in") {
+                let (owner, intent) = self.owned_intent_decl()?;
+                match verb {
+                    Verb::Add => StagedOp::AddOwnedIntent { owner, intent },
+                    Verb::Edit => StagedOp::EditOwnedIntent { owner, intent },
+                }
+            } else {
+                return Err(self.expected("an owner-qualified intent declaration"));
             }
         } else if self.at_kw("constraint") {
-            let constraint = self.constraint_decl()?;
+            if self.at_offset_kw(2, "in") {
+                let (owner, constraint) = self.owned_constraint_decl()?;
+                match verb {
+                    Verb::Add => StagedOp::AddOwnedConstraint { owner, constraint },
+                    Verb::Edit => StagedOp::EditOwnedConstraint { owner, constraint },
+                }
+            } else {
+                return Err(self.expected("an owner-qualified constraint declaration"));
+            }
+        } else if self.at_kw("context") {
+            let context = self.context_decl()?;
             match verb {
-                Verb::Add => StagedOp::AddConstraint(constraint),
-                Verb::Edit => StagedOp::EditConstraint(constraint),
+                Verb::Add => StagedOp::AddContext(context),
+                Verb::Edit => StagedOp::EditContext(context),
+            }
+        } else if self.at_kw("capability") {
+            let capability = self.capability_decl()?;
+            match verb {
+                Verb::Add => StagedOp::AddCapability(capability),
+                Verb::Edit => StagedOp::EditCapability(capability),
+            }
+        } else if self.at_kw("context-map") && matches!(verb, Verb::Edit) {
+            StagedOp::EditContextMap(self.context_map_decl()?)
+        } else {
+            return Err(self.expected(
+                "`context`, `capability`, `notion`, `intent`, `constraint` or `context-map`",
+            ));
+        };
+        self.end_of_field()?;
+        Ok(op)
+    }
+
+    fn owner_or_project(&mut self) -> Result<Option<Owner>, Diagnostic> {
+        if self.at_kw("project") {
+            self.advance();
+            Ok(None)
+        } else {
+            self.owner_ref().map(Some)
+        }
+    }
+
+    fn move_op(&mut self) -> Result<StagedOp, Diagnostic> {
+        self.expect_lower_kw("from")?;
+        let from = self.owner_or_project()?;
+        self.expect_lower_kw("to")?;
+        let to = self.owner_or_project()?;
+        let op = if self.at_kw("notion") {
+            let (declared, notion) = self.owned_notion_decl()?;
+            let (Some(from), Some(to)) = (from, to) else {
+                return Err(self.expected("a context or capability owner for a notion move"));
+            };
+            if declared != to {
+                return Err(self.diag_at(
+                    self.peek().span,
+                    format!("moved notion declares owner `{declared}`, expected `{to}`"),
+                    None,
+                ));
+            }
+            StagedOp::MoveNotion { from, to, notion }
+        } else if self.at_kw("intent") {
+            let (declared, intent) = self.owned_intent_decl()?;
+            let (Some(from), Some(to)) = (from, to) else {
+                return Err(self.expected("a capability owner for an intent move"));
+            };
+            if declared != to {
+                return Err(self.diag_at(
+                    self.peek().span,
+                    format!("moved intent declares owner `{declared}`, expected `{to}`"),
+                    None,
+                ));
+            }
+            StagedOp::MoveIntent { from, to, intent }
+        } else if self.at_kw("constraint") {
+            let (declared, constraint) = self.owned_constraint_decl()?;
+            if declared != to {
+                return Err(self.diag_at(
+                    self.peek().span,
+                    "moved constraint declaration does not match its destination".to_string(),
+                    None,
+                ));
+            }
+            StagedOp::MoveConstraint {
+                from,
+                to,
+                constraint,
             }
         } else {
             return Err(self.expected("`notion`, `intent` or `constraint`"));
@@ -1565,21 +1941,38 @@ impl<'a> P<'a> {
         Ok(op)
     }
 
-    /// `"remove" , ( "notion" , upper-ident | "intent" , intent-id
-    ///             | "constraint" , constraint-id )`: one line, and the
-    /// entity keyword decides which id form is expected after it.
+    /// Parses a canonical removal. Ownership is mandatory for tactical
+    /// entities so the claim always resolves to one exact file.
     fn remove_op(&mut self) -> Result<StagedOp, Diagnostic> {
-        let op = if self.at_kw("notion") {
+        let op = if self.at_kw("context") {
             self.advance();
-            StagedOp::RemoveNotion(self.expect_notion_name()?.node)
+            StagedOp::RemoveContext(self.expect_context_id()?)
+        } else if self.at_kw("capability") {
+            self.advance();
+            StagedOp::RemoveCapability(self.capability_ref()?)
+        } else if self.at_kw("notion") {
+            self.advance();
+            let (owner, name) = self.owned_notion_head()?;
+            StagedOp::RemoveOwnedNotion { owner, name }
         } else if self.at_kw("intent") {
             self.advance();
-            StagedOp::RemoveIntent(self.expect_intent_id()?.node)
+            let id = self.expect_intent_id()?.node;
+            self.expect_lower_kw("from")?;
+            let owner = self.owner_ref()?;
+            if owner.capability.is_none() {
+                return Err(self.expected("a capability owner"));
+            }
+            StagedOp::RemoveOwnedIntent { owner, id }
         } else if self.at_kw("constraint") {
             self.advance();
-            StagedOp::RemoveConstraint(self.expect_constraint_id()?.node)
+            let id = self.expect_constraint_id()?.node;
+            self.expect_lower_kw("from")?;
+            let owner = self.owner_or_project()?;
+            StagedOp::RemoveOwnedConstraint { owner, id }
         } else {
-            return Err(self.expected("`notion`, `intent` or `constraint`"));
+            return Err(
+                self.expected("`context`, `capability`, `notion`, `intent` or `constraint`")
+            );
         };
         self.end_of_field()?;
         Ok(op)
@@ -1781,6 +2174,120 @@ impl<'a> P<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_strategic_domain_declarations_and_owned_entities() {
+        let context = parse_context_file(
+            &RepoPath::new("telos/contexts/pet/context.tel"),
+            "context pet core \"Pet\" {\n  def \"Virtual pet rules.\"\n}\n",
+        )
+        .unwrap();
+        assert_eq!(context.id, ContextId::new("pet").unwrap());
+        assert_eq!(context.kind, ContextKind::Core);
+
+        let capability = parse_capability_file(
+            &RepoPath::new("telos/contexts/pet/capabilities/care/capability.tel"),
+            "capability pet/care \"Care\" {\n  def \"Care for a pet.\"\n}\n",
+        )
+        .unwrap();
+        assert_eq!(capability.id.to_string(), "pet/care");
+
+        let (owner, notion) = parse_owned_notion_file(
+            &RepoPath::new("telos/contexts/pet/notions/Pet.tel"),
+            "notion pet/Pet entity {\n  def \"A virtual pet.\"\n}\n",
+        )
+        .unwrap();
+        assert_eq!(owner, Owner::context(ContextId::new("pet").unwrap()));
+        assert_eq!(notion.name, NotionName::new("Pet").unwrap());
+
+        let (owner, intent) = parse_owned_intent_file(
+            &RepoPath::new("telos/contexts/pet/capabilities/care/intents/INT-0002.tel"),
+            concat!(
+                "intent INT-0002 in pet/care \"Feed a pet\" {\n",
+                "  status draft\n",
+                "  telos  \"A cared-for pet stays healthy.\"\n",
+                "  statement ubiquitous {\n",
+                "    system shall \"record a feeding\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(owner.to_string(), "pet/care");
+        assert_eq!(intent.id, IntentId(2));
+    }
+
+    #[test]
+    fn parses_directed_context_dependencies_with_explicit_mappings() {
+        let map = parse_context_map_file(
+            &RepoPath::new("telos/context-map.tel"),
+            concat!(
+                "context-map {\n",
+                "  dependency terminal on pet {\n",
+                "    map pet/Pet -> terminal/PetView\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(map.dependencies.len(), 1);
+        let dependency = &map.dependencies[0];
+        assert_eq!(dependency.consumer, ContextId::new("terminal").unwrap());
+        assert_eq!(dependency.supplier, ContextId::new("pet").unwrap());
+        assert_eq!(dependency.mappings[0].from.to_string(), "pet/Pet");
+        assert_eq!(dependency.mappings[0].to.to_string(), "terminal/PetView");
+    }
+
+    #[test]
+    fn parses_constraint_scope_from_the_declaration_header() {
+        let (owner, constraint) = parse_owned_constraint_file(
+            &RepoPath::new("telos/contexts/pet/constraints/CON-0001.tel"),
+            concat!(
+                "constraint CON-0001 in context pet quality \"Vitals stay bounded\" {\n",
+                "  rule  \"Vitals remain between zero and one hundred.\"\n",
+                "  check \"python scripts/check_vitals.py\"\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(owner, Some(Owner::context(ContextId::new("pet").unwrap())));
+        assert_eq!(constraint.id, ConstraintId(1));
+        assert_eq!(constraint.scope, Scope::Global);
+    }
+
+    #[test]
+    fn change_files_parse_owned_ops_and_explicit_moves() {
+        let src = concat!(
+            "change CHG-0001 \"Move invoice ownership\" {\n",
+            "  status drafted\n",
+            "\n",
+            "  op add notion billing/Invoice value {\n",
+            "    def \"Invoice identity.\"\n",
+            "  }\n",
+            "\n",
+            "  op move from billing/invoicing to billing/settlement intent INT-0017 in billing/settlement \"Issue invoice\" {\n",
+            "    status draft\n",
+            "    telos  \"Invoices can be issued.\"\n",
+            "    statement ubiquitous {\n",
+            "      system shall \"issue an invoice\"\n",
+            "    }\n",
+            "  }\n",
+            "}\n",
+        );
+
+        let change = parse_change_file(&RepoPath::new("telos/changes/CHG-0001.tel"), src).unwrap();
+        assert!(matches!(change.ops[0], StagedOp::AddOwnedNotion { .. }));
+        match &change.ops[1] {
+            StagedOp::MoveIntent { from, to, intent } => {
+                assert_eq!(from.to_string(), "billing/invoicing");
+                assert_eq!(to.to_string(), "billing/settlement");
+                assert_eq!(intent.id, IntentId(17));
+            }
+            other => panic!("expected owned intent move, got {other:?}"),
+        }
+    }
 
     /// Canonical `telos/notions/Invoice.tel`, byte for byte (the corpus files
     /// themselves are created by mutation commands).
@@ -3229,7 +3736,7 @@ mod tests {
             // positions, which the fixture (built in code) has no way to
             // predict. Their canonical bytes are the span-free identity,
             // and `ops_digest` is that identity for the whole delta.
-            let StagedOp::EditIntent(intent) = &change.ops[1] else {
+            let StagedOp::EditOwnedIntent { intent, .. } = &change.ops[1] else {
                 panic!("the second op edits an intent");
             };
             assert_eq!(intent.id, IntentId(17));
@@ -3253,7 +3760,7 @@ mod tests {
             // The nested block is parsed in place, so its diagnostics point
             // at the change file's own offsets -- not at offsets in some
             // extracted substring.
-            let StagedOp::EditIntent(intent) = &parse(CHANGE_EXAMPLE).ops[1] else {
+            let StagedOp::EditOwnedIntent { intent, .. } = &parse(CHANGE_EXAMPLE).ops[1] else {
                 panic!("the second op edits an intent");
             };
             let Statement::EventDriven { event, .. } = &intent.statement else {
@@ -3301,7 +3808,7 @@ mod tests {
         fn a_missing_status_line_is_reported_once() {
             // `status` has a stand-in (`open`), so the ops after it are
             // still parsed rather than abandoned.
-            let src = "change CHG-0001 \"x\" {\n  op remove notion Ledger\n}\n";
+            let src = "change CHG-0001 \"x\" {\n  op remove notion billing/Ledger\n}\n";
             let found = diags(src);
             assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
             assert_eq!(found[0].message, "expected `status`, found `op`");
@@ -3383,29 +3890,27 @@ mod tests {
                 "change CHG-0001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
-                "  op add notion A entity {\n",
+                "  op add notion billing/A entity {\n",
                 "    def  \"a\"\n",
                 "  }\n",
                 "\n",
-                "  op edit notion B value {\n",
+                "  op edit notion billing/B value {\n",
                 "    def  \"b\"\n",
                 "  }\n",
                 "\n",
-                "  op remove notion C\n",
+                "  op remove notion billing/C\n",
                 "\n",
-                "  op add constraint CON-0001 stack \"s\" {\n",
+                "  op add constraint CON-0001 in project stack \"s\" {\n",
                 "    rule  \"r\"\n",
-                "    scope global\n",
                 "  }\n",
                 "\n",
-                "  op edit constraint CON-0002 quality \"q\" {\n",
+                "  op edit constraint CON-0002 in context billing quality \"q\" {\n",
                 "    rule  \"r\"\n",
-                "    scope global\n",
                 "  }\n",
                 "\n",
-                "  op remove constraint CON-0003\n",
+                "  op remove constraint CON-0003 from billing\n",
                 "\n",
-                "  op remove intent INT-0004\n",
+                "  op remove intent INT-0004 from billing/invoicing\n",
                 "\n",
                 "  op accept \"telos/telos.toml\" \"e69de29\"\n",
                 "}\n",
@@ -3455,8 +3960,8 @@ mod tests {
         fn a_remove_op_wants_the_id_form_its_keyword_announced() {
             let cases = [
                 (
-                    "notion INT-0001",
-                    "expected a notion name, found `INT-0001`",
+                    "notion billing/INT-0001",
+                    "expected a capability id, found `INT-0001`",
                 ),
                 ("intent Ledger", "expected an intent id, found `Ledger`"),
                 ("intent CON-0003", "expected an intent id, found `CON-0003`"),
@@ -3466,7 +3971,7 @@ mod tests {
                 ),
                 (
                     "binding \"a.rs\"",
-                    "expected `notion`, `intent` or `constraint`, found `binding`",
+                    "expected `context`, `capability`, `notion`, `intent` or `constraint`, found `binding`",
                 ),
             ];
             for (tail, expected) in cases {
@@ -3484,13 +3989,13 @@ mod tests {
             let src = "change CHG-0001 \"x\" {\n  status drafted\n\n  op stage notion A\n}\n";
             assert_eq!(
                 diags(src)[0].message,
-                "expected `add`, `edit`, `remove` or `accept`, found `stage`"
+                "expected `add`, `edit`, `remove`, `move` or `accept`, found `stage`"
             );
             let src =
                 "change CHG-0001 \"x\" {\n  status drafted\n\n  op add scenario SCN-0001\n}\n";
             assert_eq!(
                 diags(src)[0].message,
-                "expected `notion`, `intent` or `constraint`, found `scenario`"
+                "expected `context`, `capability`, `notion`, `intent`, `constraint` or `context-map`, found `scenario`"
             );
         }
 
@@ -3502,7 +4007,7 @@ mod tests {
                 "\n",
                 "  check \"cargo test\"\n",
                 "\n",
-                "  op remove notion A\n",
+                "  op remove notion billing/A\n",
                 "}\n",
             );
             let found = diags(src);
@@ -3525,12 +4030,12 @@ mod tests {
                 "change CHG-0001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
-                "  op add intent INT-0001 \"t\" {\n",
+                "  op add intent INT-0001 in billing/invoicing \"t\" {\n",
                 "    status draft\n",
                 "    telos  \"why\"\n",
                 "  }\n",
                 "\n",
-                "  op remove notion Ledger\n",
+                "  op remove notion billing/Ledger\n",
                 "\n",
                 "  op remove intent Ledger\n",
                 "}\n",
@@ -3567,17 +4072,17 @@ mod tests {
             let dense = concat!(
                 "change CHG-0001 \"x\" {\n",
                 "  status drafted\n",
-                "  op remove notion A\n",
-                "  op remove notion B\n",
+                "  op remove notion billing/A\n",
+                "  op remove notion billing/B\n",
                 "}\n",
             );
             let canonical = concat!(
                 "change CHG-0001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
-                "  op remove notion A\n",
+                "  op remove notion billing/A\n",
                 "\n",
-                "  op remove notion B\n",
+                "  op remove notion billing/B\n",
                 "}\n",
             );
             assert_eq!(emit_change(&parse(dense)), canonical);
@@ -3754,7 +4259,7 @@ mod tests {
             let src = journalled(concat!(
                 "  bind \"src/b.rs\" -> INT-0001\n",
                 "\n",
-                "  op remove notion A\n",
+                "  op remove notion billing/A\n",
             ));
             let found = diags(&src);
             assert_eq!(found.len(), 1, "diagnostics: {found:#?}");

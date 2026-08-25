@@ -33,11 +33,15 @@ use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::emit::emit_op;
 use crate::git::Oid;
-use crate::ids::{ChangeId, ConstraintId, IntentId, NotionName, RepoPath, ScenarioId};
+use crate::ids::{
+    CapabilityRef, ChangeId, ConstraintId, ContextId, IntentId, NotionName, NotionRef, Owner,
+    RepoPath, ScenarioId,
+};
 use crate::span::{Sp, Span};
 
 use super::binding::{Binding, TestRef};
 use super::constraint::Constraint;
+use super::domain::{Capability, Context, ContextMap};
 use super::intent::Intent;
 use super::notion::Notion;
 
@@ -85,6 +89,64 @@ impl ChangeStatus {
 /// are the intended bytes".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StagedOp {
+    AddContext(Context),
+    EditContext(Context),
+    RemoveContext(ContextId),
+    AddCapability(Capability),
+    EditCapability(Capability),
+    RemoveCapability(CapabilityRef),
+    AddOwnedNotion {
+        owner: Owner,
+        notion: Notion,
+    },
+    EditOwnedNotion {
+        owner: Owner,
+        notion: Notion,
+    },
+    RemoveOwnedNotion {
+        owner: Owner,
+        name: NotionName,
+    },
+    AddOwnedIntent {
+        owner: Owner,
+        intent: Intent,
+    },
+    EditOwnedIntent {
+        owner: Owner,
+        intent: Intent,
+    },
+    RemoveOwnedIntent {
+        owner: Owner,
+        id: IntentId,
+    },
+    AddOwnedConstraint {
+        owner: Option<Owner>,
+        constraint: Constraint,
+    },
+    EditOwnedConstraint {
+        owner: Option<Owner>,
+        constraint: Constraint,
+    },
+    RemoveOwnedConstraint {
+        owner: Option<Owner>,
+        id: ConstraintId,
+    },
+    EditContextMap(ContextMap),
+    MoveNotion {
+        from: Owner,
+        to: Owner,
+        notion: Notion,
+    },
+    MoveIntent {
+        from: Owner,
+        to: Owner,
+        intent: Intent,
+    },
+    MoveConstraint {
+        from: Option<Owner>,
+        to: Option<Owner>,
+        constraint: Constraint,
+    },
     AddNotion(Notion),
     EditNotion(Notion),
     RemoveNotion(NotionName),
@@ -95,7 +157,10 @@ pub enum StagedOp {
     EditConstraint(Constraint),
     RemoveConstraint(ConstraintId),
     EditConfig(Config),
-    Accept { path: RepoPath, oid: Oid },
+    Accept {
+        path: RepoPath,
+        oid: Oid,
+    },
 }
 
 impl StagedOp {
@@ -107,6 +172,33 @@ impl StagedOp {
     /// entity always collide on the same claim.
     pub fn target_path(&self) -> RepoPath {
         match self {
+            StagedOp::AddContext(context) | StagedOp::EditContext(context) => {
+                context_path(&context.id)
+            }
+            StagedOp::RemoveContext(id) => context_path(id),
+            StagedOp::AddCapability(capability) | StagedOp::EditCapability(capability) => {
+                capability_path(&capability.id)
+            }
+            StagedOp::RemoveCapability(id) => capability_path(id),
+            StagedOp::AddOwnedNotion { owner, notion }
+            | StagedOp::EditOwnedNotion { owner, notion } => owned_notion_path(owner, &notion.name),
+            StagedOp::RemoveOwnedNotion { owner, name } => owned_notion_path(owner, name),
+            StagedOp::AddOwnedIntent { owner, intent }
+            | StagedOp::EditOwnedIntent { owner, intent } => owned_intent_path(owner, intent.id),
+            StagedOp::RemoveOwnedIntent { owner, id } => owned_intent_path(owner, *id),
+            StagedOp::AddOwnedConstraint { owner, constraint }
+            | StagedOp::EditOwnedConstraint { owner, constraint } => {
+                owned_constraint_path(owner.as_ref(), constraint.id)
+            }
+            StagedOp::RemoveOwnedConstraint { owner, id } => {
+                owned_constraint_path(owner.as_ref(), *id)
+            }
+            StagedOp::EditContextMap(_) => RepoPath::new("telos/context-map.tel"),
+            StagedOp::MoveNotion { to, notion, .. } => owned_notion_path(to, &notion.name),
+            StagedOp::MoveIntent { to, intent, .. } => owned_intent_path(to, intent.id),
+            StagedOp::MoveConstraint { to, constraint, .. } => {
+                owned_constraint_path(to.as_ref(), constraint.id)
+            }
             StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => notion_path(&n.name),
             StagedOp::RemoveNotion(name) => notion_path(name),
             StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => intent_path(i.id),
@@ -118,9 +210,41 @@ impl StagedOp {
         }
     }
 
+    pub fn source_path(&self) -> Option<RepoPath> {
+        match self {
+            StagedOp::MoveNotion { from, notion, .. } => {
+                Some(owned_notion_path(from, &notion.name))
+            }
+            StagedOp::MoveIntent { from, intent, .. } => Some(owned_intent_path(from, intent.id)),
+            StagedOp::MoveConstraint {
+                from, constraint, ..
+            } => Some(owned_constraint_path(from.as_ref(), constraint.id)),
+            _ => None,
+        }
+    }
+
     /// The op's verb, as written and as reported (the result schema `change diff`).
     pub fn verb(&self) -> &'static str {
         match self {
+            StagedOp::AddContext(_)
+            | StagedOp::AddCapability(_)
+            | StagedOp::AddOwnedNotion { .. }
+            | StagedOp::AddOwnedIntent { .. }
+            | StagedOp::AddOwnedConstraint { .. } => "add",
+            StagedOp::EditContext(_)
+            | StagedOp::EditCapability(_)
+            | StagedOp::EditOwnedNotion { .. }
+            | StagedOp::EditOwnedIntent { .. }
+            | StagedOp::EditOwnedConstraint { .. }
+            | StagedOp::EditContextMap(_) => "edit",
+            StagedOp::RemoveContext(_)
+            | StagedOp::RemoveCapability(_)
+            | StagedOp::RemoveOwnedNotion { .. }
+            | StagedOp::RemoveOwnedIntent { .. }
+            | StagedOp::RemoveOwnedConstraint { .. } => "remove",
+            StagedOp::MoveNotion { .. }
+            | StagedOp::MoveIntent { .. }
+            | StagedOp::MoveConstraint { .. } => "move",
             StagedOp::AddNotion(_) | StagedOp::AddIntent(_) | StagedOp::AddConstraint(_) => "add",
             StagedOp::EditNotion(_) | StagedOp::EditIntent(_) | StagedOp::EditConstraint(_) => {
                 "edit"
@@ -137,6 +261,25 @@ impl StagedOp {
     /// the one op whose target is a path rather than a modelled entity.
     pub fn entity(&self) -> &'static str {
         match self {
+            StagedOp::AddContext(_) | StagedOp::EditContext(_) | StagedOp::RemoveContext(_) => {
+                "context"
+            }
+            StagedOp::AddCapability(_)
+            | StagedOp::EditCapability(_)
+            | StagedOp::RemoveCapability(_) => "capability",
+            StagedOp::AddOwnedNotion { .. }
+            | StagedOp::EditOwnedNotion { .. }
+            | StagedOp::RemoveOwnedNotion { .. }
+            | StagedOp::MoveNotion { .. } => "notion",
+            StagedOp::AddOwnedIntent { .. }
+            | StagedOp::EditOwnedIntent { .. }
+            | StagedOp::RemoveOwnedIntent { .. }
+            | StagedOp::MoveIntent { .. } => "intent",
+            StagedOp::AddOwnedConstraint { .. }
+            | StagedOp::EditOwnedConstraint { .. }
+            | StagedOp::RemoveOwnedConstraint { .. }
+            | StagedOp::MoveConstraint { .. } => "constraint",
+            StagedOp::EditContextMap(_) => "context-map",
             StagedOp::AddNotion(_) | StagedOp::EditNotion(_) | StagedOp::RemoveNotion(_) => {
                 "notion"
             }
@@ -155,6 +298,33 @@ impl StagedOp {
     /// for `Accept`, which has no id -- the path itself.
     pub fn key(&self) -> String {
         match self {
+            StagedOp::AddContext(context) | StagedOp::EditContext(context) => {
+                context.id.to_string()
+            }
+            StagedOp::RemoveContext(id) => id.to_string(),
+            StagedOp::AddCapability(capability) | StagedOp::EditCapability(capability) => {
+                capability.id.to_string()
+            }
+            StagedOp::RemoveCapability(id) => id.to_string(),
+            StagedOp::AddOwnedNotion { owner, notion }
+            | StagedOp::EditOwnedNotion { owner, notion } => {
+                NotionRef::new(owner.context.clone(), notion.name.clone()).to_string()
+            }
+            StagedOp::RemoveOwnedNotion { owner, name } => {
+                NotionRef::new(owner.context.clone(), name.clone()).to_string()
+            }
+            StagedOp::MoveNotion { from, notion, .. } => {
+                NotionRef::new(from.context.clone(), notion.name.clone()).to_string()
+            }
+            StagedOp::AddOwnedIntent { intent, .. }
+            | StagedOp::EditOwnedIntent { intent, .. }
+            | StagedOp::MoveIntent { intent, .. } => intent.id.to_string(),
+            StagedOp::RemoveOwnedIntent { id, .. } => id.to_string(),
+            StagedOp::AddOwnedConstraint { constraint, .. }
+            | StagedOp::EditOwnedConstraint { constraint, .. }
+            | StagedOp::MoveConstraint { constraint, .. } => constraint.id.to_string(),
+            StagedOp::RemoveOwnedConstraint { id, .. } => id.to_string(),
+            StagedOp::EditContextMap(_) => "telos/context-map.tel".to_string(),
             StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => n.name.to_string(),
             StagedOp::RemoveNotion(name) => name.to_string(),
             StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => i.id.to_string(),
@@ -186,6 +356,61 @@ pub fn intent_path(id: IntentId) -> RepoPath {
 /// Where a constraint of this id lives in the spec tree.
 pub fn constraint_path(id: ConstraintId) -> RepoPath {
     RepoPath::new(format!("telos/constraints/{id}.tel"))
+}
+
+pub fn context_path(id: &ContextId) -> RepoPath {
+    RepoPath::new(format!("telos/contexts/{id}/context.tel"))
+}
+
+pub fn capability_path(id: &CapabilityRef) -> RepoPath {
+    RepoPath::new(format!(
+        "telos/contexts/{}/capabilities/{}/capability.tel",
+        id.context, id.capability
+    ))
+}
+
+pub fn owned_notion_path(owner: &Owner, name: &NotionName) -> RepoPath {
+    match &owner.capability {
+        Some(capability) => RepoPath::new(format!(
+            "telos/contexts/{}/capabilities/{capability}/notions/{name}.tel",
+            owner.context
+        )),
+        None => RepoPath::new(format!(
+            "telos/contexts/{}/notions/{name}.tel",
+            owner.context
+        )),
+    }
+}
+
+pub fn owned_intent_path(owner: &Owner, id: IntentId) -> RepoPath {
+    let capability = owner
+        .capability
+        .as_ref()
+        .expect("an intent owner always names a capability");
+    RepoPath::new(format!(
+        "telos/contexts/{}/capabilities/{capability}/intents/{id}.tel",
+        owner.context
+    ))
+}
+
+pub fn owned_constraint_path(owner: Option<&Owner>, id: ConstraintId) -> RepoPath {
+    match owner {
+        None => RepoPath::new(format!("telos/constraints/{id}.tel")),
+        Some(owner) => match &owner.capability {
+            Some(capability) => RepoPath::new(format!(
+                "telos/contexts/{}/capabilities/{capability}/constraints/{id}.tel",
+                owner.context
+            )),
+            None => RepoPath::new(format!(
+                "telos/contexts/{}/constraints/{id}.tel",
+                owner.context
+            )),
+        },
+    }
+}
+
+pub fn context_bindings_path(context: &ContextId) -> RepoPath {
+    RepoPath::new(format!("telos/contexts/{context}/bindings.tel"))
 }
 
 /// Which side of the red/green pair a run witnessed.
@@ -348,7 +573,8 @@ impl Change {
     pub fn claims(&self) -> BTreeSet<RepoPath> {
         self.ops
             .iter()
-            .map(StagedOp::target_path)
+            .flat_map(|op| [op.source_path(), Some(op.target_path())])
+            .flatten()
             .chain(self.journal.iter().map(|entry| entry.path().clone()))
             .collect()
     }
@@ -432,7 +658,7 @@ impl Change {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
-    use crate::ids::{FieldName, ScenarioId};
+    use crate::ids::{CapabilityId, FieldName, ScenarioId};
     use crate::model::{
         Action, Attr, AttrRef, AttrType, CmpOp, ConstraintKind, Expr, InstanceStep, IntentStatus,
         Literal, NotionKind, Operand, Rule, Scenario, Scope, Statement,
@@ -454,6 +680,17 @@ pub(crate) mod fixtures {
 
     pub(crate) fn field(s: &str) -> FieldName {
         FieldName::new(s).unwrap()
+    }
+
+    pub(crate) fn billing_owner() -> Owner {
+        Owner::context(ContextId::new("billing").unwrap())
+    }
+
+    pub(crate) fn invoicing_owner() -> Owner {
+        Owner::capability(CapabilityRef::new(
+            ContextId::new("billing").unwrap(),
+            CapabilityId::new("invoicing").unwrap(),
+        ))
     }
 
     fn attr_ref(notion: &str, attr: &str) -> AttrRef {
@@ -530,9 +767,18 @@ pub(crate) mod fixtures {
     /// The four ops of the canonical change example, in staged order.
     pub(crate) fn example_ops() -> Vec<StagedOp> {
         vec![
-            StagedOp::AddNotion(invoice()),
-            StagedOp::EditIntent(int_0017()),
-            StagedOp::RemoveConstraint(ConstraintId(3)),
+            StagedOp::AddOwnedNotion {
+                owner: billing_owner(),
+                notion: invoice(),
+            },
+            StagedOp::EditOwnedIntent {
+                owner: invoicing_owner(),
+                intent: int_0017(),
+            },
+            StagedOp::RemoveOwnedConstraint {
+                owner: Some(billing_owner()),
+                id: ConstraintId(3),
+            },
             StagedOp::Accept {
                 path: RepoPath::new("telos/telos.toml"),
                 oid: Oid("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391".to_string()),
@@ -569,12 +815,12 @@ pub(crate) mod fixtures {
   status approved
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
-  op add notion Invoice entity {
+  op add notion billing/Invoice entity {
     def  "A bill issued to a Customer for delivered work."
     attr state enum(open, settled)
   }
 
-  op edit intent INT-0017 "Issuing an invoice opens it" {
+  op edit intent INT-0017 in billing/invoicing "Issuing an invoice opens it" {
     status active
     telos  "An invoice must start its life open and unpaid -- reworded."
     statement event-driven {
@@ -589,7 +835,7 @@ pub(crate) mod fixtures {
     }
   }
 
-  op remove constraint CON-0003
+  op remove constraint CON-0003 from billing
 
   op accept "telos/telos.toml" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 }
@@ -645,7 +891,10 @@ pub(crate) mod fixtures {
                 "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
                     .to_string(),
             ),
-            ops: vec![StagedOp::AddNotion(invoice())],
+            ops: vec![StagedOp::AddOwnedNotion {
+                owner: billing_owner(),
+                notion: invoice(),
+            }],
             journal: vec![
                 run(Witness::Red),
                 run(Witness::Green),
@@ -666,7 +915,7 @@ pub(crate) mod fixtures {
   status implementing
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
-  op add notion Invoice entity {
+  op add notion billing/Invoice entity {
     def  "A bill issued to a Customer for delivered work."
     attr state enum(open, settled)
   }
@@ -807,6 +1056,45 @@ mod tests {
         assert_eq!(edit, remove);
     }
 
+    #[test]
+    fn owned_paths_and_moves_claim_their_complete_domain_location() {
+        let from = Owner::capability("billing/invoicing".parse().unwrap());
+        let to = Owner::capability("billing/settlement".parse().unwrap());
+        assert_eq!(
+            owned_intent_path(&from, IntentId(17)).as_str(),
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"
+        );
+        assert_eq!(
+            owned_notion_path(
+                &Owner::context(ContextId::new("billing").unwrap()),
+                &notion_name("Invoice")
+            )
+            .as_str(),
+            "telos/contexts/billing/notions/Invoice.tel"
+        );
+
+        let op = StagedOp::MoveIntent {
+            from: from.clone(),
+            to: to.clone(),
+            intent: int_0017(),
+        };
+        let change = Change {
+            id: ChangeId(1),
+            motivation: "Move responsibility.".to_string(),
+            status: ChangeStatus::Drafted,
+            approved_digest: None,
+            ops: vec![op],
+            journal: vec![],
+        };
+        assert_eq!(
+            change.claims(),
+            BTreeSet::from([
+                owned_intent_path(&from, IntentId(17)),
+                owned_intent_path(&to, IntentId(17)),
+            ])
+        );
+    }
+
     // --- ops_digest ------------------------------------------------------
 
     fn is_sha256_hex(digest: &str) -> bool {
@@ -852,7 +1140,7 @@ mod tests {
     fn ops_digest_is_pinned_to_the_bytes_of_the_canonical_ops() {
         assert_eq!(
             example_change().ops_digest(),
-            "sha256:3c7b089eed526d2dead2aadd21095e1b099be1009ac99379db4795a70be2945d"
+            "sha256:539297083030209b5d228d12531947706ecf6f3fb779364feca365b1cdd9ecb1"
         );
         // No op means no byte hashed: the SHA-256 of the empty input.
         assert_eq!(
@@ -874,7 +1162,7 @@ mod tests {
         let before = example_change().ops_digest();
 
         let mut edited = example_change();
-        let StagedOp::AddNotion(notion) = &mut edited.ops[0] else {
+        let StagedOp::AddOwnedNotion { notion, .. } = &mut edited.ops[0] else {
             panic!("the first op of the example is `add notion`");
         };
         notion.def = "A bill.".to_string();
@@ -955,9 +1243,9 @@ mod tests {
     #[test]
     fn claims_of_the_public_resultxample_are_its_four_target_paths() {
         let expected: BTreeSet<RepoPath> = [
-            "telos/constraints/CON-0003.tel",
-            "telos/intents/INT-0017.tel",
-            "telos/notions/Invoice.tel",
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
+            "telos/contexts/billing/constraints/CON-0003.tel",
+            "telos/contexts/billing/notions/Invoice.tel",
             "telos/telos.toml",
         ]
         .into_iter()
@@ -1010,7 +1298,7 @@ mod tests {
 
         assert_eq!(
             implementing.ops_digest(),
-            "sha256:3c7b089eed526d2dead2aadd21095e1b099be1009ac99379db4795a70be2945d"
+            "sha256:539297083030209b5d228d12531947706ecf6f3fb779364feca365b1cdd9ecb1"
         );
         assert_eq!(implementing.ops_digest(), example_change().ops_digest());
     }
@@ -1051,7 +1339,7 @@ mod tests {
     fn claims_take_in_the_test_files_and_bound_paths_of_the_journal() {
         let expected: BTreeSet<RepoPath> = [
             "src/billing.rs",
-            "telos/notions/Invoice.tel",
+            "telos/contexts/billing/notions/Invoice.tel",
             "tests/billing.rs",
         ]
         .into_iter()

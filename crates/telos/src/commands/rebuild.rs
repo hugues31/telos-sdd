@@ -183,7 +183,7 @@ fn plan(input: &RebuildInput) -> CmdResult {
                 "n": index + 1,
                 "intent": step.intent,
                 "requires": step.requires,
-                "context": input.contexts.get(&step.intent)
+                "pack": input.contexts.get(&step.intent)
                     .expect("plan admission built one public pack per planned intent"),
             })
         })

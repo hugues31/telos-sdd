@@ -1,0 +1,3 @@
+capability billing/invoicing "Invoicing" {
+  def "Issues invoices and establishes their initial state."
+}

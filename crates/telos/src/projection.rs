@@ -20,14 +20,32 @@ pub(crate) fn applicable_constraints(
     model: &TelosModel,
     intent_id: IntentId,
 ) -> Vec<ApplicableConstraint<'_>> {
+    let strategic_owner = model.intent_owners.get(&intent_id);
     model
         .constraints
         .values()
         .filter_map(|constraint| {
-            let scope = match &constraint.scope {
-                Scope::Global => "global",
-                Scope::Intents(ids) if ids.iter().any(|id| id.node == intent_id) => "scoped",
-                Scope::Intents(_) => return None,
+            let scope = if let Some(intent_owner) = strategic_owner {
+                match model.constraint_owners.get(&constraint.id) {
+                    Some(None) => "project",
+                    Some(Some(owner)) if owner.context != intent_owner.context => return None,
+                    Some(Some(owner)) => match (&owner.capability, &intent_owner.capability) {
+                        (None, _) => "context",
+                        (Some(constraint_capability), Some(intent_capability))
+                            if constraint_capability == intent_capability =>
+                        {
+                            "capability"
+                        }
+                        (Some(_), _) => return None,
+                    },
+                    None => return None,
+                }
+            } else {
+                match &constraint.scope {
+                    Scope::Global => "global",
+                    Scope::Intents(ids) if ids.iter().any(|id| id.node == intent_id) => "scoped",
+                    Scope::Intents(_) => return None,
+                }
             };
             Some(ApplicableConstraint { constraint, scope })
         })

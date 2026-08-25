@@ -16,7 +16,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use common::{repo, telos, with_fixture, with_fixture_mut};
+use common::{
+    canonical_payload, repo, telos, with_empty_billing_domain, with_fixture, with_fixture_mut,
+};
 
 // --- plumbing --------------------------------------------------------------
 
@@ -38,9 +40,7 @@ fn json_stdout(out: &std::process::Output) -> Value {
 
 /// A fresh git repository with an initialized, sealed and empty `telos/`.
 fn fresh() -> tempfile::TempDir {
-    let tmp = repo();
-    telos(tmp.path(), &["init"]).assert().success();
-    tmp
+    with_empty_billing_domain()
 }
 
 fn open_change(dir: &Path) {
@@ -49,11 +49,99 @@ fn open_change(dir: &Path) {
         .success();
 }
 
+#[test]
+fn stages_context_capability_and_owned_vocabulary_in_one_change() {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+    open_change(tmp.path());
+
+    stage_ok(
+        tmp.path(),
+        &["add", "context", "--change", "CHG-0001", "--json"],
+        &json!({
+            "id": "billing", "kind": "core", "title": "Billing",
+            "def": "Owns invoice rules."
+        })
+        .to_string(),
+    );
+    stage_ok(
+        tmp.path(),
+        &["add", "capability", "--change", "CHG-0001", "--json"],
+        &json!({
+            "owner": "billing", "id": "invoicing", "title": "Invoicing",
+            "def": "Issues invoices."
+        })
+        .to_string(),
+    );
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &json!({
+            "owner": "billing", "name": "Invoice", "kind": "entity",
+            "def": "A bill."
+        })
+        .to_string(),
+    );
+
+    let change = read(tmp.path(), CHG_0001);
+    assert!(change.contains("op add context billing core \"Billing\""));
+    assert!(change.contains("op add capability billing/invoicing \"Invoicing\""));
+    assert!(change.contains("op add notion billing/Invoice entity"));
+}
+
+#[test]
+fn move_claims_both_paths_and_makes_an_existing_approval_stale() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    stage_ok(
+        tmp.path(),
+        &[
+            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+        ],
+        &json!({"telos": "Invoices begin open and unpaid."}).to_string(),
+    );
+    telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
+        .assert()
+        .success();
+
+    let out = telos(
+        tmp.path(),
+        &[
+            "move",
+            "INT-0017",
+            "--to",
+            "billing/settlement",
+            "--change",
+            "CHG-0001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["ok"], json!(true));
+    assert_eq!(
+        envelope["result"]["claims"],
+        json!([
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0017.tel"
+        ])
+    );
+
+    let diff = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(json_stdout(&diff)["result"]["stale"], json!(true));
+}
+
 /// Runs one staging command with `payload` on stdin and returns its
 /// envelope, asserting only that the process ran.
 fn stage(dir: &Path, args: &[&str], payload: &str) -> Value {
     let mut cmd = telos(dir, args);
-    let out = cmd.write_stdin(payload.to_string()).output().unwrap();
+    let out = cmd
+        .write_stdin(canonical_payload(args, payload))
+        .output()
+        .unwrap();
     json_stdout(&out)
 }
 
@@ -84,14 +172,14 @@ fn read(dir: &Path, rel: &str) -> String {
 // --- the payloads -------------------------------------------------
 
 fn customer_payload() -> String {
-    json!({"name": "Customer", "kind": "actor", "def": "A party that receives invoices."})
+    json!({"owner": "billing", "name": "Customer", "kind": "actor", "def": "A party that receives invoices."})
         .to_string()
 }
 
 /// The documented `add notion` example, verbatim.
 fn invoice_payload() -> String {
     json!({
-        "name": "Invoice", "kind": "entity",
+        "owner": "billing", "name": "Invoice", "kind": "entity",
         "def": "A bill issued to a Customer for delivered work.",
         "attrs": [ {"name": "state", "type": "enum", "values": ["open", "settled"]},
                    {"name": "balance", "type": "money"},
@@ -105,7 +193,7 @@ fn invoice_payload() -> String {
 /// stages an intent about invoices needs, and nothing more.
 fn plain_invoice_payload() -> String {
     json!({
-        "name": "Invoice", "kind": "entity",
+        "owner": "billing", "name": "Invoice", "kind": "entity",
         "def": "A bill issued to a Customer for delivered work.",
         "attrs": [ {"name": "state", "type": "enum", "values": ["open", "settled"]},
                    {"name": "balance", "type": "money"} ]
@@ -115,7 +203,7 @@ fn plain_invoice_payload() -> String {
 
 fn payment_received_payload() -> String {
     json!({
-        "name": "PaymentReceived", "kind": "event",
+        "owner": "billing/settlement", "name": "PaymentReceived", "kind": "event",
         "def": "A payment arrived for an invoice.",
         "attrs": [ {"name": "amount", "type": "money"} ]
     })
@@ -126,7 +214,7 @@ fn payment_received_payload() -> String {
 /// exists in the corpus, not in a freshly initialized project.
 fn settle_intent_payload(on: &str) -> String {
     json!({
-        "title": "Invoices can be settled", "status": "active",
+        "owner": "billing/settlement", "title": "Invoices can be settled", "status": "active",
         "telos": "Customers must see immediately that their debt is cleared.",
         "statement": { "template": "event-driven", "when": "PaymentReceived",
                        "on": on, "action": "set Invoice.state = settled" },
@@ -186,9 +274,9 @@ fn add_notion_answers_with_the_public_result_result() {
                 "entity": "notion",
                 // A notion's natural key is its name, so that is
                 // what `id` carries for one.
-                "id": "Customer",
+                "id": "billing/Customer",
                 "scenario_ids": [],
-                "claims": ["telos/notions/Customer.tel"]
+                "claims": ["telos/contexts/billing/notions/Customer.tel"]
             },
             "error": null,
             "next_actions": ["telos change diff CHG-0001"]
@@ -215,7 +303,7 @@ fn add_notion_writes_the_canonical_change_file_byte_for_byte() {
         "change CHG-0001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
-           op add notion Customer actor {\n    \
+           op add notion billing/Customer actor {\n    \
              def  \"A party that receives invoices.\"\n  \
            }\n\
          }\n"
@@ -246,11 +334,11 @@ fn a_second_op_appends_a_block_and_resolves_against_the_first() {
         "change CHG-0001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
-           op add notion Customer actor {\n    \
+           op add notion billing/Customer actor {\n    \
              def  \"A party that receives invoices.\"\n  \
            }\n\
          \n  \
-           op add notion Invoice entity {\n    \
+           op add notion billing/Invoice entity {\n    \
              def  \"A bill issued to a Customer for delivered work.\"\n    \
              attr state    enum(open, settled)\n    \
              attr balance  money\n    \
@@ -291,7 +379,10 @@ fn add_notion_refuses_a_name_the_base_already_holds() {
     );
 
     assert_eq!(error["code"], json!("TELOS_INTEGRITY_VIOLATION"));
-    assert_eq!(error["message"], json!("notion `Invoice` already exists"));
+    assert_eq!(
+        error["message"],
+        json!("notion `billing/Invoice` already exists")
+    );
 }
 
 // --- add intent -------------------------------------------------------------
@@ -316,9 +407,9 @@ fn add_intent_allocates_the_intent_and_its_scenario_ids() {
             "id": "INT-0001",
             "scenario_ids": ["SCN-0001"],
             "claims": [
-                "telos/intents/INT-0001.tel",
-                "telos/notions/Invoice.tel",
-                "telos/notions/PaymentReceived.tel"
+                "telos/contexts/billing/capabilities/settlement/intents/INT-0001.tel",
+                "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel",
+                "telos/contexts/billing/notions/Invoice.tel"
             ]
         })
     );
@@ -380,21 +471,21 @@ fn a_date_field_that_is_not_a_date_lexeme_is_refused() {
     stage_ok(
         tmp.path(),
         &["add", "notion", "--change", "CHG-0001", "--json"],
-        &json!({"name": "Booking", "kind": "entity", "def": "A reserved slot.",
+        &json!({"owner": "billing", "name": "Booking", "kind": "entity", "def": "A reserved slot.",
                 "attrs": [{"name": "due", "type": "date"}]})
         .to_string(),
     );
     stage_ok(
         tmp.path(),
         &["add", "notion", "--change", "CHG-0001", "--json"],
-        &json!({"name": "BookingMade", "kind": "event", "def": "A booking was made."}).to_string(),
+        &json!({"owner": "billing/settlement", "name": "BookingMade", "kind": "event", "def": "A booking was made."}).to_string(),
     );
 
     let error = stage_err(
         tmp.path(),
         &["add", "intent", "--change", "CHG-0001", "--json"],
         &json!({
-            "title": "A booking has a due date", "status": "active",
+            "owner": "billing/settlement", "title": "A booking has a due date", "status": "active",
             "telos": "A slot nobody can date is a slot nobody can keep.",
             "statement": {"template": "event-driven", "when": "BookingMade",
                           "on": "Booking", "action": "record the due date"},
@@ -431,7 +522,7 @@ fn add_constraint_allocates_its_id_past_the_corpus_floor() {
         tmp.path(),
         &["add", "constraint", "--change", "CHG-0001", "--json"],
         &json!({
-            "kind": "architecture", "title": "Hexagonal boundaries",
+            "owner": "billing", "kind": "architecture", "title": "Hexagonal boundaries",
             "rule": {"text": "Domain code must not import adapter modules."},
             "scope": "global", "check": "scripts/check-imports.sh --layer domain"
         })
@@ -445,7 +536,7 @@ fn add_constraint_allocates_its_id_past_the_corpus_floor() {
             "entity": "constraint",
             "id": "CON-0004",
             "scenario_ids": [],
-            "claims": ["telos/constraints/CON-0004.tel"]
+            "claims": ["telos/contexts/billing/constraints/CON-0004.tel"]
         })
     );
     assert_eq!(
@@ -457,9 +548,8 @@ fn add_constraint_allocates_its_id_past_the_corpus_floor() {
         "change CHG-0001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
-           op add constraint CON-0004 architecture \"Hexagonal boundaries\" {\n    \
+           op add constraint CON-0004 in context billing architecture \"Hexagonal boundaries\" {\n    \
              rule  \"Domain code must not import adapter modules.\"\n    \
-             scope global\n    \
              check \"scripts/check-imports.sh --layer domain\"\n  \
            }\n\
          }\n"
@@ -491,7 +581,7 @@ fn edit_intent_stages_the_full_post_state() {
             "entity": "intent",
             "id": "INT-0017",
             "scenario_ids": [],
-            "claims": ["telos/intents/INT-0017.tel"]
+            "claims": ["telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"]
         })
     );
     assert_eq!(
@@ -499,7 +589,7 @@ fn edit_intent_stages_the_full_post_state() {
         "change CHG-0001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
-           op edit intent INT-0017 \"Issuing an invoice opens it\" {\n    \
+           op edit intent INT-0017 in billing/invoicing \"Issuing an invoice opens it\" {\n    \
              status active\n    \
              telos  \"An invoice must start its life open and unpaid -- reworded.\"\n    \
              statement event-driven {\n      \
@@ -525,7 +615,12 @@ fn edit_notion_stages_the_full_post_state() {
     stage_ok(
         tmp.path(),
         &[
-            "edit", "notion", "Customer", "--change", "CHG-0001", "--json",
+            "edit",
+            "notion",
+            "NOT:billing/Customer",
+            "--change",
+            "CHG-0001",
+            "--json",
         ],
         &json!({"def": "Reworded."}).to_string(),
     );
@@ -535,7 +630,7 @@ fn edit_notion_stages_the_full_post_state() {
         "change CHG-0001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
-           op edit notion Customer entity {\n    \
+           op edit notion billing/Customer entity {\n    \
              def  \"Reworded.\"\n    \
              attr name string\n  \
            }\n\
@@ -555,7 +650,12 @@ fn edit_notion_refuses_to_rename() {
     let error = stage_err(
         tmp.path(),
         &[
-            "edit", "notion", "Invoice", "--change", "CHG-0001", "--json",
+            "edit",
+            "notion",
+            "NOT:billing/Invoice",
+            "--change",
+            "CHG-0001",
+            "--json",
         ],
         &json!({"name": "Bill"}).to_string(),
     );
@@ -563,11 +663,11 @@ fn edit_notion_refuses_to_rename() {
     assert_eq!(error["code"], json!("TELOS_INTEGRITY_VIOLATION"));
     assert_eq!(
         error["message"],
-        json!("cannot rename notion `Invoice` to `Bill`")
+        json!("cannot rename notion `billing/Invoice` to `Bill`")
     );
     assert_eq!(
         error["hint"],
-        json!("stage `remove notion Invoice` and an `add` of the new one instead")
+        json!("stage `remove notion billing/Invoice` and an `add` of the new one instead")
     );
     assert_eq!(read(tmp.path(), CHG_0001), before);
 }
@@ -618,7 +718,7 @@ fn remove_constraint_stages_a_single_line() {
         "change CHG-0001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
-           op remove constraint CON-0003\n\
+           op remove constraint CON-0003 from billing\n\
          }\n"
     );
 }
@@ -628,7 +728,7 @@ fn remove_constraint_stages_a_single_line() {
 #[test]
 fn remove_of_a_still_referenced_intent_names_the_referrer() {
     let tmp = with_fixture_mut(|root| {
-        let path = root.join("telos/intents/INT-0017.tel");
+        let path = root.join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel");
         let source = fs::read_to_string(&path).unwrap();
         fs::write(path, source.replace("status active", "status draft")).unwrap();
     });
@@ -680,7 +780,9 @@ fn a_second_change_cannot_stage_a_file_the_first_one_claims() {
     assert_eq!(error["code"], json!("TELOS_FILE_CLAIMED"));
     assert_eq!(
         error["message"],
-        json!("telos/intents/INT-0017.tel is already claimed by CHG-0001")
+        json!(
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel is already claimed by CHG-0001"
+        )
     );
     assert_eq!(
         error["hint"],
@@ -717,7 +819,9 @@ fn a_change_may_stage_the_same_file_twice() {
 fn add_on_a_drifted_project_is_refused() {
     let tmp = with_fixture();
     open_change(tmp.path());
-    let path = tmp.path().join("telos/notions/Invoice.tel");
+    let path = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
     let mut content = fs::read_to_string(&path).unwrap();
     content.push('\n');
     fs::write(&path, content).unwrap();
@@ -804,6 +908,6 @@ fn human_mode_names_the_change_the_verb_and_the_target() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "CHG-0001: add notion Customer\n"
+        "CHG-0001: add notion billing/Customer\n"
     );
 }

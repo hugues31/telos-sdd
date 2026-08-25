@@ -1,7 +1,7 @@
 //! `telos init`: turn a git repository into a telos project.
 //!
 //! Everything is created at the *git* root, not at the current directory: a
-//! lock seals repo-relative paths (`telos/notions/Invoice.tel`), and those
+//! lock seals repo-relative paths (`telos/contexts/billing/notions/Invoice.tel`), and those
 //! paths are only meaningful -- and only hashable by `git hash-object` --
 //! relative to the worktree root. A `telos/` nested somewhere below it would
 //! seal paths git cannot resolve.
@@ -39,16 +39,11 @@ use crate::safe_fs::SafeRoot;
 const GITATTRIBUTES_LINE: &str = "telos/** text eol=lf";
 
 /// The spec subdirectories a project always has, created empty.
-const SUBDIRS: [&str; 4] = [
-    "telos/notions",
-    "telos/intents",
-    "telos/constraints",
-    "telos/changes",
-];
+const SUBDIRS: [&str; 3] = ["telos/contexts", "telos/constraints", "telos/changes"];
 
 const INIT_MARKER_PATH: &str = ".telos-init.json";
 const CONFIG_PATH: &str = "telos/telos.toml";
-const BINDINGS_PATH: &str = "telos/bindings.tel";
+const CONTEXT_MAP_PATH: &str = "telos/context-map.tel";
 const COUNTERS_PATH: &str = "telos/changes/counters.toml";
 const LOCK_PATH: &str = "telos/telos.lock";
 const GITATTRIBUTES_PATH: &str = ".gitattributes";
@@ -80,7 +75,7 @@ enum InitPhase {
 #[serde(deny_unknown_fields)]
 struct CorePlan {
     config: CoreFile,
-    bindings: CoreFile,
+    context_map: CoreFile,
     counters: CoreFile,
     gitattributes: CoreFile,
     initial_lock: Option<Vec<u8>>,
@@ -164,7 +159,7 @@ where
         Some(bytes) => {
             let parsed = serde_json::from_slice::<InitMarker>(&bytes).ok();
             let Some(marker) = parsed.filter(|marker| {
-                marker.format == "telos-init-v2"
+                marker.format == "telos-init-v3"
                     && marker.agents == requested_agents
                     && marker.ci == requested_ci
                     && marker.core.definition_matches(&config_bytes)
@@ -183,7 +178,7 @@ where
             validate_telos_tree(&safe_root, false)?;
             let core = CorePlan::fresh(&safe_root, config_bytes)?;
             let marker = InitMarker {
-                format: "telos-init-v2".to_string(),
+                format: "telos-init-v3".to_string(),
                 agents: requested_agents,
                 ci: requested_ci,
                 core,
@@ -274,9 +269,9 @@ impl CorePlan {
                 initial: None,
                 desired: config,
             },
-            bindings: CoreFile {
+            context_map: CoreFile {
                 initial: None,
-                desired: Vec::new(),
+                desired: b"context-map {\n}\n".to_vec(),
             },
             counters: CoreFile {
                 initial: None,
@@ -293,7 +288,7 @@ impl CorePlan {
     fn definition_matches(&self, config: &[u8]) -> bool {
         self.config.initial.is_none()
             && self.config.desired == config
-            && self.bindings.desired.is_empty()
+            && self.context_map.desired == b"context-map {\n}\n"
             && self.counters.desired == COUNTERS_BYTES
             && gitattributes_bytes(self.gitattributes.initial.as_deref())
                 .is_ok_and(|expected| expected == self.gitattributes.desired)
@@ -486,7 +481,7 @@ fn validate_deterministic_core_exact(
 fn core_files(core: &CorePlan) -> [(&'static str, &CoreFile); 4] {
     [
         (CONFIG_PATH, &core.config),
-        (BINDINGS_PATH, &core.bindings),
+        (CONTEXT_MAP_PATH, &core.context_map),
         (GITATTRIBUTES_PATH, &core.gitattributes),
         (COUNTERS_PATH, &core.counters),
     ]
@@ -603,13 +598,13 @@ fn validate_telos_tree(safe_root: &SafeRoot, resuming: bool) -> Result<(), Telos
             return Err(invalid(&path));
         };
         match name {
-            "notions" | "intents" | "constraints" | "changes" if is_directory => {}
-            "telos.toml" | "bindings.tel" | "telos.lock" if resuming && !is_directory => {}
+            "contexts" | "constraints" | "changes" if is_directory => {}
+            "telos.toml" | "context-map.tel" | "telos.lock" if resuming && !is_directory => {}
             _ => return Err(invalid(&path)),
         }
     }
 
-    for relative in ["telos/notions", "telos/intents", "telos/constraints"] {
+    for relative in ["telos/contexts", "telos/constraints"] {
         if let Some(entries) = safe_root
             .directory_entries(Path::new(relative))
             .map_err(|_| invalid(Path::new(relative)))?
@@ -1049,7 +1044,7 @@ mod tests {
         assert_eq!(error_code(first), ErrorCode::TelosInternal);
         assert!(tmp.path().join(INIT_MARKER_PATH).is_file());
         assert!(tmp.path().join("telos/telos.toml").is_file());
-        assert!(tmp.path().join("telos/bindings.tel").is_file());
+        assert!(tmp.path().join("telos/context-map.tel").is_file());
         assert!(!tmp.path().join("telos/changes/counters.toml").exists());
         assert!(!tmp.path().join(LOCK_PATH).exists());
         assert!(!tmp.path().join(".agents").exists());
@@ -1216,12 +1211,12 @@ mod tests {
     #[test]
     fn fresh_init_refuses_every_foreign_telos_owner_without_a_marker() {
         for (relative, directory) in [
-            ("telos/bindings.tel", false),
+            ("telos/context-map.tel", false),
             ("telos/changes/counters.toml", false),
             ("telos/telos.lock", false),
-            ("telos/notions/Foreign.tel", false),
+            ("telos/contexts/foreign/context.tel", false),
             ("telos/foreign", true),
-            ("telos/bindings.tel", true),
+            ("telos/context-map.tel", true),
         ] {
             let tmp = repo();
             let target = tmp.path().join(relative);
@@ -1250,12 +1245,7 @@ mod tests {
     #[test]
     fn fresh_init_accepts_only_empty_canonical_telos_directories() {
         let tmp = repo();
-        for relative in [
-            "telos/notions",
-            "telos/intents",
-            "telos/constraints",
-            "telos/changes",
-        ] {
+        for relative in ["telos/contexts", "telos/constraints", "telos/changes"] {
             fs::create_dir_all(tmp.path().join(relative)).unwrap();
         }
         let ctx = Ctx {
@@ -1269,15 +1259,15 @@ mod tests {
     #[test]
     fn fresh_init_refuses_an_active_unproved_prepopulation_without_sealing_it() {
         let tmp = repo();
-        fs::create_dir_all(tmp.path().join("telos/intents")).unwrap();
+        fs::create_dir_all(tmp.path().join("telos/contexts/billing")).unwrap();
         fs::write(
             tmp.path().join("telos/telos.toml"),
             b"[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n",
         )
         .unwrap();
         fs::write(
-            tmp.path().join("telos/intents/INT-0001.tel"),
-            b"intent INT-0001 \"Unproved\"\n  status active\n",
+            tmp.path().join("telos/contexts/billing/context.tel"),
+            b"context billing core \"Billing\" {\n  def \"Billing\"\n}\n",
         )
         .unwrap();
         let before = non_git_tree(tmp.path());
@@ -1309,7 +1299,7 @@ mod tests {
                 fs::write(&owner, b"outside owner\n").unwrap();
             }
             fs::create_dir_all(tmp.path().join("telos")).unwrap();
-            symlink(&owner, tmp.path().join("telos/bindings.tel")).unwrap();
+            symlink(&owner, tmp.path().join("telos/context-map.tel")).unwrap();
             let before = non_git_tree(tmp.path());
             let outside_before = non_git_tree(outside.path());
             let ctx = Ctx {
@@ -1330,7 +1320,7 @@ mod tests {
     fn post_seal_resume_rejects_foreign_core_bytes_without_any_write() {
         for relative in [
             "telos/telos.toml",
-            "telos/bindings.tel",
+            "telos/context-map.tel",
             "telos/changes/counters.toml",
             "telos/telos.lock",
             ".gitattributes",
@@ -1366,9 +1356,9 @@ mod tests {
             error_code(fail_after_two_agent_publications(&ctx)),
             ErrorCode::TelosInternal
         );
-        let bindings = tmp.path().join("telos/bindings.tel");
-        fs::remove_file(&bindings).unwrap();
-        fs::create_dir(&bindings).unwrap();
+        let context_map = tmp.path().join("telos/context-map.tel");
+        fs::remove_file(&context_map).unwrap();
+        fs::create_dir(&context_map).unwrap();
         let before = non_git_tree(tmp.path());
 
         assert_eq!(

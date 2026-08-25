@@ -13,6 +13,7 @@
 pub mod binding;
 pub mod change;
 pub mod constraint;
+pub mod domain;
 pub mod expr;
 pub mod intent;
 pub mod notion;
@@ -24,6 +25,7 @@ pub use change::{
     notion_path,
 };
 pub use constraint::{Constraint, ConstraintKind, Rule, Scope};
+pub use domain::{Capability, Context, ContextDependency, ContextKind, ContextMap, NotionMapping};
 pub use expr::{AttrRef, CmpOp, Expr, Literal, Operand};
 pub use intent::{Action, Intent, IntentStatus, Statement};
 pub use notion::{Attr, AttrType, Notion, NotionKind, Rel};
@@ -34,12 +36,36 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::graph::{Graph, NodeRef};
-use crate::ids::{ConstraintId, EntityRef, IntentId, NotionName, RepoPath, ScenarioId};
+use crate::ids::{
+    CapabilityRef, ConstraintId, ContextId, EntityRef, IntentId, NotionName, NotionRef, Owner,
+    RepoPath, ScenarioId,
+};
 
 /// One parsed `.tel` file's content, before it is folded into a
 /// `TelosModel` by the semantic pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TelFile {
+    Context(Context),
+    Capability(Capability),
+    OwnedNotion {
+        owner: Owner,
+        notion: Notion,
+    },
+    OwnedIntent {
+        owner: Owner,
+        intent: Intent,
+    },
+    OwnedConstraint {
+        owner: Option<Owner>,
+        constraint: Constraint,
+    },
+    ContextBindings {
+        context: ContextId,
+        bindings: Vec<Binding>,
+    },
+    ContextMap(ContextMap),
+    /// Internal, unowned forms retained for isolated parser/overlay unit
+    /// fixtures. The workspace never accepts their legacy filesystem layout.
     Notion(Notion),
     Intent(Intent),
     Constraint(Constraint),
@@ -54,19 +80,33 @@ pub enum TelFile {
 /// that the seal knows what each sealed path stands for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceKind {
+    Context(ContextId),
+    Capability(CapabilityRef),
+    QualifiedNotion(NotionRef),
     Notion(NotionName),
     Intent(IntentId),
     Constraint(ConstraintId),
+    ContextMap,
     Bindings,
 }
 
 /// The whole spec, aggregated from every `.tel` file in the workspace.
 #[derive(Debug, Default)]
 pub struct TelosModel {
+    pub contexts: BTreeMap<ContextId, Context>,
+    pub capabilities: BTreeMap<CapabilityRef, Capability>,
+    pub context_map: ContextMap,
+    /// Canonical qualified glossary. The legacy flat map remains an internal
+    /// compatibility aid for in-memory unit fixtures only.
+    pub domain_notions: BTreeMap<NotionRef, Notion>,
+    pub notion_owners: BTreeMap<NotionRef, Owner>,
     pub notions: BTreeMap<NotionName, Notion>,
     pub intents: BTreeMap<IntentId, Intent>,
+    pub intent_owners: BTreeMap<IntentId, Owner>,
     pub constraints: BTreeMap<ConstraintId, Constraint>,
+    pub constraint_owners: BTreeMap<ConstraintId, Option<Owner>>,
     pub bindings: Vec<Binding>,
+    pub binding_contexts: Vec<ContextId>,
     /// The structural `verifies` relation: which intent owns which scenario.
     pub scenario_owner: BTreeMap<ScenarioId, IntentId>,
     /// Every relation between two entities, declared or derived.
@@ -91,10 +131,18 @@ impl TelosModel {
     /// records rather than model nodes, and `NodeRef` has no variant for them.
     pub fn resolve(&self, r: &EntityRef) -> Option<NodeRef> {
         match r {
+            EntityRef::Context(id) => self
+                .contexts
+                .contains_key(id)
+                .then(|| NodeRef::Context(id.clone())),
+            EntityRef::Capability(id) => self
+                .capabilities
+                .contains_key(id)
+                .then(|| NodeRef::Capability(id.clone())),
             EntityRef::Notion(name) => self
-                .notions
+                .domain_notions
                 .contains_key(name)
-                .then(|| NodeRef::Notion(name.clone())),
+                .then(|| NodeRef::QualifiedNotion(name.clone())),
             EntityRef::Intent(id) => self
                 .intents
                 .contains_key(id)
@@ -182,15 +230,22 @@ mod tests {
 
     fn model_with_one_of_each() -> TelosModel {
         let mut model = TelosModel::default();
-        model.notions.insert(
-            NotionName::new("Invoice").unwrap(),
-            Notion {
-                name: NotionName::new("Invoice").unwrap(),
-                kind: NotionKind::Entity,
-                def: "A bill.".to_string(),
-                attrs: vec![],
-                rels: vec![],
-            },
+        let notion = Notion {
+            name: NotionName::new("Invoice").unwrap(),
+            kind: NotionKind::Entity,
+            def: "A bill.".to_string(),
+            attrs: vec![],
+            rels: vec![],
+        };
+        model
+            .notions
+            .insert(NotionName::new("Invoice").unwrap(), notion.clone());
+        model.domain_notions.insert(
+            NotionRef::new(
+                ContextId::new("billing").unwrap(),
+                NotionName::new("Invoice").unwrap(),
+            ),
+            notion,
         );
         model
             .intents
@@ -213,10 +268,13 @@ mod tests {
     #[test]
     fn resolve_maps_every_entity_kind_to_its_node() {
         let model = model_with_one_of_each();
-        let invoice = NotionName::new("Invoice").unwrap();
+        let invoice = NotionRef::new(
+            ContextId::new("billing").unwrap(),
+            NotionName::new("Invoice").unwrap(),
+        );
         assert_eq!(
             model.resolve(&EntityRef::Notion(invoice.clone())),
-            Some(NodeRef::Notion(invoice))
+            Some(NodeRef::QualifiedNotion(invoice))
         );
         assert_eq!(
             model.resolve(&EntityRef::Intent(IntentId(42))),
@@ -236,7 +294,10 @@ mod tests {
     fn resolve_returns_none_for_an_entity_the_spec_does_not_hold() {
         let model = model_with_one_of_each();
         assert_eq!(
-            model.resolve(&EntityRef::Notion(NotionName::new("Rogue").unwrap())),
+            model.resolve(&EntityRef::Notion(NotionRef::new(
+                ContextId::new("billing").unwrap(),
+                NotionName::new("Rogue").unwrap(),
+            ))),
             None
         );
         assert_eq!(model.resolve(&EntityRef::Intent(IntentId(1))), None);

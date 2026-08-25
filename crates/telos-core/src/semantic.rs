@@ -560,6 +560,7 @@ impl<'a> Checker<'a> {
     // --- one entity at a time -------------------------------------------
 
     fn check_notion(&mut self, notion: &'a Notion) {
+        self.check_phrase(notion);
         for rel in &notion.rels {
             let _ = self.require_notion(&rel.target.node);
         }
@@ -567,6 +568,32 @@ impl<'a> Checker<'a> {
             if let AttrType::Ref(target) = &attr.ty {
                 let _ = self.require_notion(target);
             }
+        }
+    }
+
+    /// A phrase is the term's surface form, used mid-sentence after `the `.
+    ///
+    /// Deliberately *not* checked for a leading capital: the renderer never
+    /// puts a phrase at the start of a sentence, so `SLA` is correct as
+    /// written. The single-line rule lives in `payload::notion_from_obj`
+    /// instead -- a newline is not a legal escape in a `.tel` string, so it
+    /// can only arrive through JSON.
+    fn check_phrase(&mut self, notion: &'a Notion) {
+        let name = &notion.name;
+        let phrase = notion.phrase.as_str();
+
+        if phrase.trim().is_empty() {
+            self.integrity(format!("notion {name} has an empty phrase"));
+            return;
+        }
+        let lowered = phrase.to_lowercase();
+        if ["a ", "an ", "the "]
+            .iter()
+            .any(|article| lowered.starts_with(article))
+        {
+            self.integrity(format!(
+                "notion {name} phrase must not start with an article: `{phrase}`"
+            ));
         }
     }
 

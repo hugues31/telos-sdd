@@ -1194,3 +1194,44 @@ fn every_diagnostic_is_collected_not_just_the_first() {
         ]
     );
 }
+
+// --- notion phrases ------------------------------------------------------
+
+const INVOICE_TEL: &str = "telos/contexts/billing/notions/Invoice.tel";
+
+#[test]
+fn an_empty_phrase_is_rejected() {
+    let diag = only_diagnostic(edited(INVOICE_TEL, "phrase \"invoice\"", "phrase \"\""));
+    assert!(
+        diag.message.contains("empty phrase"),
+        "unhelpful message: {}",
+        diag.message
+    );
+}
+
+#[test]
+fn a_phrase_starting_with_an_article_is_rejected() {
+    for article in ["a invoice", "an invoice", "the invoice", "The invoice"] {
+        let diag = only_diagnostic(edited(
+            INVOICE_TEL,
+            "phrase \"invoice\"",
+            &format!("phrase \"{article}\""),
+        ));
+        assert!(
+            diag.message.contains("article"),
+            "phrase `{article}`: unhelpful message: {}",
+            diag.message
+        );
+    }
+}
+
+#[test]
+fn an_acronym_phrase_keeps_its_capitals() {
+    // The renderer always prepends `the `, so a phrase is never
+    // sentence-initial and never needs to be lowercase.
+    let files = edited(INVOICE_TEL, "phrase \"invoice\"", "phrase \"SLA\"");
+    assert!(
+        build(files).is_ok(),
+        "an acronym phrase must be accepted -- the renderer never capitalizes it"
+    );
+}

@@ -571,8 +571,8 @@ fn published_command_values_are_the_exact_public_0_9_set() {
         rows[1..].iter().map(|row| row[0]).collect::<Vec<_>>(),
         [
             "version", "init", "config", "map", "status", "view", "check", "show", "list", "query",
-            "impact", "pack", "rebuild", "change", "add", "edit", "move", "remove", "adopt",
-            "revert", "test", "bind",
+            "impact", "pack", "gherkin", "rebuild", "change", "add", "edit", "move", "remove",
+            "adopt", "revert", "test", "bind",
         ]
     );
     assert!(rows.iter().all(|row| row.len() == 2));

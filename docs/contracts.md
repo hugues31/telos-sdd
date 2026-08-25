@@ -76,6 +76,7 @@ envelope surface.
 | `query` | `telos query` |
 | `impact` | `telos impact` |
 | `pack` | `telos pack` |
+| `gherkin` | `telos gherkin [--change CHG-NNNN]` |
 | `rebuild` | `telos rebuild plan` or `telos rebuild status` |
 | `change` | `telos change ...` (including `approve <id> [--expected-digest SHA256]`) |
 | `add` | `telos add` |
@@ -403,6 +404,55 @@ remain in the intent’s order; notions sort by name; constraints by id;
 implements by path; proves by `(scenario, test)`; neighbours by
 `(relation, id, direction)`. Neighbours are only one-hop `refines`,
 `requires`, or `excludes` intent edges.
+
+## `gherkin [--change CHG-NNNN]`
+
+`gherkin` prints the Cucumber `.feature` projection of the spec: one feature
+per intent, keyed by
+`telos/features/<context>/<capability>/<INT-id>.feature` (and
+`telos/features/<context>/<INT-id>.feature` for a context-owned intent). Tags
+are ids -- `@INT-0042` on the feature, `@SCN-0107` on each scenario -- so a
+runner filters by tag and a binding stays id-based. It is a read command:
+`next_actions` is always `[]`.
+
+It writes nothing and seals nothing. `telos/features/` is not created, and
+`telos.lock` is untouched.
+
+```json
+{ "features": [ { "path": "telos/features/billing/settlement/INT-0042.feature",
+                  "content": "@INT-0042\nFeature: Invoice payment marks it settled\n…" } ] }
+```
+
+`--change` renders what that change would produce instead of the sealed
+spec, from the same post-overlay model `pack --change` and `reconcile` build:
+its operations replayed idempotently, its journal folded into bindings, then
+semantic validation. A mistyped id is `TELOS_REFERENCE_UNKNOWN`, as for every
+other `--change` argument.
+
+Step prose is derived, never authored. A step is `the ` plus the notion's
+`phrase` plus that step's own field values, so the sentence cannot disagree
+with the typed data; a step with no fields drops the `with` clause entirely.
+The definite article is what makes this mechanical: `the` is invariant, so
+the renderer never chooses between `a` and `an`, and a `phrase` beginning
+with an article is rejected by the semantic pass. A phrase is never
+capitalized by the renderer, because it is never sentence-initial -- which is
+why `SLA` stays `SLA`.
+
+A `then` clause renders from its expression:
+
+| Expression | Prose |
+|---|---|
+| `==` | `is` |
+| `!=` | `is not` |
+| `<` / `<=` | `is less than` / `is at most` |
+| `>` / `>=` | `is greater than` / `is at least` |
+| `in (a, b, c)` | `is one of a, b and c` |
+| `and` | a separate `And` step |
+| `or` | `… or …`, inside one step |
+| `not` | `it is not the case that …` |
+
+`and` splits into steps and `or` does not, because Gherkin has no
+disjunction between steps.
 
 ## `test <SCN-id|--all> [--file <path>]`
 

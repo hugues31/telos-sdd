@@ -3,8 +3,7 @@
 // intent, constraint and scenario each resolve to a route (scenario needs
 // `scenarioToIntent` from the data layer to find its parent intent, since
 // scenarios don't have their own page — they're an anchor on the intent
-// detail page). code/test have no page at all, so they render as a plain,
-// same-looking, non-interactive span with an explanatory title.
+// detail page). Code and test bindings focus their node on the graph.
 //
 // Label: a notion's id *is* its readable name (e.g. "Invoice"), and
 // constraint ids aren't in scope for this — but an intent/scenario id
@@ -18,6 +17,7 @@ import type { RouteLocationRaw } from 'vue-router';
 
 import { intentById, scenarioById, scenarioToIntent } from '../data/snapshot';
 import type { GraphKey } from '../data/types';
+import { entityDestination } from '../search/destinations';
 import KindPill from './KindPill.vue';
 
 const props = withDefaults(
@@ -30,33 +30,12 @@ const props = withDefaults(
 );
 
 const to = computed<RouteLocationRaw | null>(() => {
-  switch (props.entity.kind) {
-    case 'context':
-      return { name: 'contexts', hash: `#context-${props.entity.id}` };
-    case 'capability':
-      return { name: 'contexts', hash: `#capability-${props.entity.id.replace('/', '-')}` };
-    case 'intent':
-      return { name: 'intent-detail', params: { id: props.entity.id } };
-    case 'scenario': {
-      const intentParent = scenarioToIntent.value.get(props.entity.id);
-      return intentParent
-        ? { name: 'intent-detail', params: { id: intentParent }, hash: `#scenario-${props.entity.id}` }
-        : null;
-    }
-    case 'notion':
-      return { name: 'glossary', hash: `#notion-${props.entity.id}` };
-    case 'constraint':
-      return { name: 'coverage', hash: `#constraint-${props.entity.id}` };
-    default:
-      return null;
-  }
+  const scenarioParent =
+    props.entity.kind === 'scenario' ? scenarioToIntent.value.get(props.entity.id) : undefined;
+  return entityDestination(props.entity, scenarioParent);
 });
 
-const staticTitle = computed(() => {
-  if (props.entity.kind === 'code') return 'Source file — has no dedicated page';
-  if (props.entity.kind === 'test') return 'Test — has no dedicated page';
-  return `${props.entity.kind} not found in this snapshot`;
-});
+const staticTitle = computed(() => `${props.entity.kind} not found in this snapshot`);
 
 const resolvedLabel = computed(() => {
   if (props.entity.kind === 'intent') return intentById.value.get(props.entity.id)?.title;

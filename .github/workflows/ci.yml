@@ -75,10 +75,6 @@ jobs:
       - name: Prove spec-only Billing reconstruction
         if: runner.os == 'Linux'
         run: cargo test -p telos --test rebuild_demo
-      # Writes a throwaway project depending on `cucumber` into a tempdir, so
-      # the crate never appears in this repository's Cargo.toml or Cargo.lock.
-      # `--ignored` because that project takes a large dependency tree and a
-      # network fetch, which no ordinary `cargo test` should pay for.
       - name: Prove generated Gherkin runs under Cucumber
         if: runner.os == 'Linux'
         run: cargo test -p telos --test gherkin_acceptance -- --ignored

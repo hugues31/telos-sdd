@@ -75,10 +75,9 @@ pub fn run(ctx: &Ctx, scenario: Option<&str>, all: bool, file: Option<&str>) -> 
 /// The features directory a run should see: this change's post model,
 /// rendered fresh.
 ///
-/// `one`/`every` carry only the minimal `staged_intents` model, which is
-/// enough for witness bookkeeping but not for rendering prose -- so the real
-/// post-change model is built here, the same construction `pack --change`
-/// and `reconcile` use. Held by the caller: dropping the handle deletes the
+/// `one`/`every` carry only the minimal `staged_intents` model, enough for
+/// witness bookkeeping but not for rendering prose, so the real post-change
+/// model is built here. The caller holds the handle: dropping it deletes the
 /// directory the runner is about to read.
 fn stage_features_for(
     project: &Project,

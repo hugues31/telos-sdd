@@ -1,13 +1,12 @@
-//! The one test that proves the design rather than its parts: that what
-//! `render_features` emits is Gherkin a real Cucumber can parse and run, that
-//! `{features}` delivers it, and that the red/green loop works when the
-//! runner is Cucumber rather than a native test harness.
+//! Proves that what `render_features` emits is Gherkin a real Cucumber can
+//! parse and run, that `{features}` delivers it, and that the red/green loop
+//! works with Cucumber as the runner.
 //!
-//! `#[ignore]`d on purpose. It writes a throwaway Cargo project that depends
-//! on `cucumber`, so running it needs network and compiles a large dependency
-//! tree. Nothing in this repository depends on `cucumber`: the fixture is
-//! generated into a tempdir at run time, so the crate never appears in
-//! `Cargo.toml` or `Cargo.lock`. CI runs this on Linux with `-- --ignored`.
+//! `#[ignore]`d: it writes a throwaway Cargo project depending on `cucumber`,
+//! so it needs network and compiles a large dependency tree. That fixture is
+//! generated at run time, which is what keeps `cucumber` out of this
+//! repository's `Cargo.toml` and `Cargo.lock`. CI runs it on Linux with
+//! `-- --ignored`.
 
 mod common;
 
@@ -57,13 +56,12 @@ impl Invoice {
 "#;
 
 /// The step definitions: the human-written half, and the file `telos test`
-/// seals. It never changes between red and green -- that is the whole point
-/// of the discipline, and editing it after a red would be `TELOS_TEST_SEALED`.
+/// seals. It must not change between red and green -- editing it after a red
+/// is `TELOS_TEST_SEALED`.
 ///
-/// The step text is not authored here in any meaningful sense: it is what
-/// `render_features` produces for this spec, transcribed. If the renderer
-/// changed its prose, these regexes would stop matching and the run would go
-/// red on an undefined step.
+/// The step text is transcribed from what `render_features` produces for this
+/// spec. If the renderer's prose changed, these regexes would stop matching
+/// and the run would go red on an undefined step.
 const STEPS: &str = r#"use cucumber::{World, given, then, when};
 
 use cucumber_acceptance::Invoice;
@@ -88,11 +86,9 @@ fn then_invoice_state(world: &mut BillingWorld, expected: String) {
     assert_eq!(world.invoice.state, expected);
 }
 
-/// Telos hands the staged directory as `--features-dir <path>`. That flag is
-/// pulled out of argv here and everything else forwarded to Cucumber's own
-/// parser, rather than declared as a custom CLI struct: the derive for that
-/// expands to code referencing `clap` directly, which would mean a second
-/// dependency for one argument.
+/// Telos hands the staged directory as `--features-dir <path>`. Pulled out of
+/// argv here, with everything else forwarded to Cucumber's parser; declaring
+/// it as a custom CLI struct would pull in `clap` for one argument.
 fn features_dir_from_argv() -> (std::path::PathBuf, Vec<String>) {
     let mut args: Vec<String> = std::env::args().collect();
     let position = args
@@ -143,9 +139,9 @@ fn run(root: &Path, program: &str, args: &[&str]) {
 /// Runs a `telos` subcommand that must succeed, returning its `result`.
 fn telos_ok(root: &Path, args: &[&str], stdin: &str) -> serde_json::Value {
     let mut cmd = telos(root, args);
-    // Share one target directory across runs so the Cucumber tree is compiled
-    // once per machine rather than once per invocation. The runner inherits
-    // this, which is the only way to set it: `[test] cmd` never sees a shell.
+    // One shared target directory, so the Cucumber tree compiles once per
+    // machine. The runner inherits it from here, which is the only route
+    // available: `[test] cmd` never sees a shell.
     cmd.env(
         "CARGO_TARGET_DIR",
         std::env::temp_dir().join("telos-cucumber-acceptance-target"),
@@ -236,7 +232,7 @@ fn generated_gherkin_runs_under_a_real_cucumber() {
 
     // Red: the domain does nothing, so Cucumber's `Then` assertion fails.
     // Reaching an assertion at all proves it parsed and ran the generated
-    // feature, from the directory `{features}` supplied.
+    // feature from the directory `{features}` supplied.
     let red = telos_ok(
         root,
         &["test", "SCN-0001", "--file", "tests/features.rs", "--json"],
@@ -244,8 +240,8 @@ fn generated_gherkin_runs_under_a_real_cucumber() {
     );
     assert_eq!(red["witness"], serde_json::json!("red"), "{red}");
 
-    // Green: the minimum application change. The step definitions -- the
-    // sealed bytes -- are untouched.
+    // Green: the minimum application change. The step definitions, which are
+    // the sealed bytes, are untouched.
     write(root, "src/lib.rs", LIB_GREEN);
     let green = telos_ok(
         root,

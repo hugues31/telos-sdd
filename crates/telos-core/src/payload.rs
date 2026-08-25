@@ -107,9 +107,9 @@ fn notion_from_obj(obj: &Map<String, Value>, base: Option<&Notion>) -> Result<No
     let phrase = match obj.get("phrase") {
         Some(v) => {
             let text = as_str(v, "phrase")?.to_string();
-            // A newline cannot be written in a `.tel` string -- the lexer
-            // accepts only `\"` and `\\` -- so emitting one would produce a
-            // file the parser rejects. This is the only door it can enter by.
+            // A `.tel` string admits only `\"` and `\\`, so emitting a
+            // newline would produce a file the parser rejects. JSON is the
+            // only door one can enter by.
             if text.contains('\n') {
                 return Err(TelosError::new(
                     ErrorCode::TelosParseError,
@@ -164,9 +164,9 @@ fn notion_from_obj(obj: &Map<String, Value>, base: Option<&Notion>) -> Result<No
 /// `"invoice line"`; `HTTPRequest` becomes `"http request"`; `SLA` stays one
 /// word and becomes `"sla"`.
 ///
-/// The result is written into the `.tel` file, never applied at read time, so
-/// a wrong guess -- `SLA` -- shows up in `telos change diff` and gets fixed
-/// before approval instead of surfacing in generated prose afterwards.
+/// Runs once, here, and the result is written into the `.tel` file. It is
+/// never applied at read time, so a wrong guess is visible in a diff rather
+/// than in generated prose.
 pub fn derive_phrase(name: &NotionName) -> String {
     let chars: Vec<char> = name.as_str().chars().collect();
     let mut words = Vec::new();

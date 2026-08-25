@@ -104,11 +104,10 @@ impl Workspace {
             &mut files,
         )?;
         // Generated `.feature` files are derived *specification*, like
-        // `bindings.tel`: sealed, drift-checked, and produced by reconcile
+        // `bindings.tel`: sealed and drift-checked, produced by reconcile
         // rather than named by a staged op. Collected unconditionally --
-        // whether they are *produced* depends on `[gherkin] enabled`, but
-        // whether files found here are *sealed* must not, or disabling
-        // generation would silently orphan whatever is already on disk.
+        // `[gherkin] enabled` governs what is produced, never what is sealed,
+        // or disabling it would orphan whatever is already on disk.
         collect_files_recursive(
             &self.telos_dir.join("features"),
             "telos/features",

@@ -5,18 +5,10 @@
 //! caller render the same model to a temp directory for a test run and to
 //! `telos/features/` for a seal and get byte-identical output.
 //!
-//! Two rules carry most of the design.
-//!
-//! **A phrase is never capitalized.** Every step reads `Given the ...`,
-//! `When the ...`, `Then the ...`, so a notion's phrase is never
-//! sentence-initial. `SLA` stays `SLA`.
-//!
-//! **A phrase carries no article; this module prepends `the `.** The
-//! definite article is invariant, so the renderer never has to choose
-//! between `a` and `an` -- a choice that is not mechanical for the acronyms
-//! a domain model is full of (`a user`, `an SLA`, `an hour`, `a European`).
-//! [`crate::semantic`] rejects a phrase that starts with an article, so the
-//! two can never double up.
+//! A notion's `phrase` carries no article and is used verbatim: this module
+//! prepends `the `, so a phrase is never sentence-initial and is never
+//! capitalized here. [`crate::semantic`] rejects a phrase that starts with an
+//! article.
 
 use std::collections::BTreeMap;
 
@@ -44,10 +36,8 @@ pub fn feature_path(owner: &Owner, intent: IntentId) -> RepoPath {
 /// Renders every intent in `model` as a `.feature` file, keyed by the path it
 /// belongs at.
 ///
-/// An intent with no scenarios still renders: a `Feature` with a title and a
-/// narrative and no `Scenario` blocks is valid Gherkin, and omitting the file
-/// would make the set of rendered paths depend on scenario counts, which a
-/// later phase seals.
+/// An intent with no scenarios still renders. The set of rendered paths is
+/// sealed, so it must depend on the intents alone, never on scenario counts.
 pub fn render_features(model: &TelosModel) -> BTreeMap<RepoPath, String> {
     let mut out = BTreeMap::new();
     for (id, intent) in &model.intents {
@@ -115,7 +105,7 @@ fn instance(phrase: &impl Fn(&NotionName) -> String, step: &InstanceStep) -> Str
 }
 
 /// `And` in a `then` clause becomes a separate `And` step; `Or` stays inside
-/// one step, because Gherkin has no disjunction between steps.
+/// one step, Gherkin having no disjunction between steps.
 fn flatten_and<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match expr {
         Expr::And(lhs, rhs) => {
@@ -174,8 +164,8 @@ fn comparison(op: CmpOp) -> &'static str {
 
 /// Prose, not `.tel` syntax: a string literal loses its quotes, so
 /// `"120.00 EUR"` reads as `120.00 EUR` inside a sentence. Decimal, date and
-/// datetime re-emit their lexeme for the same reason
-/// [`crate::emit::emit_literal`] does -- an amount never goes through a float.
+/// datetime re-emit their lexeme, as [`crate::emit::emit_literal`] does, so an
+/// amount never goes through a float.
 fn literal(value: &Literal) -> String {
     match value {
         Literal::Str(s) => s.clone(),
@@ -199,9 +189,8 @@ fn join_and(parts: &[String]) -> String {
 
 /// The surface form of a notion, resolved in the owning intent's context.
 ///
-/// `build_model` has already resolved every notion a scenario names, so a
-/// miss here means the model was not validated -- the same contract
-/// [`crate::rebuild::plan`] relies on.
+/// `build_model` has already resolved every notion a scenario names, so a miss
+/// here means the model was not validated.
 fn notion_phrase(model: &TelosModel, owner: &Owner, name: &NotionName) -> String {
     let reference = NotionRef::new(owner.context.clone(), name.clone());
     let notion: &Notion = model
@@ -215,19 +204,12 @@ fn notion_phrase(model: &TelosModel, owner: &Owner, name: &NotionName) -> String
 /// Renders `model`'s features into a fresh temporary directory, so a test
 /// runner is handed the prose that matches the code under test.
 ///
-/// Returns `None` when `[gherkin]` is off, which the runner template renders
-/// as an empty `{features}` token -- dropping it, exactly as an empty
-/// `{filter}` already drops.
+/// Must stay a temporary directory: at test time `telos/features/` still
+/// holds the pre-change render, and a new intent's scenario is not on disk at
+/// all.
 ///
-/// A temporary directory rather than `telos/features/`, because of *when*
-/// this runs. Reconcile proves a change before writing it, so at test time
-/// the sealed tree still describes the pre-change model while the step
-/// definitions on disk already describe the post-change one; and a
-/// brand-new intent's scenario is not on disk at all, living only inside its
-/// change file until that change reconciles.
-///
-/// The returned handle owns the directory: dropping it deletes the tree, so
-/// the caller must hold it for as long as the runner needs the files.
+/// The returned handle owns the directory, so the caller holds it for as long
+/// as the runner needs the files.
 pub fn staged_features(config: &Config, model: &TelosModel) -> Result<StagedFeatures, TelosError> {
     if !config.gherkin.enabled {
         return Ok(StagedFeatures::disabled());
@@ -243,9 +225,8 @@ pub fn staged_features(config: &Config, model: &TelosModel) -> Result<StagedFeat
         })?;
 
     for (path, content) in render_features(model) {
-        // `path` is repo-relative (`telos/features/<context>/...`). Rebase it
-        // under the staging root so the runner is handed a features
-        // directory, not a copy of the repository.
+        // `path` is repo-relative; rebase it under the staging root so the
+        // runner is handed a features directory, not a repository.
         let relative = path
             .as_str()
             .strip_prefix("telos/features/")
@@ -269,13 +250,9 @@ pub fn staged_features(config: &Config, model: &TelosModel) -> Result<StagedFeat
 /// A staged features directory, alive for as long as this value is.
 ///
 /// Owns the temporary directory: dropping it deletes the tree, so a caller
-/// holds it across the runner invocation. When `[gherkin]` is off there is no
-/// directory and [`path`](Self::path) is empty, which the runner template
-/// renders by dropping the `{features}` token entirely.
-///
-/// The `tempfile` backing is deliberately not exposed: callers ask for a path
-/// and keep the handle alive, and nothing above this module needs to know how
-/// the directory is made or cleaned up.
+/// holds it across the runner invocation. With `[gherkin]` off there is no
+/// directory and [`path`](Self::path) is empty, which drops the `{features}`
+/// token from the runner's argument vector.
 #[derive(Debug)]
 pub struct StagedFeatures {
     /// Held for its `Drop`. Never read.

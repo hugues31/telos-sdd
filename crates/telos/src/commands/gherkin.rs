@@ -1,9 +1,10 @@
 //! `telos gherkin`: the `.feature` projection of the spec, printed.
 //!
-//! Writes nothing and seals nothing. The files this renders become sealed
-//! spec in a later phase; here the command exists so a human can read the
-//! prose a change would produce *before* approving it, rather than
-//! discovering it after reconcile.
+//! The command writes nothing: it prints. Whether the files themselves are
+//! written and sealed is governed by `[gherkin] enabled`.
+//!
+//! `--change` renders what a change would produce, so its prose can be read
+//! before the change is approved.
 
 use serde_json::{Value, json};
 
@@ -24,9 +25,6 @@ pub fn run(ctx: &Ctx, change: Option<&str>) -> CmdResult {
     let ws = Workspace::discover(&ctx.cwd)?;
     let model = match change {
         None => ws.load_model().map_err(diagnostics_to_error)?,
-        // `parse_change_id` rather than a local parse: a mistyped `--change`
-        // is the same class of mistake as one that does not exist, and every
-        // other command carrying this flag reports both under one code.
         Some(id) => post_model(&ws, parse_change_id(id)?)?,
     };
     let features = render_features(&model);
@@ -56,9 +54,9 @@ pub fn run(ctx: &Ctx, change: Option<&str>) -> CmdResult {
 }
 
 /// The change's post model: its ops replayed idempotently over the sealed
-/// base, its journal folded into bindings, then the semantic pass -- the same
-/// construction `reconcile` builds, so the prose a human previews here can
-/// never disagree with the prose reconciling that change would seal.
+/// base, its journal folded into bindings, then the semantic pass. The same
+/// construction `reconcile` builds, so a preview cannot disagree with what
+/// reconciling would seal.
 fn post_model(ws: &Workspace, id: ChangeId) -> Result<TelosModel, TelosError> {
     let change = read_change(ws, id)?;
     let base = parse_base(ws).map_err(diagnostics_to_error)?;

@@ -573,11 +573,9 @@ impl<'a> Checker<'a> {
 
     /// A phrase is the term's surface form, used mid-sentence after `the `.
     ///
-    /// Deliberately *not* checked for a leading capital: the renderer never
-    /// puts a phrase at the start of a sentence, so `SLA` is correct as
-    /// written. The single-line rule lives in `payload::notion_from_obj`
-    /// instead -- a newline is not a legal escape in a `.tel` string, so it
-    /// can only arrive through JSON.
+    /// No leading-capital rule: a phrase is never sentence-initial, so `SLA`
+    /// is correct as written. The single-line rule lives in
+    /// `payload::notion_from_obj`, the only boundary a newline can cross.
     fn check_phrase(&mut self, notion: &'a Notion) {
         let name = &notion.name;
         let phrase = notion.phrase.as_str();

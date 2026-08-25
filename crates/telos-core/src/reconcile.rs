@@ -236,10 +236,9 @@ pub fn reconcile_change(
     }
     write_bindings(ws, &model)?;
     // `effective_ws`, not `ws`: it carries this change's config ops, so a
-    // change that stages `[gherkin] enabled = true` generates features in the
-    // reconcile that approves it rather than in some later one. The two share
-    // `repo_root` and `telos_dir`, and `telos/features/` is a fixed path, so
-    // nothing else about the choice can differ.
+    // change staging `[gherkin] enabled = true` takes effect in the reconcile
+    // that approves it. The two differ only in config here -- `repo_root`,
+    // `telos_dir` and the fixed `telos/features/` path are shared.
     write_features(&effective_ws, &model)?;
     let spec_paths = ws.spec_files()?;
     let spec = git.blob_oids(&spec_paths)?;
@@ -1225,8 +1224,8 @@ fn run_tests(
         }
     }
 
-    // Staged once for the whole loop, and held until it ends: the runner
-    // must see the model being proved, not the pre-change tree still on disk.
+    // Staged once and held until the loop ends: the runner must see the model
+    // being proved, not the pre-change tree still on disk.
     let staged = staged_features(&ws.config, model)?;
     let features = staged.path();
 
@@ -1399,15 +1398,13 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
 /// model at a path no staged op names, written in the write phase and sealed
 /// like any other spec file.
 ///
-/// Pruning is not tidiness. Removing or moving an intent changes which paths
-/// belong, and a `.feature` left behind would be picked up by the
-/// `spec_files()` re-scan that follows -- sealing a file that describes an
-/// intent no longer in the model. Disabling `[gherkin]` is the same operation
-/// with an empty rendered set, which is why turning generation off cannot
-/// orphan anything.
+/// The prune is required, not tidiness: the `spec_files()` re-scan below seals
+/// whatever it finds, so a `.feature` whose intent was removed or moved would
+/// be sealed against a model that no longer holds it. Disabling `[gherkin]` is
+/// the same operation with an empty rendered set.
 ///
-/// Empty directories are left behind. They contribute nothing to
-/// `spec_files()`, so they cannot be sealed and cannot drift.
+/// Empty directories are left behind; they contribute nothing to
+/// `spec_files()`, so they can neither be sealed nor drift.
 fn write_features(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
     let repo_fs = RepoFs::open(&ws.repo_root)?;
     let rendered = if ws.config.gherkin.enabled {

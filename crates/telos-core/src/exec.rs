@@ -120,10 +120,10 @@ fn parse_runner_template(
     while index < template.len() {
         let rest = &template[index..];
 
-        // Each placeholder is substituted as *data*: whatever it expands to
-        // becomes part of the current word, never re-scanned for shell
-        // syntax. An empty value contributes nothing, so the token vanishes
-        // rather than leaving an empty argv entry behind.
+        // Substituted as *data*: the value joins the current word and is
+        // never re-scanned for shell syntax. An empty value contributes
+        // nothing, so the token vanishes rather than leaving an empty argv
+        // entry.
         if let Some((placeholder, value)) = PLACEHOLDERS
             .iter()
             .zip([filter, features])
@@ -250,9 +250,9 @@ fn shell_command(cmd: &str) -> Command {
 /// Replaces every occurrence of `{filter}` and `{features}` in `cmd`, then
 /// `trim_end`s the whole result.
 ///
-/// This is the *display* form -- what the envelope reports as the command
-/// that ran. It must substitute both placeholders or a reader would see a
-/// literal `{features}` in a command that resolved one.
+/// The *display* form: what the envelope reports as the command that ran.
+/// Both placeholders must be substituted, or the report would show a literal
+/// token where one resolved.
 ///
 /// The `trim_end` runs after substitution and over the *whole* string, not
 /// just around the placeholder, so an empty value (the `--full` case, or

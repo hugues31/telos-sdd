@@ -49,11 +49,7 @@ pub struct Config {
 /// `[gherkin]`: whether reconcile generates sealed Cucumber `.feature` files
 /// under `telos/features/`.
 ///
-/// Off unless asked for. The directory is deliberately not configurable: the
-/// write phase reads the *effective* config, so that enabling generation
-/// takes effect in the reconcile that approves it -- and a `dir` a change
-/// could also move would then mean pruning one tree while writing another in
-/// the same transaction.
+/// Off unless asked for. The directory is fixed, not configurable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GherkinCfg {
     #[serde(default)]

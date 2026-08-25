@@ -45,9 +45,7 @@ struct PayloadPolicy {
     tdd: TddPolicy,
 }
 
-/// Required like every sibling: the payload is a wholesale replacement, and
-/// `stage` documents it as "a complete configuration JSON object". A field
-/// that could be omitted would make a partial document look complete.
+/// Required, like every sibling: the payload is a wholesale replacement.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PayloadGherkin {

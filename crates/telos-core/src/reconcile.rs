@@ -135,7 +135,7 @@ use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
 use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
-use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
+use crate::exec::{Substitutions, run_runner_template, run_shell, substitute_placeholders};
 use crate::gherkin::{render_features, staged_features};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
@@ -1202,6 +1202,20 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
 /// a scenario the spec claims is proved, whose proof does not currently
 /// pass -- and is reported as `TELOS_INTEGRITY_VIOLATION` carrying the
 /// substituted command, so the caller can rerun exactly what ran.
+/// The Gherkin tag expression selecting `scenarios`: `@SCN-0107`, or
+/// `@SCN-0091 or @SCN-0107` when one proving test covers several.
+///
+/// `or` rather than a comma: it is the tag-expression syntax every Cucumber
+/// implementation accepts. Empty for an empty set, which drops the
+/// `{scenario}` token.
+fn tag_expression(scenarios: &BTreeSet<ScenarioId>) -> String {
+    scenarios
+        .iter()
+        .map(|scenario| format!("@{scenario}"))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
 fn run_tests(
     ws: &Workspace,
     model: &TelosModel,
@@ -1215,12 +1229,16 @@ fn run_tests(
     let scenarios = impacted_scenarios(model, impacted);
     // Keyed by the target's rendered form: that both deduplicates two
     // scenarios proved by one test and orders the runs deterministically.
-    let mut targets: BTreeMap<String, &TestRef> = BTreeMap::new();
+    let mut targets: BTreeMap<String, (&TestRef, BTreeSet<ScenarioId>)> = BTreeMap::new();
     for binding in &model.bindings {
         if let Binding::Proves { test, scenario } = binding
             && scenarios.contains(&scenario.node)
         {
-            targets.insert(test.to_string(), test);
+            targets
+                .entry(test.to_string())
+                .or_insert_with(|| (test, BTreeSet::new()))
+                .1
+                .insert(scenario.node);
         }
     }
 
@@ -1230,16 +1248,22 @@ fn run_tests(
     let features = staged.path();
 
     let mut tests_run = 0;
-    for (rendered, test) in targets {
+    for (rendered, (test, proved)) in targets {
         let filter = test
             .name
             .clone()
             .unwrap_or_else(|| test.path.as_str().to_string());
-        match run_shell_with_filter(cmd, &filter, features, &ws.repo_root) {
+        let scenario = tag_expression(&proved);
+        let subs = Substitutions {
+            filter: &filter,
+            features,
+            scenario: &scenario,
+        };
+        match run_runner_template(cmd, &subs, &ws.repo_root) {
             Ok(run) if run.result.status == 0 => tests_run += 1,
             Ok(run) => return Err(test_failed(&rendered, &run.command)),
             Err(_) => {
-                let command = substitute_filter(cmd, &filter, features);
+                let command = substitute_placeholders(cmd, &subs);
                 return Err(test_failed(&rendered, &command));
             }
         }
@@ -1263,9 +1287,12 @@ fn run_full_tests(ws: &Workspace, model: &TelosModel) -> Result<u32, TelosError>
     }
 
     let staged = staged_features(&ws.config, model)?;
-    let features = staged.path();
-    let command = substitute_filter(cmd, "", features);
-    match run_shell_with_filter(cmd, "", features, &ws.repo_root) {
+    let subs = Substitutions {
+        features: staged.path(),
+        ..Default::default()
+    };
+    let command = substitute_placeholders(cmd, &subs);
+    match run_runner_template(cmd, &subs, &ws.repo_root) {
         Ok(run) if run.result.status == 0 => Ok(1),
         Ok(_) | Err(_) => Err(test_failed("the whole suite", &command)),
     }

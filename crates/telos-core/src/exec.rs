@@ -53,24 +53,39 @@ pub fn run_shell(cmd: &str, cwd: &Path) -> Result<RunResult, TelosError> {
     Ok(run_result(output))
 }
 
-/// Displays the runner template's exact literal substitution while executing a deliberately
-/// restricted runner template as a direct process argv. No shell sees the
-/// filter or the features path; each remains data even in embedded words such
-/// as `module::{filter}` or `{features}/billing/INT-0042.feature`.
+/// What a runner template's placeholders resolve to.
 ///
-/// `features` is the directory of freshly-rendered `.feature` files the run
-/// should see, or empty when `[gherkin]` is off -- in which case the
-/// `{features}` token drops out entirely, exactly as an empty `{filter}` does.
-pub fn run_shell_with_filter(
+/// A struct rather than three positional `&str`, which would be trivially
+/// swappable at four call sites.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Substitutions<'a> {
+    /// `{filter}`: the target a runner should select, its test name or path.
+    pub filter: &'a str,
+    /// `{features}`: a directory of freshly-rendered `.feature` files, empty
+    /// when `[gherkin]` is off.
+    pub features: &'a str,
+    /// `{scenario}`: the Gherkin tag expression selecting the scenarios this
+    /// run proves (`@SCN-0107`, or `@SCN-0091 or @SCN-0107`). Empty for a
+    /// whole-suite run.
+    pub scenario: &'a str,
+}
+
+/// Displays the runner template's exact literal substitution while executing a deliberately
+/// restricted runner template as a direct process argv. No shell sees any
+/// substituted value; each remains data even in an embedded word such as
+/// `module::{filter}` or `{features}/billing/INT-0042.feature`.
+///
+/// An empty value drops its token from the argument vector entirely.
+pub fn run_runner_template(
     template: &str,
-    filter: &str,
-    features: &str,
+    subs: &Substitutions<'_>,
     cwd: &Path,
 ) -> Result<FilteredRun, TelosError> {
-    let command = substitute_filter(template, filter, features);
-    validate_filter_data(filter)?;
-    validate_filter_data(features)?;
-    let argv = parse_runner_template(template, filter, features)?;
+    let command = substitute_placeholders(template, subs);
+    validate_filter_data(subs.filter)?;
+    validate_filter_data(subs.features)?;
+    validate_filter_data(subs.scenario)?;
+    let argv = parse_runner_template(template, subs)?;
     let output = Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(cwd)
@@ -100,10 +115,9 @@ fn validate_filter_data(filter: &str) -> Result<(), TelosError> {
 
 fn parse_runner_template(
     template: &str,
-    filter: &str,
-    features: &str,
+    subs: &Substitutions<'_>,
 ) -> Result<Vec<String>, TelosError> {
-    const PLACEHOLDERS: [&str; 2] = ["{filter}", "{features}"];
+    const PLACEHOLDERS: [&str; 3] = ["{filter}", "{features}", "{scenario}"];
     let unsafe_template = || {
         TelosError::new(
             ErrorCode::TelosParseError,
@@ -126,7 +140,7 @@ fn parse_runner_template(
         // entry.
         if let Some((placeholder, value)) = PLACEHOLDERS
             .iter()
-            .zip([filter, features])
+            .zip([subs.filter, subs.features, subs.scenario])
             .find(|(placeholder, _)| rest.starts_with(**placeholder))
         {
             if !value.is_empty() {
@@ -247,11 +261,10 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-/// Replaces every occurrence of `{filter}` and `{features}` in `cmd`, then
-/// `trim_end`s the whole result.
+/// Replaces every placeholder in `cmd`, then `trim_end`s the whole result.
 ///
 /// The *display* form: what the envelope reports as the command that ran.
-/// Both placeholders must be substituted, or the report would show a literal
+/// Every placeholder must be substituted, or the report would show a literal
 /// token where one resolved.
 ///
 /// The `trim_end` runs after substitution and over the *whole* string, not
@@ -259,24 +272,27 @@ fn shell_command(cmd: &str) -> Command {
 /// `[gherkin]` being off) leaves no trailing whitespace where the
 /// placeholder used to sit: `"cargo test {filter}"` with an empty filter
 /// becomes `"cargo test"`, not `"cargo test "`.
-pub fn substitute_filter(cmd: &str, filter: &str, features: &str) -> String {
-    cmd.replace("{filter}", filter)
-        .replace("{features}", features)
+pub fn substitute_placeholders(cmd: &str, subs: &Substitutions<'_>) -> String {
+    cmd.replace("{filter}", subs.filter)
+        .replace("{features}", subs.features)
+        .replace("{scenario}", subs.scenario)
         .trim_end()
         .to_string()
 }
 
 #[cfg(test)]
 mod filter_rewrite_tests {
-    use super::{parse_runner_template, validate_filter_data};
+    use super::{Substitutions, parse_runner_template, validate_filter_data};
 
     #[test]
     fn direct_runner_preserves_composition_in_every_quote_context() {
         assert_eq!(
             parse_runner_template(
                 "runner module::{filter}_case \"double::{filter}\" 'single::{filter}'",
-                "proof;still-data",
-                ""
+                &Substitutions {
+                    filter: "proof;still-data",
+                    ..Default::default()
+                }
             )
             .unwrap(),
             [
@@ -291,15 +307,36 @@ mod filter_rewrite_tests {
     #[test]
     fn an_empty_trailing_filter_does_not_create_an_empty_argument() {
         assert_eq!(
-            parse_runner_template("git hash-object {filter}", "", "").unwrap(),
+            parse_runner_template(
+                "git hash-object {filter}",
+                &Substitutions {
+                    filter: "",
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
             ["git", "hash-object"]
         );
         assert_eq!(
-            parse_runner_template("runner prefix-{filter}-suffix", "", "").unwrap(),
+            parse_runner_template(
+                "runner prefix-{filter}-suffix",
+                &Substitutions {
+                    filter: "",
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
             ["runner", "prefix--suffix"]
         );
         assert_eq!(
-            parse_runner_template("runner \"{filter}\"", "", "").unwrap(),
+            parse_runner_template(
+                "runner \"{filter}\"",
+                &Substitutions {
+                    filter: "",
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
             ["runner", ""]
         );
     }
@@ -316,7 +353,14 @@ mod filter_rewrite_tests {
             "runner {filter} && second",
         ] {
             assert!(
-                parse_runner_template(template, "proof", "").is_err(),
+                parse_runner_template(
+                    template,
+                    &Substitutions {
+                        filter: "proof",
+                        ..Default::default()
+                    }
+                )
+                .is_err(),
                 "accepted {template}"
             );
         }
@@ -328,7 +372,14 @@ mod filter_rewrite_tests {
             assert!(validate_filter_data(filter).is_err());
         }
         assert_eq!(
-            parse_runner_template("runner {filter}", "proof\"'literal", "").unwrap(),
+            parse_runner_template(
+                "runner {filter}",
+                &Substitutions {
+                    filter: "proof\"'literal",
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
             ["runner", "proof\"'literal"]
         );
     }

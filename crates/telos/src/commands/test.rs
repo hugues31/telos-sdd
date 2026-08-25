@@ -42,7 +42,7 @@ use serde_json::{Value, json};
 
 use telos_core::changes::write_change;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::exec::run_shell_with_filter;
+use telos_core::exec::{Substitutions, run_runner_template};
 use telos_core::gherkin::{StagedFeatures, staged_features};
 use telos_core::ids::{ChangeId, RepoPath, ScenarioId};
 use telos_core::model::{
@@ -404,7 +404,18 @@ fn journal_run(
             format!("the test file {} disappeared before the run", test.path),
         )
     })?;
-    let execution = run_shell_with_filter(cmd, &filter, features, &project.ws.repo_root)?;
+    // `{scenario}` is this scenario alone. Without it a Gherkin runner has no
+    // way to select one scenario, so an unrelated failure elsewhere in the
+    // suite would be journalled as *this* scenario's red witness.
+    let execution = run_runner_template(
+        cmd,
+        &Substitutions {
+            filter: &filter,
+            features,
+            scenario: &format!("@{scenario}"),
+        },
+        &project.ws.repo_root,
+    )?;
     let witness = if execution.result.status == 0 {
         Witness::Green
     } else {

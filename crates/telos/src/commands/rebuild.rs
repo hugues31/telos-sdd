@@ -7,7 +7,7 @@ use clap::Subcommand;
 use serde_json::{Value, json};
 
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::exec::{run_shell_with_filter, substitute_filter};
+use telos_core::exec::{Substitutions, run_runner_template, substitute_placeholders};
 use telos_core::gherkin::staged_features;
 use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, Change, TelosModel, TestRef};
@@ -224,9 +224,14 @@ fn status(input: &RebuildInput) -> CmdResult {
     let mut outcomes = BTreeMap::<TestRef, (bool, String)>::new();
     for (test, scenario) in first_scenario_by_proof {
         let filter = test.name.as_deref().unwrap_or_else(|| test.path.as_str());
-        let command = substitute_filter(&runner, filter, features);
+        let subs = Substitutions {
+            filter,
+            features,
+            scenario: &format!("@{scenario}"),
+        };
+        let command = substitute_placeholders(&runner, &subs);
         let green = if proof_resolves(&input.ws, scenario, &test)? {
-            run_shell_with_filter(&runner, filter, features, &input.ws.repo_root)?
+            run_runner_template(&runner, &subs, &input.ws.repo_root)?
                 .result
                 .status
                 == 0

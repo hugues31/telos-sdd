@@ -2465,6 +2465,35 @@ fn the_runner_is_handed_features_that_are_not_on_disk_yet() {
     );
 }
 
+/// A runner that succeeds only if `{scenario}` resolved to this scenario's
+/// tag. Without it a Gherkin runner cannot select one scenario, and an
+/// unrelated failure would be journalled as this scenario's red witness.
+const GREP_SCENARIO_TAG: &str =
+    "grep -q \"{scenario}\" {features}/billing/settlement/INT-0001.feature";
+
+#[test]
+fn the_runner_is_told_which_scenario_it_is_proving() {
+    let tmp = approved_change_with_gherkin(true, GREP_SCENARIO_TAG);
+    let proof = write_proof_file(tmp.path());
+
+    let out = telos(tmp.path(), &["test", "SCN-0001", "--file", proof, "--json"])
+        .output()
+        .unwrap();
+    let envelope = json_stdout(&out);
+    assert_eq!(
+        envelope["result"]["witness"],
+        json!("green"),
+        "{{scenario}} must resolve to this scenario's tag: {envelope}"
+    );
+    assert!(
+        envelope["result"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("@SCN-0001"),
+        "the displayed command must show the resolved tag: {envelope}"
+    );
+}
+
 #[test]
 fn the_features_token_is_inert_when_generation_is_off() {
     let tmp = approved_change_with_gherkin(false, GREP_STAGED);

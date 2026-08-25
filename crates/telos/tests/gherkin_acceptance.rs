@@ -1,5 +1,6 @@
 //! Proves that what `render_features` emits is Gherkin a real Cucumber can
-//! parse and run, that `{features}` delivers it, and that the red/green loop
+//! parse and run, that `{features}` delivers it, that `{scenario}` selects the
+//! scenario under proof by its generated tag, and that the red/green loop
 //! works with Cucumber as the runner.
 //!
 //! `#[ignore]`d: it writes a throwaway Cargo project depending on `cucumber`,
@@ -225,7 +226,7 @@ fn generated_gherkin_runs_under_a_real_cucumber() {
     stage(
         &["config", "--change", "CHG-0001", "--json"],
         r#"{"code":{"globs":[]},"tests":{"globs":[]},
-            "test":{"cmd":"cargo test --test features -- --features-dir {features}"},
+            "test":{"cmd":"cargo test --test features -- --features-dir {features} --tags {scenario}"},
             "policy":{"tdd":"strict"},"gherkin":{"enabled":true},"agents":{"hosts":[]}}"#,
     );
     telos_ok(root, &["change", "approve", "CHG-0001", "--json"], "");

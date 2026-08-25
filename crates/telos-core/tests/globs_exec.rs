@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use telos_core::config::{Config, Globs};
 use telos_core::error::ErrorCode;
-use telos_core::exec::{run_shell, run_shell_with_filter, substitute_filter};
+use telos_core::exec::{Substitutions, run_runner_template, run_shell, substitute_placeholders};
 use telos_core::globs::{glob_matches, orphan_code};
 use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, TelosModel, TestRef};
@@ -247,7 +247,13 @@ fn orphan_code_a_file_bound_in_both_families_is_not_orphaned() {
 #[test]
 fn substitute_filter_replaces_the_placeholder() {
     assert_eq!(
-        substitute_filter("cargo test {filter}", "scn_x", ""),
+        substitute_placeholders(
+            "cargo test {filter}",
+            &Substitutions {
+                filter: "scn_x",
+                ..Default::default()
+            }
+        ),
         "cargo test scn_x"
     );
 }
@@ -255,7 +261,13 @@ fn substitute_filter_replaces_the_placeholder() {
 #[test]
 fn substitute_filter_replaces_every_occurrence() {
     assert_eq!(
-        substitute_filter("{filter} && echo {filter}", "scn_x", ""),
+        substitute_placeholders(
+            "{filter} && echo {filter}",
+            &Substitutions {
+                filter: "scn_x",
+                ..Default::default()
+            }
+        ),
         "scn_x && echo scn_x"
     );
 }
@@ -263,14 +275,17 @@ fn substitute_filter_replaces_every_occurrence() {
 #[test]
 fn substitute_filter_of_an_empty_filter_trims_the_trailing_space() {
     assert_eq!(
-        substitute_filter("cargo test {filter}", "", ""),
+        substitute_placeholders("cargo test {filter}", &Substitutions::default()),
         "cargo test"
     );
 }
 
 #[test]
 fn substitute_filter_with_no_placeholder_is_unchanged_but_still_trimmed() {
-    assert_eq!(substitute_filter("cargo test  ", "", ""), "cargo test");
+    assert_eq!(
+        substitute_placeholders("cargo test  ", &Substitutions::default()),
+        "cargo test"
+    );
 }
 
 // --- run_shell -------------------------------------------------------------
@@ -325,7 +340,15 @@ fn filtered_shell_run_preserves_display_but_passes_metacharacters_as_one_argumen
     let displayed = "git hash-object proof&mkdir injected";
     fs::write(tmp.path().join(filter), "proof\n").unwrap();
 
-    let run = run_shell_with_filter(template, filter, "", tmp.path()).unwrap();
+    let run = run_runner_template(
+        template,
+        &Substitutions {
+            filter,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.command, displayed);
     assert_eq!(run.result.status, 0);
@@ -336,7 +359,12 @@ fn filtered_shell_run_preserves_display_but_passes_metacharacters_as_one_argumen
 fn filtered_shell_run_keeps_leading_display_whitespace() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let run = run_shell_with_filter("  git --version {filter}  ", "", "", tmp.path()).unwrap();
+    let run = run_runner_template(
+        "  git --version {filter}  ",
+        &Substitutions::default(),
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.command, "  git --version");
 }
@@ -349,7 +377,15 @@ fn filtered_shell_run_supports_a_placeholder_already_quoted_as_one_argument() {
     let displayed = "git hash-object \"proof&mkdir injected\"";
     fs::write(tmp.path().join(filter), "proof\n").unwrap();
 
-    let run = run_shell_with_filter(template, filter, "", tmp.path()).unwrap();
+    let run = run_runner_template(
+        template,
+        &Substitutions {
+            filter,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.command, displayed);
     assert_eq!(run.result.status, 0);
@@ -364,7 +400,15 @@ fn filtered_shell_run_supports_a_placeholder_embedded_in_double_quotes() {
     let file = "prefix-proof&mkdir injected-suffix";
     fs::write(tmp.path().join(file), "proof\n").unwrap();
 
-    let run = run_shell_with_filter(template, filter, "", tmp.path()).unwrap();
+    let run = run_runner_template(
+        template,
+        &Substitutions {
+            filter,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.command, template.replace("{filter}", filter).trim_end());
     assert_eq!(run.result.status, 0);
@@ -382,8 +426,15 @@ fn filtered_shell_run_supports_a_placeholder_embedded_in_single_quotes() {
     )
     .unwrap();
 
-    let run =
-        run_shell_with_filter("test -f 'prefix-{filter}-suffix'", filter, "", tmp.path()).unwrap();
+    let run = run_runner_template(
+        "test -f 'prefix-{filter}-suffix'",
+        &Substitutions {
+            filter,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.command, "test -f 'prefix-proof;mkdir injected-suffix'");
     assert_eq!(run.result.status, 0);
@@ -399,7 +450,15 @@ fn filtered_runner_rejects_shell_control_even_with_safe_placeholder_words() {
     let file = "prefix-proof&mkdir injected-suffix";
     fs::write(tmp.path().join(file), "proof\n").unwrap();
 
-    let error = run_shell_with_filter(template, filter, "", tmp.path()).unwrap_err();
+    let error = run_runner_template(
+        template,
+        &Substitutions {
+            filter,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::TelosParseError);
     assert!(!tmp.path().join("injected-suffix").exists());
@@ -410,7 +469,15 @@ fn arithmetic_and_quote_payloads_remain_data_in_a_real_process() {
     let tmp = tempfile::tempdir().unwrap();
     let filter = "x[$(touch injected)]\"'&call bad";
 
-    let run = run_shell_with_filter("git hash-object {filter}", filter, "", tmp.path()).unwrap();
+    let run = run_runner_template(
+        "git hash-object {filter}",
+        &Substitutions {
+            filter,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_ne!(run.result.status, 0);
     assert!(!tmp.path().join("injected").exists());
@@ -423,8 +490,15 @@ fn control_byte_filters_fail_closed_before_spawn() {
     let tmp = tempfile::tempdir().unwrap();
 
     for filter in ["proof\rpayload", "proof\npayload", "proof\0payload"] {
-        let err =
-            run_shell_with_filter("git hash-object {filter}", filter, "", tmp.path()).unwrap_err();
+        let err = run_runner_template(
+            "git hash-object {filter}",
+            &Substitutions {
+                filter,
+                ..Default::default()
+            },
+            tmp.path(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::TelosParseError);
     }
 }
@@ -441,7 +515,15 @@ fn nested_shell_and_eval_templates_fail_before_real_injection() {
         "git hash-object $(touch injected)",
         "git hash-object `touch injected`",
     ] {
-        let err = run_shell_with_filter(template, "1", "", tmp.path()).unwrap_err();
+        let err = run_runner_template(
+            template,
+            &Substitutions {
+                filter: "1",
+                ..Default::default()
+            },
+            tmp.path(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::TelosParseError, "accepted {template}");
     }
     assert!(!tmp.path().join("injected").exists());
@@ -457,7 +539,15 @@ fn nested_cmd_and_call_templates_fail_before_real_injection() {
         "call git hash-object {filter}",
         "powershell -Command git hash-object {filter}",
     ] {
-        let err = run_shell_with_filter(template, "proof", "", tmp.path()).unwrap_err();
+        let err = run_runner_template(
+            template,
+            &Substitutions {
+                filter: "proof",
+                ..Default::default()
+            },
+            tmp.path(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::TelosParseError, "accepted {template}");
     }
     assert!(!tmp.path().join("injected").exists());
@@ -474,10 +564,12 @@ fn features_substitutes_as_one_argument_like_filter() {
     fs::create_dir_all(&features).unwrap();
     fs::write(features.join("f.feature"), "@INT-0001\n").unwrap();
 
-    let run = run_shell_with_filter(
+    let run = run_runner_template(
         "git hash-object {features}/f.feature",
-        "",
-        &features.to_string_lossy(),
+        &Substitutions {
+            features: &features.to_string_lossy(),
+            ..Default::default()
+        },
         tmp.path(),
     )
     .unwrap();
@@ -493,8 +585,12 @@ fn features_substitutes_as_one_argument_like_filter() {
 fn an_empty_features_token_drops_out_of_the_argv() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let run =
-        run_shell_with_filter("git --version {features} {filter}", "", "", tmp.path()).unwrap();
+    let run = run_runner_template(
+        "git --version {features} {filter} {scenario}",
+        &Substitutions::default(),
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.command, "git --version");
     assert_eq!(run.result.status, 0);
@@ -506,8 +602,15 @@ fn a_features_path_is_data_not_shell() {
     let hostile = "proof&mkdir injected";
     fs::write(tmp.path().join(hostile), "proof\n").unwrap();
 
-    let run =
-        run_shell_with_filter("git hash-object \"{features}\"", "", hostile, tmp.path()).unwrap();
+    let run = run_runner_template(
+        "git hash-object \"{features}\"",
+        &Substitutions {
+            features: hostile,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.result.status, 0);
     assert!(
@@ -517,9 +620,35 @@ fn a_features_path_is_data_not_shell() {
 }
 
 #[test]
-fn substitute_filter_also_renders_features_for_display() {
+fn every_placeholder_is_rendered_for_display() {
     assert_eq!(
-        substitute_filter("cucumber {features} --tags {filter}", "@SCN-0001", "/tmp/f"),
-        "cucumber /tmp/f --tags @SCN-0001"
+        substitute_placeholders(
+            "cucumber {features} --tags {scenario} -- {filter}",
+            &Substitutions {
+                filter: "steps.rs",
+                features: "/tmp/f",
+                scenario: "@SCN-0091 or @SCN-0107",
+            }
+        ),
+        "cucumber /tmp/f --tags @SCN-0091 or @SCN-0107 -- steps.rs"
     );
+}
+
+#[test]
+fn a_scenario_tag_expression_is_one_argument_when_quoted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let expression = "@SCN-0091 or @SCN-0107";
+    fs::write(tmp.path().join(expression), "proof\n").unwrap();
+
+    let run = run_runner_template(
+        "git hash-object \"{scenario}\"",
+        &Substitutions {
+            scenario: expression,
+            ..Default::default()
+        },
+        tmp.path(),
+    )
+    .unwrap();
+
+    assert_eq!(run.result.status, 0, "{run:?}");
 }

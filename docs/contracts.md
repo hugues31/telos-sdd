@@ -496,14 +496,22 @@ therefore do not invalidate a prior approval. Re-running appends evidence.
 
 ### Display and runner-template execution
 
-The `command` result preserves literal `{filter}` and `{features}`
-substitution and trailing-whitespace trim for stable display bytes. That
-display is diagnostic, not a shell-replay instruction. `[test] cmd` is parsed
-into one direct process argument vector: whitespace separates words,
-single/double quotes group a word, backslash quotes one following non-newline
-character, and either placeholder may be one whole argument or part of a word
-such as `module::{filter}` or `{features}/billing/INT-0042.feature`. Both are
-inserted as uninterpreted argument data and are never evaluated by a shell.
+The `command` result preserves literal substitution of every placeholder and
+trailing-whitespace trim for stable display bytes. That display is diagnostic,
+not a shell-replay instruction. `[test] cmd` is parsed into one direct process
+argument vector: whitespace separates words, single/double quotes group a
+word, backslash quotes one following non-newline character, and a placeholder
+may be one whole argument or part of a word such as `module::{filter}` or
+`{features}/billing/INT-0042.feature`. Every substituted value is inserted as
+uninterpreted argument data and is never evaluated by a shell.
+
+Three placeholders are recognized:
+
+| Placeholder | Substituted with |
+|---|---|
+| `{filter}` | the proving test's name, or its path when discovery found no identifier |
+| `{features}` | a directory of freshly-rendered `.feature` files |
+| `{scenario}` | a Gherkin tag expression naming the scenarios under proof |
 
 `{features}` is a directory of freshly-rendered `.feature` files describing
 the model about to be proved. It is a temporary directory, not
@@ -513,10 +521,20 @@ model while the code under test already describes the post-change one, and a
 brand-new intent's scenario is not on disk at all until its change
 reconciles. The directory exists only for the duration of the run.
 
+`{scenario}` is `@SCN-0107` for `test <SCN-id>`, and the `or`-joined
+expression of every scenario a target proves for `change reconcile` —
+`@SCN-0091 or @SCN-0107` — since one proving file may cover several. It is
+what lets a Gherkin runner select the scenario actually under proof:
+`{filter}` names the *file* holding the step definitions, which selects
+nothing in a suite whose scenarios all live in generated features. Without it
+`telos test SCN-0107` would journal an unrelated scenario's failure as
+SCN-0107's red witness. Quote it in the template — `--tags "{scenario}"` —
+when the expression may name more than one scenario.
+
 With `[gherkin]` off — the default — `{features}` substitutes to nothing and
 its token drops from the argument vector entirely, exactly as an empty
-`{filter}` does. A project that does not generate features sees no change to
-its runner command.
+`{filter}` does. `{scenario}` is likewise empty for a whole-suite run. A
+project that does not generate features sees no change to its runner command.
 
 The template fails closed with `TELOS_PARSE_ERROR` if it contains shell
 operators, command/backtick or arithmetic substitution, unmatched quotes,

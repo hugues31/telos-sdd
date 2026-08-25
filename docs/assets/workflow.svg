@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title description">
+  <title id="title">The Telos development workflow</title>
+  <desc id="description">Five steps move from defining software intent, through review and implementation, to test evidence and a Git-sealed state. If the code or specification later drifts, Telos sends the change back for review.</desc>
+
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#075cff"/>
+      <stop offset="1" stop-color="#00d7d0"/>
+    </linearGradient>
+    <linearGradient id="brand-soft" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e7f0ff"/>
+      <stop offset="1" stop-color="#e4fffc"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#183864" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0874f9"/>
+    </marker>
+  </defs>
+
+  <style>
+    .card { fill: #ffffff; stroke: #d9e5f4; }
+    .title { fill: #10233f; font: 700 19px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .body { fill: #52667f; font: 400 13.5px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .step { fill: #0874f9; font: 700 13px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 1.2px; }
+    .number { fill: #ffffff; font: 700 14px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .icon { fill: none; stroke: #0874f9; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+    .arrow { fill: none; stroke: #0874f9; stroke-width: 2.5; marker-end: url(#arrow); }
+    .loop { fill: none; stroke: #7589a4; stroke-width: 2; stroke-dasharray: 6 6; marker-end: url(#arrow); }
+    .loop-label { fill: #52667f; font: 600 14px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .footer { fill: url(#brand-soft); stroke: #bcd9ee; }
+    .footer-title { fill: #10233f; font: 700 17px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .footer-body { fill: #52667f; font: 400 14px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .card { fill: #121f34; stroke: #263b59; }
+      .title, .footer-title { fill: #eff6ff; }
+      .body, .loop-label, .footer-body { fill: #aebed1; }
+      .footer { fill: #10243a; stroke: #24516d; }
+    }
+  </style>
+
+  <rect x="40" y="44" width="1120" height="6" rx="3" fill="url(#brand)"/>
+
+  <path class="arrow" d="M236 206 H268"/>
+  <path class="arrow" d="M466 206 H498"/>
+  <path class="arrow" d="M696 206 H728"/>
+  <path class="arrow" d="M926 206 H958"/>
+
+  <g filter="url(#shadow)">
+    <rect class="card" x="40" y="92" width="196" height="230" rx="18"/>
+    <rect class="card" x="270" y="92" width="196" height="230" rx="18"/>
+    <rect class="card" x="500" y="92" width="196" height="230" rx="18"/>
+    <rect class="card" x="730" y="92" width="196" height="230" rx="18"/>
+    <rect class="card" x="960" y="92" width="196" height="230" rx="18"/>
+  </g>
+
+  <g aria-label="Step one: define">
+    <circle cx="72" cy="124" r="17" fill="#0874f9"/>
+    <text class="number" x="72" y="129" text-anchor="middle">1</text>
+    <text class="step" x="98" y="129">DEFINE</text>
+    <path class="icon" d="M106 160 h46 l18 18 v45 h-64 z M152 160 v19 h18 M118 193 h40 M118 207 h30"/>
+    <text class="title" x="138" y="258" text-anchor="middle">Capture intent</text>
+    <text class="body" x="138" y="283" text-anchor="middle">Describe behavior, scenarios</text>
+    <text class="body" x="138" y="302" text-anchor="middle">and architecture rules.</text>
+  </g>
+
+  <g aria-label="Step two: review">
+    <circle cx="302" cy="124" r="17" fill="#0874f9"/>
+    <text class="number" x="302" y="129" text-anchor="middle">2</text>
+    <text class="step" x="328" y="129">REVIEW</text>
+    <g id="review-icon" class="icon">
+      <rect x="342" y="162" width="52" height="58" rx="3"/>
+      <path d="M354 178 h28 M354 190 h18 M352 205 l9 9 22-24"/>
+    </g>
+    <text class="title" x="368" y="249" text-anchor="middle">Approve the</text>
+    <text class="title" x="368" y="270" text-anchor="middle">change</text>
+    <text class="body" x="368" y="293" text-anchor="middle">Inspect the diff and impact</text>
+    <text class="body" x="368" y="311" text-anchor="middle">before implementation.</text>
+  </g>
+
+  <g aria-label="Step three: build">
+    <circle cx="532" cy="124" r="17" fill="#0874f9"/>
+    <text class="number" x="532" y="129" text-anchor="middle">3</text>
+    <text class="step" x="558" y="129">BUILD</text>
+    <path class="icon" d="M571 172 l-18 18 18 18 M625 172 l18 18-18 18 M611 163 l-25 55"/>
+    <text class="title" x="598" y="249" text-anchor="middle">Share focused</text>
+    <text class="title" x="598" y="270" text-anchor="middle">context</text>
+    <text class="body" x="598" y="293" text-anchor="middle">A developer or coding agent</text>
+    <text class="body" x="598" y="311" text-anchor="middle">builds the approved intent.</text>
+  </g>
+
+  <g aria-label="Step four: prove">
+    <circle cx="762" cy="124" r="17" fill="#0874f9"/>
+    <text class="number" x="762" y="129" text-anchor="middle">4</text>
+    <text class="step" x="788" y="129">PROVE</text>
+    <g id="prove-icon" class="icon">
+      <rect x="799" y="165" width="58" height="52" rx="3"/>
+      <path d="M799 180 h58 M812 193 h17 M813 203 l8 8 21-23"/>
+    </g>
+    <text class="title" x="828" y="258" text-anchor="middle">Record evidence</text>
+    <text class="body" x="828" y="283" text-anchor="middle">In strict TDD, record the test</text>
+    <text class="body" x="828" y="302" text-anchor="middle">failing, then passing.</text>
+  </g>
+
+  <g aria-label="Step five: seal">
+    <circle cx="992" cy="124" r="17" fill="#0874f9"/>
+    <text class="number" x="992" y="129" text-anchor="middle">5</text>
+    <text class="step" x="1018" y="129">SEAL</text>
+    <path class="icon" d="M1058 158 l32 12 v22 c0 17-12 29-32 35-20-6-32-18-32-35v-22z M1043 191 l10 10 21-23"/>
+    <text class="title" x="1058" y="249" text-anchor="middle">Seal and</text>
+    <text class="title" x="1058" y="270" text-anchor="middle">verify</text>
+    <text class="body" x="1058" y="293" text-anchor="middle">Check locally or with CI</text>
+    <text class="body" x="1058" y="311" text-anchor="middle">and detect later drift.</text>
+  </g>
+
+  <path class="loop" d="M1058 322 V365 Q1058 390 1033 390 H393 Q368 390 368 365 V331"/>
+  <rect id="drift-callout" class="footer" x="230" y="414" width="740" height="102" rx="17"/>
+  <circle cx="276" cy="465" r="23" fill="url(#brand)"/>
+  <path d="M266 465 l7 7 14-16" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <text id="drift-title" class="footer-title" x="314" y="457">When code or specifications drift</text>
+  <text id="drift-body" class="footer-body" x="314" y="481">Review and adopt the mismatch, or restore the sealed state.</text>
+  <text class="loop-label" x="713" y="382" text-anchor="middle">drift returns to review</text>
+</svg>

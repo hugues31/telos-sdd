@@ -16,17 +16,18 @@ use telos_core::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_bas
 use telos_core::semantic::build_model;
 use telos_core::workspace::Workspace;
 
-use crate::commands::{Ctx, diagnostics_to_error, unparsable};
+use crate::commands::change::parse_change_id;
+use crate::commands::{Ctx, diagnostics_to_error};
 use crate::envelope::{CmdResult, Outcome};
 
 pub fn run(ctx: &Ctx, change: Option<&str>) -> CmdResult {
     let ws = Workspace::discover(&ctx.cwd)?;
     let model = match change {
         None => ws.load_model().map_err(diagnostics_to_error)?,
-        Some(id) => {
-            let id: ChangeId = id.parse().map_err(|_| unparsable(id))?;
-            post_model(&ws, id)?
-        }
+        // `parse_change_id` rather than a local parse: a mistyped `--change`
+        // is the same class of mistake as one that does not exist, and every
+        // other command carrying this flag reports both under one code.
+        Some(id) => post_model(&ws, parse_change_id(id)?)?,
     };
     let features = render_features(&model);
 

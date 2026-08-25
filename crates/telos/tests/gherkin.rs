@@ -73,3 +73,64 @@ fn gherkin_writes_nothing() {
         "gherkin renders but does not write -- sealing feature files is a later phase"
     );
 }
+
+/// Runs a command that must succeed, feeding it a JSON payload on stdin.
+fn result_of_stdin(dir: &Path, args: &[&str], payload: &str) -> serde_json::Value {
+    let out = telos(dir, args)
+        .write_stdin(payload.to_string())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{args:?} failed: {out:?}");
+    json_stdout(&out)["result"].clone()
+}
+
+#[test]
+fn gherkin_change_previews_the_prose_the_delta_would_produce() {
+    let tmp = with_fixture();
+    result_of(tmp.path(), &["change", "open", "reword", "--json"]);
+    result_of_stdin(
+        tmp.path(),
+        &[
+            "edit",
+            "notion",
+            "NOT:billing/Invoice",
+            "--change",
+            "CHG-0001",
+            "--json",
+        ],
+        r#"{"phrase": "bill"}"#,
+    );
+
+    let sealed = result_of(tmp.path(), &["gherkin", "--json"]);
+    assert!(
+        sealed["features"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Given the invoice with state open"),
+        "the sealed projection still says `invoice`"
+    );
+
+    let preview = result_of(tmp.path(), &["gherkin", "--change", "CHG-0001", "--json"]);
+    let content = preview["features"][1]["content"].as_str().unwrap();
+    assert!(
+        content.contains("Given the bill with state open"),
+        "the preview must show the staged phrase: {content}"
+    );
+    assert!(
+        content.contains("Then the bill state is settled"),
+        "every use site moves together: {content}"
+    );
+}
+
+#[test]
+fn gherkin_reports_a_mistyped_change_id_like_every_other_change_flag() {
+    let tmp = with_fixture();
+    let out = telos(tmp.path(), &["gherkin", "--change", "nonsense", "--json"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(
+        json_stdout(&out)["error"]["code"],
+        "TELOS_REFERENCE_UNKNOWN"
+    );
+}

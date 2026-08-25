@@ -172,6 +172,10 @@ fn complete_fixture_for_sealing(root: &Path) {
 pub fn unsealed_fixture() -> TempDir {
     let tmp = repo();
     copy_dir(&corpus_root(), tmp.path());
+    for relative in ["telos/contexts", "telos/constraints", "telos/changes"] {
+        fs::create_dir_all(tmp.path().join(relative))
+            .unwrap_or_else(|e| panic!("mkdir {relative}: {e}"));
+    }
     tmp
 }
 

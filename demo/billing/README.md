@@ -15,6 +15,33 @@ telos rebuild plan --json
 telos rebuild status --json
 ```
 
+The same spec also reads as Cucumber. `telos gherkin` needs no lock, so it
+works on this untouched tree:
+
+```console
+telos gherkin
+```
+
+```gherkin
+# telos/features/billing/settlement/INT-0042.feature
+@INT-0042
+Feature: Invoice payment marks it settled
+  Customers must see immediately that their debt is cleared.
+
+  @SCN-0107
+  Scenario: full payment settles the invoice
+    Given the invoice with state open and balance 120.00 EUR
+    When the payment is received with amount 120.00 EUR
+    Then the invoice state is settled
+```
+
+Nothing there was authored as prose. Each step is `the ` plus the notion's
+`phrase` plus that step's own field values, so the sentence cannot disagree
+with the typed data behind it. No `.feature` file is committed here: with
+`[gherkin] enabled` in `telos.toml`, `change reconcile` writes them under
+`telos/features/` and seals them, which makes them a build product rather
+than one of this tree's spec owners.
+
 The first full reconcile is an honest spec-only bootstrap. There is no active
 behavioral obligation yet, so it runs zero tests and zero checks:
 

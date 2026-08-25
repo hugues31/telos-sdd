@@ -20,6 +20,10 @@
 
 use std::collections::BTreeMap;
 
+use tempfile::TempDir;
+
+use crate::config::Config;
+use crate::error::{ErrorCode, TelosError};
 use crate::ids::{IntentId, NotionName, NotionRef, Owner, RepoPath};
 use crate::model::{
     AttrRef, CmpOp, Expr, InstanceStep, Intent, Literal, Notion, Operand, Scenario, TelosModel,
@@ -206,4 +210,94 @@ fn notion_phrase(model: &TelosModel, owner: &Owner, name: &NotionName) -> String
         .or_else(|| model.notions.get(name))
         .expect("a validated model resolves every notion a scenario names");
     notion.phrase.clone()
+}
+
+/// Renders `model`'s features into a fresh temporary directory, so a test
+/// runner is handed the prose that matches the code under test.
+///
+/// Returns `None` when `[gherkin]` is off, which the runner template renders
+/// as an empty `{features}` token -- dropping it, exactly as an empty
+/// `{filter}` already drops.
+///
+/// A temporary directory rather than `telos/features/`, because of *when*
+/// this runs. Reconcile proves a change before writing it, so at test time
+/// the sealed tree still describes the pre-change model while the step
+/// definitions on disk already describe the post-change one; and a
+/// brand-new intent's scenario is not on disk at all, living only inside its
+/// change file until that change reconciles.
+///
+/// The returned handle owns the directory: dropping it deletes the tree, so
+/// the caller must hold it for as long as the runner needs the files.
+pub fn staged_features(config: &Config, model: &TelosModel) -> Result<StagedFeatures, TelosError> {
+    if !config.gherkin.enabled {
+        return Ok(StagedFeatures::disabled());
+    }
+
+    let dir = tempfile::Builder::new()
+        .prefix("telos-features-")
+        .tempdir()
+        .map_err(|error| {
+            staging_error(format!(
+                "failed to create a staging directory for generated features: {error}"
+            ))
+        })?;
+
+    for (path, content) in render_features(model) {
+        // `path` is repo-relative (`telos/features/<context>/...`). Rebase it
+        // under the staging root so the runner is handed a features
+        // directory, not a copy of the repository.
+        let relative = path
+            .as_str()
+            .strip_prefix("telos/features/")
+            .unwrap_or(path.as_str());
+        let target = dir.path().join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                staging_error(format!("failed to stage {}: {error}", target.display()))
+            })?;
+        }
+        std::fs::write(&target, content).map_err(|error| {
+            staging_error(format!("failed to stage {}: {error}", target.display()))
+        })?;
+    }
+    Ok(StagedFeatures {
+        path: dir.path().to_string_lossy().into_owned(),
+        _dir: Some(dir),
+    })
+}
+
+/// A staged features directory, alive for as long as this value is.
+///
+/// Owns the temporary directory: dropping it deletes the tree, so a caller
+/// holds it across the runner invocation. When `[gherkin]` is off there is no
+/// directory and [`path`](Self::path) is empty, which the runner template
+/// renders by dropping the `{features}` token entirely.
+///
+/// The `tempfile` backing is deliberately not exposed: callers ask for a path
+/// and keep the handle alive, and nothing above this module needs to know how
+/// the directory is made or cleaned up.
+#[derive(Debug)]
+pub struct StagedFeatures {
+    /// Held for its `Drop`. Never read.
+    _dir: Option<TempDir>,
+    path: String,
+}
+
+impl StagedFeatures {
+    fn disabled() -> Self {
+        Self {
+            _dir: None,
+            path: String::new(),
+        }
+    }
+
+    /// The directory to substitute for `{features}`; empty when generation
+    /// is off.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+fn staging_error(message: String) -> TelosError {
+    TelosError::new(ErrorCode::TelosInternal, message)
 }

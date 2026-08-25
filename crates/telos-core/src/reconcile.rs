@@ -136,7 +136,7 @@ use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
 use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
-use crate::gherkin::render_features;
+use crate::gherkin::{render_features, staged_features};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::NodeRef;
@@ -333,7 +333,7 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
         .values()
         .any(|intent| intent.status == IntentStatus::Active)
     {
-        run_full_tests(ws)?
+        run_full_tests(ws, &model)?
     } else {
         0
     };
@@ -1225,17 +1225,22 @@ fn run_tests(
         }
     }
 
+    // Staged once for the whole loop, and held until it ends: the runner
+    // must see the model being proved, not the pre-change tree still on disk.
+    let staged = staged_features(&ws.config, model)?;
+    let features = staged.path();
+
     let mut tests_run = 0;
     for (rendered, test) in targets {
         let filter = test
             .name
             .clone()
             .unwrap_or_else(|| test.path.as_str().to_string());
-        match run_shell_with_filter(cmd, &filter, &ws.repo_root) {
+        match run_shell_with_filter(cmd, &filter, features, &ws.repo_root) {
             Ok(run) if run.result.status == 0 => tests_run += 1,
             Ok(run) => return Err(test_failed(&rendered, &run.command)),
             Err(_) => {
-                let command = substitute_filter(cmd, &filter);
+                let command = substitute_filter(cmd, &filter, features);
                 return Err(test_failed(&rendered, &command));
             }
         }
@@ -1252,14 +1257,16 @@ fn run_tests(
 /// The caller skips this function entirely for a draft-only model. `cmd`
 /// empty skips the gate and reports zero runs, exactly as in the per-change
 /// path.
-fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
+fn run_full_tests(ws: &Workspace, model: &TelosModel) -> Result<u32, TelosError> {
     let cmd = &ws.config.test.cmd;
     if cmd.trim().is_empty() {
         return Ok(0);
     }
 
-    let command = substitute_filter(cmd, "");
-    match run_shell_with_filter(cmd, "", &ws.repo_root) {
+    let staged = staged_features(&ws.config, model)?;
+    let features = staged.path();
+    let command = substitute_filter(cmd, "", features);
+    match run_shell_with_filter(cmd, "", features, &ws.repo_root) {
         Ok(run) if run.result.status == 0 => Ok(1),
         Ok(_) | Err(_) => Err(test_failed("the whole suite", &command)),
     }

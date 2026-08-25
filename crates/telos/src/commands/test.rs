@@ -43,11 +43,13 @@ use serde_json::{Value, json};
 use telos_core::changes::write_change;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::exec::run_shell_with_filter;
+use telos_core::gherkin::{StagedFeatures, staged_features};
 use telos_core::ids::{ChangeId, RepoPath, ScenarioId};
 use telos_core::model::{
     Change, ChangeStatus, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun, Witness,
 };
-use telos_core::overlay::parse_base;
+use telos_core::overlay::{apply_ops_idempotent, parse_base};
+use telos_core::semantic::build_model;
 use telos_core::witness::{find_test_for, required_witnesses};
 
 use crate::commands::{
@@ -70,6 +72,25 @@ pub fn run(ctx: &Ctx, scenario: Option<&str>, all: bool, file: Option<&str>) -> 
     one(&project, scenario, file.as_ref())
 }
 
+/// The features directory a run should see: this change's post model,
+/// rendered fresh.
+///
+/// `one`/`every` carry only the minimal `staged_intents` model, which is
+/// enough for witness bookkeeping but not for rendering prose -- so the real
+/// post-change model is built here, the same construction `pack --change`
+/// and `reconcile` use. Held by the caller: dropping the handle deletes the
+/// directory the runner is about to read.
+fn stage_features_for(
+    project: &Project,
+    ws: &telos_core::workspace::Workspace,
+    change: &Change,
+) -> Result<StagedFeatures, TelosError> {
+    let base = parse_base(&project.ws).map_err(diagnostics_to_error)?;
+    let model =
+        build_model(apply_ops_idempotent(base, &change.ops)).map_err(diagnostics_to_error)?;
+    staged_features(&ws.config, &model)
+}
+
 // --- the single-scenario flow -----------------------------------------------
 
 /// `telos test SCN-0108`: the eight steps of the module doc, once.
@@ -85,7 +106,8 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
     require_no_foreign_drift(project, std::slice::from_ref(&test.path))?;
 
     let mut change = owner.clone();
-    let run = journal_run(project, &mut change, scenario, &test, &cmd)?;
+    let staged = stage_features_for(project, &effective_ws, &change)?;
+    let run = journal_run(project, &mut change, scenario, &test, &cmd, staged.path())?;
 
     Ok(Outcome {
         result: run_result(&run),
@@ -157,7 +179,15 @@ fn every(project: &Project, file: Option<&RepoPath>) -> CmdResult {
         let change = owners
             .get_mut(&owner)
             .expect("every target's owner came from the same scan");
-        runs.push(journal_run(project, change, scenario, &test, &cmd)?);
+        let staged = stage_features_for(project, &effective_ws, change)?;
+        runs.push(journal_run(
+            project,
+            change,
+            scenario,
+            &test,
+            &cmd,
+            staged.path(),
+        )?);
     }
 
     let human: Vec<String> = runs.iter().map(human_line).collect();
@@ -362,6 +392,7 @@ fn journal_run(
     scenario: ScenarioId,
     test: &TestRef,
     cmd: &str,
+    features: &str,
 ) -> Result<RunReport, TelosError> {
     let filter = test
         .name
@@ -374,7 +405,7 @@ fn journal_run(
             format!("the test file {} disappeared before the run", test.path),
         )
     })?;
-    let execution = run_shell_with_filter(cmd, &filter, &project.ws.repo_root)?;
+    let execution = run_shell_with_filter(cmd, &filter, features, &project.ws.repo_root)?;
     let witness = if execution.result.status == 0 {
         Witness::Green
     } else {

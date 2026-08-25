@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::exec::{run_shell_with_filter, substitute_filter};
+use telos_core::gherkin::staged_features;
 use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, Change, TelosModel, TestRef};
 use telos_core::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
@@ -215,12 +216,17 @@ fn status(input: &RebuildInput) -> CmdResult {
             first_scenario_by_proof.entry(proof).or_insert(*scenario);
         }
     }
+    // Held for the whole loop: dropping it would delete the directory the
+    // runner is about to be pointed at.
+    let staged = staged_features(&input.ws.config, &input.model)?;
+    let features = staged.path();
+
     let mut outcomes = BTreeMap::<TestRef, (bool, String)>::new();
     for (test, scenario) in first_scenario_by_proof {
         let filter = test.name.as_deref().unwrap_or_else(|| test.path.as_str());
-        let command = substitute_filter(&runner, filter);
+        let command = substitute_filter(&runner, filter, features);
         let green = if proof_resolves(&input.ws, scenario, &test)? {
-            run_shell_with_filter(&runner, filter, &input.ws.repo_root)?
+            run_shell_with_filter(&runner, filter, features, &input.ws.repo_root)?
                 .result
                 .status
                 == 0

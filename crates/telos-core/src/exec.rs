@@ -55,15 +55,22 @@ pub fn run_shell(cmd: &str, cwd: &Path) -> Result<RunResult, TelosError> {
 
 /// Displays the runner template's exact literal substitution while executing a deliberately
 /// restricted runner template as a direct process argv. No shell sees the
-/// filter; it remains data even in embedded words such as `module::{filter}`.
+/// filter or the features path; each remains data even in embedded words such
+/// as `module::{filter}` or `{features}/billing/INT-0042.feature`.
+///
+/// `features` is the directory of freshly-rendered `.feature` files the run
+/// should see, or empty when `[gherkin]` is off -- in which case the
+/// `{features}` token drops out entirely, exactly as an empty `{filter}` does.
 pub fn run_shell_with_filter(
     template: &str,
     filter: &str,
+    features: &str,
     cwd: &Path,
 ) -> Result<FilteredRun, TelosError> {
-    let command = substitute_filter(template, filter);
+    let command = substitute_filter(template, filter, features);
     validate_filter_data(filter)?;
-    let argv = parse_runner_template(template, filter)?;
+    validate_filter_data(features)?;
+    let argv = parse_runner_template(template, filter, features)?;
     let output = Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(cwd)
@@ -91,8 +98,12 @@ fn validate_filter_data(filter: &str) -> Result<(), TelosError> {
     Ok(())
 }
 
-fn parse_runner_template(template: &str, filter: &str) -> Result<Vec<String>, TelosError> {
-    const FILTER: &str = "{filter}";
+fn parse_runner_template(
+    template: &str,
+    filter: &str,
+    features: &str,
+) -> Result<Vec<String>, TelosError> {
+    const PLACEHOLDERS: [&str; 2] = ["{filter}", "{features}"];
     let unsafe_template = || {
         TelosError::new(
             ErrorCode::TelosParseError,
@@ -109,12 +120,20 @@ fn parse_runner_template(template: &str, filter: &str) -> Result<Vec<String>, Te
     while index < template.len() {
         let rest = &template[index..];
 
-        if rest.starts_with(FILTER) {
-            if !filter.is_empty() {
-                word.push_str(filter);
+        // Each placeholder is substituted as *data*: whatever it expands to
+        // becomes part of the current word, never re-scanned for shell
+        // syntax. An empty value contributes nothing, so the token vanishes
+        // rather than leaving an empty argv entry behind.
+        if let Some((placeholder, value)) = PLACEHOLDERS
+            .iter()
+            .zip([filter, features])
+            .find(|(placeholder, _)| rest.starts_with(**placeholder))
+        {
+            if !value.is_empty() {
+                word.push_str(value);
                 in_word = true;
             }
-            index += FILTER.len();
+            index += placeholder.len();
             continue;
         }
 
@@ -228,16 +247,23 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-/// Replaces every occurrence of the literal `{filter}` in `cmd` with
-/// `filter`, then `trim_end`s the whole result.
+/// Replaces every occurrence of `{filter}` and `{features}` in `cmd`, then
+/// `trim_end`s the whole result.
+///
+/// This is the *display* form -- what the envelope reports as the command
+/// that ran. It must substitute both placeholders or a reader would see a
+/// literal `{features}` in a command that resolved one.
 ///
 /// The `trim_end` runs after substitution and over the *whole* string, not
-/// just around the placeholder, so an empty filter (the `--full` case)
-/// leaves no trailing whitespace where the placeholder used to sit:
-/// `"cargo test {filter}"` with an empty filter becomes `"cargo test"`, not
-/// `"cargo test "`.
-pub fn substitute_filter(cmd: &str, filter: &str) -> String {
-    cmd.replace("{filter}", filter).trim_end().to_string()
+/// just around the placeholder, so an empty value (the `--full` case, or
+/// `[gherkin]` being off) leaves no trailing whitespace where the
+/// placeholder used to sit: `"cargo test {filter}"` with an empty filter
+/// becomes `"cargo test"`, not `"cargo test "`.
+pub fn substitute_filter(cmd: &str, filter: &str, features: &str) -> String {
+    cmd.replace("{filter}", filter)
+        .replace("{features}", features)
+        .trim_end()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -250,6 +276,7 @@ mod filter_rewrite_tests {
             parse_runner_template(
                 "runner module::{filter}_case \"double::{filter}\" 'single::{filter}'",
                 "proof;still-data",
+                ""
             )
             .unwrap(),
             [
@@ -264,15 +291,15 @@ mod filter_rewrite_tests {
     #[test]
     fn an_empty_trailing_filter_does_not_create_an_empty_argument() {
         assert_eq!(
-            parse_runner_template("git hash-object {filter}", "").unwrap(),
+            parse_runner_template("git hash-object {filter}", "", "").unwrap(),
             ["git", "hash-object"]
         );
         assert_eq!(
-            parse_runner_template("runner prefix-{filter}-suffix", "").unwrap(),
+            parse_runner_template("runner prefix-{filter}-suffix", "", "").unwrap(),
             ["runner", "prefix--suffix"]
         );
         assert_eq!(
-            parse_runner_template("runner \"{filter}\"", "").unwrap(),
+            parse_runner_template("runner \"{filter}\"", "", "").unwrap(),
             ["runner", ""]
         );
     }
@@ -289,7 +316,7 @@ mod filter_rewrite_tests {
             "runner {filter} && second",
         ] {
             assert!(
-                parse_runner_template(template, "proof").is_err(),
+                parse_runner_template(template, "proof", "").is_err(),
                 "accepted {template}"
             );
         }
@@ -301,7 +328,7 @@ mod filter_rewrite_tests {
             assert!(validate_filter_data(filter).is_err());
         }
         assert_eq!(
-            parse_runner_template("runner {filter}", "proof\"'literal").unwrap(),
+            parse_runner_template("runner {filter}", "proof\"'literal", "").unwrap(),
             ["runner", "proof\"'literal"]
         );
     }

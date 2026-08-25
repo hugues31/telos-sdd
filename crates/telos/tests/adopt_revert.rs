@@ -39,22 +39,52 @@ use serde_json::{Value, json};
 
 use common::{telos, with_fixture};
 
+#[test]
+fn adopt_pairs_a_missing_and_untracked_owned_entity_into_a_move() {
+    let tmp = with_fixture();
+    let from = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel");
+    let to = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/settlement/intents/INT-0017.tel");
+    let moved = fs::read_to_string(&from)
+        .unwrap()
+        .replace("in billing/invoicing", "in billing/settlement");
+    fs::remove_file(&from).unwrap();
+    fs::write(&to, moved).unwrap();
+
+    let result = run_ok(tmp.path(), &["adopt", "--json"])["result"].clone();
+    assert_eq!(result["ops"], json!(1));
+    assert_eq!(
+        result["paths"],
+        json!([
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0017.tel"
+        ])
+    );
+    let change = read(tmp.path(), "telos/changes/CHG-0001.tel");
+    assert!(
+        change.contains("op move from billing/invoicing to billing/settlement intent INT-0017")
+    );
+}
+
 // --- the corpus paths these tests drift ------------------------------------
 
-const INVOICE: &str = "telos/notions/Invoice.tel";
+const INVOICE: &str = "telos/contexts/billing/notions/Invoice.tel";
 /// Named by `Invoice`'s `rel issued-to` and by INT-0017's scenario: the
 /// corpus' most-referenced notion, hence the one whose deletion the post-
 /// state model must refuse.
-const CUSTOMER: &str = "telos/notions/Customer.tel";
-const CON_0003: &str = "telos/constraints/CON-0003.tel";
-const ROGUE: &str = "telos/notions/Rogue.tel";
+const CUSTOMER: &str = "telos/contexts/billing/notions/Customer.tel";
+const CON_0003: &str = "telos/contexts/billing/constraints/CON-0003.tel";
+const ROGUE: &str = "telos/contexts/billing/notions/Rogue.tel";
 const CONFIG: &str = "telos/telos.toml";
 const CODE: &str = "src/billing/invoice.rs";
 const LOCK: &str = "telos/telos.lock";
 
 /// A valid notion, in canonical form, created outside the protocol -- the
 /// `Untracked` half of drift.
-const ROGUE_TEL: &str = "notion Rogue entity {\n  \
+const ROGUE_TEL: &str = "notion billing/Rogue entity {\n  \
     def  \"A notion created outside the protocol.\"\n  \
     attr label string\n\
 }\n";
@@ -254,7 +284,7 @@ fn adopting_a_modified_notion_stages_an_edit_and_reconcile_canonicalizes_it() {
     assert_eq!(state(dir)["state"], json!("changing"));
     assert_eq!(
         diff_ops(dir, "CHG-0001"),
-        vec![json!({ "op": "edit", "entity": "notion", "key": "Invoice" })]
+        vec![json!({ "op": "edit", "entity": "notion", "key": "billing/Invoice" })]
     );
 
     approve_and_reconcile(dir, "CHG-0001");
@@ -322,7 +352,7 @@ fn adopting_an_untracked_notion_stages_an_add() {
     );
     assert_eq!(
         diff_ops(dir, "CHG-0001"),
-        vec![json!({ "op": "add", "entity": "notion", "key": "Rogue" })]
+        vec![json!({ "op": "add", "entity": "notion", "key": "billing/Rogue" })]
     );
 
     approve_and_reconcile(dir, "CHG-0001");
@@ -475,14 +505,14 @@ fn adopting_a_file_that_declares_another_entity_is_refused() {
     write(
         dir,
         ROGUE,
-        &ROGUE_TEL.replace("notion Rogue", "notion Other"),
+        &ROGUE_TEL.replace("billing/Rogue", "billing/Other"),
     );
 
     let error = run_err(dir, &["adopt", "--json"], "TELOS_INTEGRITY_VIOLATION");
 
     let message = error["message"].as_str().unwrap();
     assert!(
-        message.contains(ROGUE) && message.contains("telos/notions/Other.tel"),
+        message.contains(ROGUE) && message.contains("telos/contexts/billing/notions/Other.tel"),
         "the refusal must name both the file and where its entity belongs: {message}"
     );
     assert!(
@@ -700,7 +730,7 @@ fn adopt_into_an_existing_change_appends_its_ops() {
         diff_ops(dir, "CHG-0001"),
         vec![
             json!({ "op": "edit", "entity": "constraint", "key": "CON-0003" }),
-            json!({ "op": "edit", "entity": "notion", "key": "Invoice" }),
+            json!({ "op": "edit", "entity": "notion", "key": "billing/Invoice" }),
         ],
         "the adopted op is appended after the ops already staged"
     );
@@ -722,10 +752,11 @@ const HAND_EDITED_DEF: &str = "A bill issued to a Customer, edited out of protoc
 /// The notion the concurrent, unrelated change adds -- the file whose seal
 /// proves the carry-over is surgical rather than a blanket refusal to record
 /// anything.
-const REFUND: &str = "telos/notions/Refund.tel";
+const REFUND: &str = "telos/contexts/billing/notions/Refund.tel";
 
 fn refund_payload() -> String {
     json!({
+        "owner": "billing",
         "name": "Refund", "kind": "event",
         "def": "A refund was issued against an invoice.",
         "attrs": [ {"name": "amount", "type": "money"} ]

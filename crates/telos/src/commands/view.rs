@@ -159,7 +159,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../telos-core/tests/corpus/billing");
         copy_dir(&source, tmp.path());
 
-        let bindings_path = tmp.path().join("telos/bindings.tel");
+        let bindings_path = tmp.path().join("telos/contexts/billing/bindings.tel");
         let bindings = fs::read_to_string(&bindings_path).unwrap();
         let (first, rest) = bindings.split_once('\n').unwrap();
         fs::write(
@@ -189,7 +189,9 @@ mod tests {
     fn export_refuses_a_normal_save_between_model_read_and_authentication() {
         let tmp = sealed_fixture();
         let destination = tmp.path().join("site");
-        let intent_path = tmp.path().join("telos/intents/INT-0017.tel");
+        let intent_path = tmp
+            .path()
+            .join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel");
         let ctx = Ctx {
             cwd: tmp.path().to_path_buf(),
         };

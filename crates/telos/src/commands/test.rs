@@ -208,10 +208,13 @@ fn staged_intents(change: &Change) -> TelosModel {
     let mut model = TelosModel::default();
     for op in &change.ops {
         match op {
-            StagedOp::AddIntent(intent) | StagedOp::EditIntent(intent) => {
+            StagedOp::AddOwnedIntent { intent, .. }
+            | StagedOp::EditOwnedIntent { intent, .. }
+            | StagedOp::AddIntent(intent)
+            | StagedOp::EditIntent(intent) => {
                 model.intents.insert(intent.id, intent.clone());
             }
-            StagedOp::RemoveIntent(id) => {
+            StagedOp::RemoveOwnedIntent { id, .. } | StagedOp::RemoveIntent(id) => {
                 model.intents.remove(id);
             }
             _ => {}
@@ -262,7 +265,7 @@ fn known_scenarios(project: &Project) -> Result<BTreeSet<ScenarioId>, TelosError
 
     let mut known: BTreeSet<ScenarioId> = BTreeSet::new();
     for (_, file) in &base {
-        if let TelFile::Intent(intent) = file {
+        if let TelFile::OwnedIntent { intent, .. } | TelFile::Intent(intent) = file {
             known.extend(intent.scenarios.iter().map(|s| s.id));
         }
     }
@@ -285,9 +288,10 @@ fn known_scenarios(project: &Project) -> Result<BTreeSet<ScenarioId>, TelosError
 fn owner_of(project: &Project, scenario: ScenarioId) -> Option<&Change> {
     project.parsed.iter().find(|change| {
         change.ops.iter().any(|op| match op {
-            StagedOp::AddIntent(intent) | StagedOp::EditIntent(intent) => {
-                intent.scenarios.iter().any(|s| s.id == scenario)
-            }
+            StagedOp::AddOwnedIntent { intent, .. }
+            | StagedOp::EditOwnedIntent { intent, .. }
+            | StagedOp::AddIntent(intent)
+            | StagedOp::EditIntent(intent) => intent.scenarios.iter().any(|s| s.id == scenario),
             _ => false,
         })
     })

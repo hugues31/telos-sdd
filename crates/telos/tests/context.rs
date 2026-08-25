@@ -1,4 +1,4 @@
-//! End-to-end coverage for the bounded `telos context` work pack.
+//! End-to-end coverage for the bounded `telos pack` work pack.
 
 mod common;
 
@@ -17,9 +17,127 @@ fn json_stdout(out: &std::process::Output) -> serde_json::Value {
     })
 }
 
-fn context_result(dir: &std::path::Path, target: &str) -> serde_json::Value {
-    let out = telos(dir, &["context", target, "--json"]).output().unwrap();
-    assert!(out.status.success(), "context {target} failed: {out:?}");
+#[test]
+fn pack_replaces_context_without_a_legacy_alias() {
+    let tmp = with_fixture();
+    let pack = telos(tmp.path(), &["pack", "INT-0042", "--json"])
+        .output()
+        .unwrap();
+    assert!(pack.status.success(), "pack failed: {pack:?}");
+    let envelope = json_stdout(&pack);
+    assert_eq!(envelope["command"], json!("pack"));
+    assert_eq!(
+        envelope["result"]["owner"],
+        json!({"context": "billing", "capability": "settlement"})
+    );
+    assert_eq!(
+        envelope["result"]["notions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["billing/Invoice", "billing/PaymentReceived"]
+    );
+    assert_eq!(
+        envelope["result"]["constraints"][0]["scope"],
+        json!("context")
+    );
+
+    let legacy = telos(tmp.path(), &["context", "INT-0042", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(legacy.status.code(), Some(2));
+}
+
+#[test]
+fn map_prints_and_stages_the_complete_context_map() {
+    let tmp = with_fixture();
+    let shown = telos(tmp.path(), &["map", "--json"]).output().unwrap();
+    assert_eq!(json_stdout(&shown)["result"]["dependencies"], json!([]));
+
+    open_change(tmp.path());
+    let staged = telos(tmp.path(), &["map", "--change", "CHG-0001", "--json"])
+        .write_stdin("context-map {\n}\n")
+        .output()
+        .unwrap();
+    assert!(staged.status.success(), "map staging failed: {staged:?}");
+    assert_eq!(
+        json_stdout(&staged)["result"]["claims"],
+        json!(["telos/context-map.tel"])
+    );
+}
+
+#[test]
+fn pack_includes_only_required_mappings_without_supplier_internals() {
+    let tmp = with_fixture_mut(|root| {
+        let capability = root.join("telos/contexts/terminal/capabilities/portrait");
+        fs::create_dir_all(capability.join("notions")).unwrap();
+        fs::create_dir_all(capability.join("intents")).unwrap();
+        fs::create_dir_all(root.join("telos/contexts/terminal/notions")).unwrap();
+        fs::write(
+            root.join("telos/contexts/terminal/context.tel"),
+            "context terminal supporting \"Terminal\" {\n  def \"Presents billing state.\"\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            capability.join("capability.tel"),
+            "capability terminal/portrait \"Portrait\" {\n  def \"Renders a compact view.\"\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("telos/contexts/terminal/notions/PetView.tel"),
+            "notion terminal/PetView entity {\n  def \"A local projection of an invoice.\"\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            capability.join("notions/RenderRequested.tel"),
+            "notion terminal/portrait/RenderRequested event {\n  def \"A render request.\"\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            capability.join("intents/INT-0099.tel"),
+            r#"intent INT-0099 in terminal/portrait "Render the local view" {
+  status draft
+  telos  "The terminal renders its own projection."
+  statement event-driven {
+    when   RenderRequested on PetView
+    system shall "render the local view"
+  }
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("telos/context-map.tel"),
+            "context-map {\n  dependency terminal on billing {\n    map billing/Invoice -> terminal/PetView\n  }\n}\n",
+        )
+        .unwrap();
+    });
+
+    let out = telos(tmp.path(), &["pack", "INT-0099", "--json"])
+        .output()
+        .unwrap();
+    let pack = json_stdout(&out)["result"].clone();
+    assert_eq!(
+        pack["mappings"],
+        json!([{"from": "billing/Invoice", "to": "terminal/PetView"}])
+    );
+    assert_eq!(
+        pack["notions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["terminal/PetView", "terminal/RenderRequested"]
+    );
+    assert!(!pack.to_string().contains("A bill issued to a Customer"));
+}
+
+fn pack_result(dir: &std::path::Path, target: &str) -> serde_json::Value {
+    let out = telos(dir, &["pack", target, "--json"]).output().unwrap();
+    assert!(out.status.success(), "pack {target} failed: {out:?}");
     json_stdout(&out)["result"].clone()
 }
 
@@ -27,16 +145,15 @@ fn bounded_fixture() -> tempfile::TempDir {
     with_fixture_mut(|root| {
         fs::write(
             root.join("telos/constraints/CON-0004.tel"),
-            r#"constraint CON-0004 quality "Payment feedback is prompt" {
+            r#"constraint CON-0004 in project quality "Payment feedback is prompt" {
   rule  "Payment feedback is prompt."
-  scope INT-0042
 }
 "#,
         )
         .unwrap();
         fs::write(
-            root.join("telos/intents/INT-0099.tel"),
-            r#"intent INT-0099 "An unrelated draft" {
+            root.join("telos/contexts/billing/capabilities/settlement/intents/INT-0099.tel"),
+            r#"intent INT-0099 in billing/settlement "An unrelated draft" {
   status draft
   telos  "Keep unrelated work out of this pack."
   statement event-driven {
@@ -47,23 +164,15 @@ fn bounded_fixture() -> tempfile::TempDir {
 "#,
         )
         .unwrap();
-        fs::write(
-            root.join("telos/constraints/CON-0005.tel"),
-            r#"constraint CON-0005 quality "Draft-only rule" {
-  rule  "Draft-only rule."
-  scope INT-0099
-}
-"#,
-        )
-        .unwrap();
     })
 }
 
 fn expected_int_0042_pack() -> serde_json::Value {
     json!({
         "id": "INT-0042",
+        "owner": {"context": "billing", "capability": "settlement"},
         "change": null,
-        "canonical": "intent INT-0042 \"Invoice payment marks it settled\" {\n  status active\n  telos  \"Customers must see immediately that their debt is cleared.\"\n  statement event-driven {\n    when   PaymentReceived on Invoice\n    system shall set Invoice.state = settled\n  }\n  requires INT-0017\n\n  scenario SCN-0107 \"full payment settles the invoice\" {\n    given Invoice { state: open, balance: \"120.00 EUR\" }\n    when  PaymentReceived { amount: \"120.00 EUR\" }\n    then  Invoice.state == settled\n  }\n}\n",
+        "canonical": "intent INT-0042 in billing/settlement \"Invoice payment marks it settled\" {\n  status active\n  telos  \"Customers must see immediately that their debt is cleared.\"\n  statement event-driven {\n    when   PaymentReceived on Invoice\n    system shall set Invoice.state = settled\n  }\n  requires INT-0017\n\n  scenario SCN-0107 \"full payment settles the invoice\" {\n    given Invoice { state: open, balance: \"120.00 EUR\" }\n    when  PaymentReceived { amount: \"120.00 EUR\" }\n    then  Invoice.state == settled\n  }\n}\n",
         "scenarios": [{
             "id": "SCN-0107",
             "title": "full payment settles the invoice",
@@ -71,24 +180,24 @@ fn expected_int_0042_pack() -> serde_json::Value {
         }],
         "notions": [
             {
-                "name": "Invoice",
-                "canonical": "notion Invoice entity {\n  def  \"A bill issued to a Customer for delivered work.\"\n  attr state   enum(open, settled, cancelled)\n  attr balance money\n  rel  issued-to -> Customer\n}\n",
+                "name": "billing/Invoice",
+                "canonical": "notion billing/Invoice entity {\n  def  \"A bill issued to a Customer for delivered work.\"\n  attr state   enum(open, settled, cancelled)\n  attr balance money\n  rel  issued-to -> Customer\n}\n",
             },
             {
-                "name": "PaymentReceived",
-                "canonical": "notion PaymentReceived event {\n  def  \"A payment arrived for an invoice.\"\n  attr amount money\n}\n",
+                "name": "billing/PaymentReceived",
+                "canonical": "notion billing/settlement/PaymentReceived event {\n  def  \"A payment arrived for an invoice.\"\n  attr amount money\n}\n",
             },
         ],
         "constraints": [
             {
                 "id": "CON-0003",
-                "scope": "global",
-                "canonical": "constraint CON-0003 architecture \"Hexagonal boundaries\" {\n  rule  \"Domain code must not import adapter modules.\"\n  scope global\n  check \"git --version\"\n}\n",
+                "scope": "context",
+                "canonical": "constraint CON-0003 in context billing architecture \"Hexagonal boundaries\" {\n  rule  \"Domain code must not import adapter modules.\"\n  check \"git --version\"\n}\n",
             },
             {
                 "id": "CON-0004",
-                "scope": "scoped",
-                "canonical": "constraint CON-0004 quality \"Payment feedback is prompt\" {\n  rule  \"Payment feedback is prompt.\"\n  scope INT-0042\n}\n",
+                "scope": "project",
+                "canonical": "constraint CON-0004 in project quality \"Payment feedback is prompt\" {\n  rule  \"Payment feedback is prompt.\"\n}\n",
             },
         ],
         "bindings": {
@@ -98,6 +207,7 @@ fn expected_int_0042_pack() -> serde_json::Value {
                 "test": "tests/billing.rs::scn_0107_full_payment_settles_the_invoice",
             }],
         },
+        "mappings": [],
         "neighbors": [{
             "id": "INT-0017",
             "title": "Issuing an invoice opens it",
@@ -145,6 +255,7 @@ fn stage_new_intent(dir: &std::path::Path) -> String {
     let out = telos(dir, &["add", "intent", "--change", "CHG-0001", "--json"])
         .write_stdin(
             json!({
+                "owner": "billing/settlement",
                 "title": "Invoices can be cancelled",
                 "status": "active",
                 "telos": "Customers need to void invoices raised in error.",
@@ -249,6 +360,7 @@ fn seed_draft_intent(dir: &std::path::Path) -> String {
     let out = telos(dir, &["add", "intent", "--change", &change, "--json"])
         .write_stdin(
             json!({
+                "owner": "billing/settlement",
                 "title": "A removable draft",
                 "status": "draft",
                 "telos": "Exercise removal from a final overlay.",
@@ -279,15 +391,15 @@ fn seed_draft_intent(dir: &std::path::Path) -> String {
     id
 }
 
-fn assert_unknown_context(dir: &std::path::Path, target: &str, kind: &str, hint: &str) {
-    let out = telos(dir, &["context", target, "--json"]).output().unwrap();
+fn assert_unknown_pack(dir: &std::path::Path, target: &str, kind: &str, hint: &str) {
+    let out = telos(dir, &["pack", target, "--json"]).output().unwrap();
     assert!(
         !out.status.success(),
-        "context {target} unexpectedly succeeded: {out:?}"
+        "pack {target} unexpectedly succeeded: {out:?}"
     );
     let envelope = json_stdout(&out);
     assert_eq!(envelope["ok"], json!(false));
-    assert_eq!(envelope["command"], json!("context"));
+    assert_eq!(envelope["command"], json!("pack"));
     assert_eq!(envelope["result"], serde_json::Value::Null);
     assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
     assert_eq!(
@@ -301,20 +413,20 @@ fn assert_unknown_context(dir: &std::path::Path, target: &str, kind: &str, hint:
 fn rejects_non_intent_and_non_scenario_targets() {
     let tmp = with_fixture();
 
-    for target in ["Invoice", "CON-0003", "CHG-0001"] {
-        let out = telos(tmp.path(), &["context", target, "--json"])
+    for target in ["NOT:billing/Invoice", "CON-0003", "CHG-0001"] {
+        let out = telos(tmp.path(), &["pack", target, "--json"])
             .output()
             .unwrap();
 
         assert!(
             !out.status.success(),
-            "context {target} unexpectedly succeeded"
+            "pack {target} unexpectedly succeeded"
         );
         assert_eq!(
             json_stdout(&out)["error"],
             json!({
                 "code": "TELOS_REFERENCE_UNKNOWN",
-                "message": "`context` applies to intents and scenarios",
+                "message": "`pack` applies to intents and scenarios",
                 "hint": null,
             }),
             "unexpected error for {target}",
@@ -323,29 +435,29 @@ fn rejects_non_intent_and_non_scenario_targets() {
 }
 
 #[test]
-fn context_for_an_intent_is_the_exact_bounded_pack() {
+fn pack_for_an_intent_is_the_exact_bounded_pack() {
     let tmp = bounded_fixture();
-    let pack = context_result(tmp.path(), "INT-0042");
+    let pack = pack_result(tmp.path(), "INT-0042");
 
     assert_eq!(pack, expected_int_0042_pack());
-    assert_eq!(pack["notions"][0]["name"], json!("Invoice"));
-    assert_eq!(pack["notions"][1]["name"], json!("PaymentReceived"));
+    assert_eq!(pack["notions"][0]["name"], json!("billing/Invoice"));
+    assert_eq!(pack["notions"][1]["name"], json!("billing/PaymentReceived"));
     assert_eq!(pack["constraints"].as_array().unwrap().len(), 2);
     assert_eq!(pack["neighbors"].as_array().unwrap().len(), 1);
 }
 
 #[test]
-fn context_for_a_scenario_resolves_to_its_owning_intent_pack() {
+fn pack_for_a_scenario_resolves_to_its_owning_intent_pack() {
     let tmp = bounded_fixture();
 
     assert_eq!(
-        context_result(tmp.path(), "SCN-0107"),
+        pack_result(tmp.path(), "SCN-0107"),
         expected_int_0042_pack()
     );
 }
 
 #[test]
-fn context_reads_an_edited_intent_from_its_owning_post_overlay_model() {
+fn pack_reads_an_edited_intent_from_its_owning_post_overlay_model() {
     let tmp = with_fixture();
     open_change(tmp.path());
     stage_edit_int_0042(
@@ -353,7 +465,7 @@ fn context_reads_an_edited_intent_from_its_owning_post_overlay_model() {
         r#"{"telos":"The edited rationale belongs to the staged model."}"#,
     );
 
-    let pack = context_result(tmp.path(), "INT-0042");
+    let pack = pack_result(tmp.path(), "INT-0042");
 
     assert_eq!(pack["change"], json!("CHG-0001"));
     assert!(
@@ -366,12 +478,12 @@ fn context_reads_an_edited_intent_from_its_owning_post_overlay_model() {
 }
 
 #[test]
-fn context_reads_an_added_intent_from_its_owning_post_overlay_model() {
+fn pack_reads_an_added_intent_from_its_owning_post_overlay_model() {
     let tmp = with_fixture();
     open_change(tmp.path());
     let id = stage_new_intent(tmp.path());
 
-    let pack = context_result(tmp.path(), &id);
+    let pack = pack_result(tmp.path(), &id);
 
     assert_eq!(pack["id"], json!(id));
     assert_eq!(pack["change"], json!("CHG-0001"));
@@ -386,7 +498,7 @@ fn context_reads_an_added_intent_from_its_owning_post_overlay_model() {
 }
 
 #[test]
-fn context_rejects_an_intent_removed_after_an_edit_in_its_owning_change() {
+fn pack_rejects_an_intent_removed_after_an_edit_in_its_owning_change() {
     let tmp = with_fixture();
     let intent = seed_draft_intent(tmp.path());
     let change = open_change_with_id(tmp.path(), "Edit then remove the draft");
@@ -407,13 +519,13 @@ fn context_rejects_an_intent_removed_after_an_edit_in_its_owning_change() {
     .unwrap();
     assert!(out.status.success(), "removing the draft failed: {out:?}");
 
-    assert_unknown_context(tmp.path(), &intent, "intent", "closest is INT-0042");
+    assert_unknown_pack(tmp.path(), &intent, "intent", "closest is INT-0042");
 }
 
 #[test]
-fn context_rejects_a_scenario_removed_from_an_edited_intent() {
+fn pack_rejects_a_scenario_removed_from_an_edited_intent() {
     let tmp = with_fixture_mut(|root| {
-        let path = root.join("telos/intents/INT-0017.tel");
+        let path = root.join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel");
         let source = fs::read_to_string(&path).unwrap();
         fs::write(path, source.replace("status active", "status draft")).unwrap();
     });
@@ -432,11 +544,11 @@ fn context_rejects_a_scenario_removed_from_an_edited_intent() {
         "removing the scenario failed: {out:?}"
     );
 
-    assert_unknown_context(tmp.path(), "SCN-0091", "scenario", "closest is SCN-0107");
+    assert_unknown_pack(tmp.path(), "SCN-0091", "scenario", "closest is SCN-0107");
 }
 
 #[test]
-fn context_folds_journalled_bindings_and_sorts_them_by_path() {
+fn pack_folds_journalled_bindings_and_sorts_them_by_path() {
     let tmp = with_fixture();
     open_change(tmp.path());
     stage_edit_int_0042(tmp.path(), "{}");
@@ -448,7 +560,7 @@ fn context_folds_journalled_bindings_and_sorts_them_by_path() {
     }
 
     assert_eq!(
-        context_result(tmp.path(), "INT-0042")["bindings"]["implements"],
+        pack_result(tmp.path(), "INT-0042")["bindings"]["implements"],
         json!([
             "src/billing/a_context.rs",
             "src/billing/invoice.rs",
@@ -458,7 +570,7 @@ fn context_folds_journalled_bindings_and_sorts_them_by_path() {
 }
 
 #[test]
-fn context_folds_a_green_test_witness_into_proves_and_scenario_state() {
+fn pack_folds_a_green_test_witness_into_proves_and_scenario_state() {
     let tmp = fixture_with_green_runner();
     open_change(tmp.path());
     let scenario = stage_new_scenario(tmp.path());
@@ -477,7 +589,7 @@ fn context_folds_a_green_test_witness_into_proves_and_scenario_state() {
         "recording a green witness failed: {out:?}"
     );
 
-    let pack = context_result(tmp.path(), "INT-0042");
+    let pack = pack_result(tmp.path(), "INT-0042");
     assert_eq!(pack["change"], json!("CHG-0001"));
     assert_eq!(
         pack["scenarios"][1],

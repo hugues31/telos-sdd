@@ -14,6 +14,7 @@ pub mod context;
 pub mod impact;
 pub mod init;
 pub mod list;
+pub mod map;
 pub mod mutate;
 pub mod query;
 pub mod rebuild;
@@ -33,7 +34,7 @@ use telos_core::counters::{Alloc, floors, read_counters};
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::graph::NodeRef;
-use telos_core::ids::{ConstraintId, EntityRef, IntentId, NotionName, RepoPath, ScenarioId};
+use telos_core::ids::{ConstraintId, EntityRef, IntentId, RepoPath, ScenarioId};
 use telos_core::lock::Lock;
 use telos_core::model::{Change, ChangeStatus, TelosModel};
 use telos_core::overlay::apply_config_ops;
@@ -464,9 +465,16 @@ pub(crate) fn resolve_or_hint(model: &TelosModel, r: &EntityRef) -> Result<NodeR
         return Ok(node);
     }
     match r {
+        EntityRef::Context(id) => Err(unknown("context", id, None)),
+        EntityRef::Capability(id) => Err(unknown("capability", id, None)),
         EntityRef::Notion(name) => {
-            let known: Vec<&str> = model.notions.keys().map(NotionName::as_str).collect();
-            let hint = suggest::closest(name.as_str(), known.iter().copied())
+            let target = name.to_string();
+            let known: Vec<String> = model
+                .domain_notions
+                .keys()
+                .map(ToString::to_string)
+                .collect();
+            let hint = suggest::closest(&target, known.iter().map(String::as_str))
                 .map(|c| format!("closest is `{c}`"));
             Err(unknown("notion", name, hint))
         }

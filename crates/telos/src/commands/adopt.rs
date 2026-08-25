@@ -96,6 +96,9 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
     // written between `compute_state` and here. The gate costs nothing and
     // the alternative is two changes owning one file.
     for op in &plan.ops {
+        if let Some(source) = op.source_path() {
+            require_unclaimed(&project, change.id, &source)?;
+        }
         require_unclaimed(&project, change.id, &op.target_path())?;
     }
 

@@ -358,6 +358,17 @@ fn loop_feature() {
         .expect("`change open` answers with the new change's id")
         .to_string();
 
+    run_ok_stdin(
+        dir,
+        &["add", "context", "--change", &change_id, "--json"],
+        r#"{"id":"billing","kind":"core","title":"Billing","def":"Owns invoice rules."}"#,
+    );
+    run_ok_stdin(
+        dir,
+        &["add", "capability", "--change", &change_id, "--json"],
+        r#"{"owner":"billing","id":"settlement","title":"Settlement","def":"Settles invoices."}"#,
+    );
+
     // Payloads use the documented `add` shape from docs/contracts.md:
     // a notion's identity is its `name`, an `add` never carries an id of
     // its own, and `given`/`when` steps carry their state under `fields`.
@@ -368,6 +379,7 @@ fn loop_feature() {
         dir,
         &["add", "notion", "--change", &change_id, "--json"],
         r#"{
+            "owner": "billing",
             "name": "Invoice",
             "kind": "entity",
             "def": "A bill issued to a Customer for delivered work.",
@@ -380,6 +392,7 @@ fn loop_feature() {
         dir,
         &["add", "notion", "--change", &change_id, "--json"],
         r#"{
+            "owner": "billing/settlement",
             "name": "PaymentReceived",
             "kind": "event",
             "def": "A payment arrived for an invoice."
@@ -389,6 +402,7 @@ fn loop_feature() {
         dir,
         &["add", "intent", "--change", &change_id, "--json"],
         r#"{
+            "owner": "billing/settlement",
             "title": "Invoices can be settled",
             "status": "active",
             "telos": "Customers must see immediately that their debt is cleared.",
@@ -497,7 +511,7 @@ fn loop_drift() {
     // Out-of-protocol edit: appending a byte to a sealed spec file directly
     // on disk, bypassing the CLI entirely -- the same drift the
     // `status`/`check` tests (`status_check.rs`) exercise.
-    let invoice_tel = dir.join("telos/notions/Invoice.tel");
+    let invoice_tel = dir.join("telos/contexts/billing/notions/Invoice.tel");
     let mut content = fs::read_to_string(&invoice_tel).unwrap();
     content.push('\n');
     fs::write(&invoice_tel, content).unwrap();
@@ -663,14 +677,18 @@ fn loop_merge() {
     );
     // Both branches' edits survived the merge: nothing was picked over
     // anything else.
-    let int_0017 = fs::read_to_string(dir.join("telos/intents/INT-0017.tel"))
-        .expect("failed to read INT-0017.tel");
+    let int_0017 = fs::read_to_string(
+        dir.join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"),
+    )
+    .expect("failed to read INT-0017.tel");
     assert!(
         int_0017.contains("branch A wording"),
         "branch A's INT-0017 edit must survive the merge, got: {int_0017}"
     );
-    let int_0042 = fs::read_to_string(dir.join("telos/intents/INT-0042.tel"))
-        .expect("failed to read INT-0042.tel");
+    let int_0042 = fs::read_to_string(
+        dir.join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"),
+    )
+    .expect("failed to read INT-0042.tel");
     assert!(
         int_0042.contains("branch B wording"),
         "branch B's INT-0042 edit must survive the merge, got: {int_0042}"
@@ -780,7 +798,7 @@ fn loop_projection() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|notion| notion["name"] == "Invoice")
+            .any(|notion| notion["name"] == "billing/Invoice")
     );
     assert!(
         export_payload["snapshot"]["edges"]

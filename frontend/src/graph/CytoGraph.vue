@@ -1,32 +1,37 @@
 <script setup lang="ts">
-import cytoscape, { type Core, type SingularElementReturnValue } from 'cytoscape';
+import cytoscape, {
+  type Core,
+  type SingularElementReturnValue,
+} from 'cytoscape';
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
-import type {
-  GraphEdgeView,
-  GraphKeyKind,
-  GraphNodeView,
-  GraphRelation,
-} from '../data/types';
+import type { GraphEdgeView, GraphKeyKind, GraphNodeView } from '../data/types';
 import {
   buildGraphElements,
   dimmedElementIds,
+  graphSelectionId,
   nodeId,
   type GraphSelection,
   type RelationFilter,
 } from './elements';
-import { DAGRE_LAYOUT_OPTIONS, runDagreLayout } from './layout';
-import { replacementNodePositions } from './replacement';
+import { runCompoundLayout } from './layout';
+import type { VisibleGraphEdge, VisibleGraphRelation } from './projection';
+import { collapsedIdsSignature } from './collapse';
 import { buildGraphStylesheet } from './stylesheet';
 
 const props = defineProps<{
   nodes: GraphNodeView[];
-  edges: GraphEdgeView[];
+  edges: VisibleGraphEdge[];
   relationFilter: RelationFilter;
+  collapsedIds: string[];
+  selection: GraphSelection | null;
 }>();
 
 const emit = defineEmits<{
   select: [selection: GraphSelection | null];
+  'toggle-container': [id: string];
+  'expand-all': [];
+  'collapse-all': [];
 }>();
 
 const container = ref<HTMLElement | null>(null);
@@ -42,13 +47,13 @@ function selectionFromElement(element: SingularElementReturnValue): GraphSelecti
         kind: element.data('kind') as GraphKeyKind,
         id: element.data('entityId') as string,
       },
-      label: element.data('label') as string,
+      label: element.data('rawLabel') as string,
     };
   }
 
   return {
     type: 'edge',
-    relation: element.data('relation') as GraphRelation,
+    relation: element.data('relation') as VisibleGraphRelation,
     source: {
       kind: element.data('sourceKind') as GraphKeyKind,
       id: element.data('sourceId') as string,
@@ -57,16 +62,30 @@ function selectionFromElement(element: SingularElementReturnValue): GraphSelecti
       kind: element.data('targetKind') as GraphKeyKind,
       id: element.data('targetId') as string,
     },
+    members: element.data('members') as GraphEdgeView[],
   };
+}
+
+function collapsedIdSet(): Set<string> {
+  return new Set(props.collapsedIds);
 }
 
 function applyFilter(filter: RelationFilter): void {
   if (!cy) return;
-  const dimmedIds = dimmedElementIds(buildGraphElements(props.nodes, props.edges), filter);
+  const dimmedIds = dimmedElementIds(
+    buildGraphElements(props.nodes, props.edges, collapsedIdSet()),
+    filter,
+  );
   cy.batch(() => {
     cy?.elements().removeClass('dimmed');
     for (const id of dimmedIds) cy?.getElementById(id).addClass('dimmed');
   });
+}
+
+function applySelectedHighlight(selection: GraphSelection | null): void {
+  if (!cy) return;
+  cy.elements().unselect();
+  if (selection) cy.getElementById(graphSelectionId(selection)).select();
 }
 
 function fitGraph(): void {
@@ -74,7 +93,10 @@ function fitGraph(): void {
 }
 
 function relayoutGraph(): void {
-  if (cy) runDagreLayout(cy);
+  if (!cy) return;
+  void runCompoundLayout(cy).catch((error: unknown) => {
+    console.error('ELK graph layout failed', error);
+  });
 }
 
 watch(
@@ -83,27 +105,25 @@ watch(
 );
 
 watch(
-  [() => props.nodes, () => props.edges],
+  () => props.selection,
+  (selection) => applySelectedHighlight(selection),
+);
+
+watch(
+  [
+    () => props.nodes,
+    () => props.edges,
+    () => collapsedIdsSignature(props.collapsedIds),
+  ],
   () => {
     if (!cy) return;
-
-    const previousPositions = new Map(
-      cy.nodes().map((node) => [node.id(), { ...node.position() }] as const),
-    );
-    const nextPositions = replacementNodePositions(
-      props.nodes.map((node) => nodeId(node.key)),
-      previousPositions,
-    );
     cy.batch(() => {
       cy?.elements().remove();
-      const added = cy?.add(buildGraphElements(props.nodes, props.edges));
-      added?.nodes().forEach((node) => {
-        const position = nextPositions.get(node.id());
-        if (position) node.position(position);
-      });
+      cy?.add(buildGraphElements(props.nodes, props.edges, collapsedIdSet()));
     });
+    relayoutGraph();
     applyFilter(props.relationFilter);
-    emit('select', null);
+    applySelectedHighlight(props.selection);
   },
 );
 
@@ -112,16 +132,27 @@ onMounted(() => {
 
   cy = cytoscape({
     container: container.value,
-    elements: buildGraphElements(props.nodes, props.edges),
+    elements: buildGraphElements(props.nodes, props.edges, collapsedIdSet()),
     style: buildGraphStylesheet(),
-    layout: DAGRE_LAYOUT_OPTIONS,
+    layout: { name: 'preset' },
     selectionType: 'single',
     minZoom: 0.005,
     maxZoom: 4,
   });
 
   cy.on('tap', 'node, edge', (event) => {
-    emit('select', selectionFromElement(event.target as SingularElementReturnValue));
+    const element = event.target as SingularElementReturnValue;
+    emit('select', selectionFromElement(element));
+
+    if (!element.isNode()) return;
+    const kind = element.data('kind') as GraphKeyKind;
+    if (kind !== 'context' && kind !== 'capability') return;
+
+    const bounds = element.renderedBoundingBox();
+    const collapsed = element.data('collapsed') as boolean;
+    if (collapsed || event.renderedPosition.y <= bounds.y1 + 32) {
+      emit('toggle-container', nodeId({ kind, id: element.data('entityId') as string }));
+    }
   });
   cy.on('tap', (event) => {
     if (event.target !== cy) return;
@@ -136,6 +167,8 @@ onMounted(() => {
   });
 
   applyFilter(props.relationFilter);
+  relayoutGraph();
+  applySelectedHighlight(props.selection);
 
   resizeObserver = new ResizeObserver(() => cy?.resize());
   resizeObserver.observe(container.value);
@@ -164,6 +197,12 @@ onBeforeUnmount(() => {
     <div class="cyto-graph__toolbar" aria-label="Graph controls">
       <button type="button" data-graph-action="fit" @click="fitGraph">Fit</button>
       <button type="button" data-graph-action="relayout" @click="relayoutGraph">Re-layout</button>
+      <button type="button" data-graph-action="expand-all" @click="emit('expand-all')">
+        Expand all
+      </button>
+      <button type="button" data-graph-action="collapse-all" @click="emit('collapse-all')">
+        Collapse all
+      </button>
     </div>
     <div
       ref="container"

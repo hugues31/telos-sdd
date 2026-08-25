@@ -18,7 +18,9 @@ use tempfile::TempDir;
 use telos_core::changes::{open_change_infos, write_change};
 use telos_core::error::ErrorCode;
 use telos_core::git::GitRepo;
-use telos_core::ids::{ChangeId, IntentId, NotionName, RepoPath};
+use telos_core::ids::{
+    CapabilityId, CapabilityRef, ChangeId, ContextId, IntentId, NotionName, Owner, RepoPath,
+};
 use telos_core::lock::{Lock, seal};
 use telos_core::model::{Change, ChangeStatus, Notion, NotionKind, StagedOp};
 use telos_core::state::{
@@ -89,7 +91,7 @@ fn seal_hashes_spec_files_and_every_bindings_code_path() {
     let tmp = corpus_repo();
     let (_ws, lock, _git) = discover_and_seal(tmp.path());
 
-    assert_eq!(lock.version, 1);
+    assert_eq!(lock.version, 2);
     assert!(
         lock.tool.starts_with("telos "),
         "expected tool to start with `telos `, got: {}",
@@ -98,13 +100,12 @@ fn seal_hashes_spec_files_and_every_bindings_code_path() {
     assert_eq!(lock.sealed_by, None);
     assert_eq!(lock.spec_digest, Lock::compute_digest(&lock.spec));
 
-    // Corpus spec_files(): telos.toml + 4 notions + 2 intents + 1 constraint
-    // + bindings.tel = 9.
-    assert_eq!(lock.spec.len(), 9);
+    // telos.toml plus the twelve canonical strategic/tactical `.tel` files.
+    assert_eq!(lock.spec.len(), 13);
     assert!(lock.spec.contains_key(&RepoPath::new("telos/telos.toml")));
     assert!(
         lock.spec
-            .contains_key(&RepoPath::new("telos/notions/Invoice.tel"))
+            .contains_key(&RepoPath::new("telos/contexts/billing/notions/Invoice.tel"))
     );
 
     // Corpus bindings.tel: one `implements`, one `proves`, distinct files.
@@ -119,7 +120,7 @@ fn seal_hashes_spec_files_and_every_bindings_code_path() {
 #[test]
 fn seal_fails_with_integrity_violation_naming_a_binding_to_a_missing_code_file() {
     let tmp = corpus_repo();
-    let bindings_path = tmp.path().join("telos/bindings.tel");
+    let bindings_path = tmp.path().join("telos/contexts/billing/bindings.tel");
     let mut content = fs::read_to_string(&bindings_path).unwrap();
     content.push_str("implements \"src/billing/ghost.rs\" -> INT-0042\n");
     fs::write(&bindings_path, content).unwrap();
@@ -161,7 +162,9 @@ fn compute_state_reports_modified_for_a_one_byte_spec_edit() {
     let tmp = corpus_repo();
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
-    let invoice_path = tmp.path().join("telos/notions/Invoice.tel");
+    let invoice_path = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
     let mut content = fs::read_to_string(&invoice_path).unwrap();
     content.push('\n');
     fs::write(&invoice_path, content).unwrap();
@@ -172,7 +175,7 @@ fn compute_state_reports_modified_for_a_one_byte_spec_edit() {
     assert_eq!(
         report.drift,
         vec![DriftEntry {
-            path: RepoPath::new("telos/notions/Invoice.tel"),
+            path: RepoPath::new("telos/contexts/billing/notions/Invoice.tel"),
             kind: DriftKind::Modified,
         }]
     );
@@ -182,7 +185,9 @@ fn compute_state_reports_modified_for_a_one_byte_spec_edit() {
 fn drift_token_changes_when_modified_bytes_change_but_the_scope_does_not() {
     let tmp = corpus_repo();
     let (ws, lock, git) = discover_and_seal(tmp.path());
-    let invoice_path = tmp.path().join("telos/notions/Invoice.tel");
+    let invoice_path = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
 
     fs::write(&invoice_path, "first modified version\n").unwrap();
     let first = compute_state(&ws, &lock, &git, &[]).unwrap();
@@ -204,7 +209,11 @@ fn compute_state_reports_missing_for_a_deleted_spec_file() {
     let tmp = corpus_repo();
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
-    fs::remove_file(tmp.path().join("telos/intents/INT-0017.tel")).unwrap();
+    fs::remove_file(
+        tmp.path()
+            .join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"),
+    )
+    .unwrap();
 
     let report = compute_state(&ws, &lock, &git, &[]).unwrap();
 
@@ -212,7 +221,9 @@ fn compute_state_reports_missing_for_a_deleted_spec_file() {
     assert_eq!(
         report.drift,
         vec![DriftEntry {
-            path: RepoPath::new("telos/intents/INT-0017.tel"),
+            path: RepoPath::new(
+                "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"
+            ),
             kind: DriftKind::Missing,
         }]
     );
@@ -224,7 +235,7 @@ fn compute_state_reports_untracked_for_a_spec_file_created_outside_the_protocol(
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
     fs::write(
-        tmp.path().join("telos/notions/Rogue.tel"),
+        tmp.path().join("telos/contexts/billing/notions/Rogue.tel"),
         "notion Rogue value {\n  def \"unsanctioned\"\n}\n",
     )
     .unwrap();
@@ -235,7 +246,7 @@ fn compute_state_reports_untracked_for_a_spec_file_created_outside_the_protocol(
     assert_eq!(
         report.drift,
         vec![DriftEntry {
-            path: RepoPath::new("telos/notions/Rogue.tel"),
+            path: RepoPath::new("telos/contexts/billing/notions/Rogue.tel"),
             kind: DriftKind::Untracked,
         }]
     );
@@ -287,7 +298,8 @@ fn compute_state_answers_drifted_on_a_corrupted_spec_file_without_parsing() {
     // Not valid UTF-8, not valid `.tel` syntax -- `compute_state` must not
     // even attempt to parse it, only hash it.
     fs::write(
-        tmp.path().join("telos/notions/Invoice.tel"),
+        tmp.path()
+            .join("telos/contexts/billing/notions/Invoice.tel"),
         b"\x00\x01\xffnot even valid utf8 or tel syntax{{{".as_slice(),
     )
     .unwrap();
@@ -298,7 +310,7 @@ fn compute_state_answers_drifted_on_a_corrupted_spec_file_without_parsing() {
     assert_eq!(
         report.drift,
         vec![DriftEntry {
-            path: RepoPath::new("telos/notions/Invoice.tel"),
+            path: RepoPath::new("telos/contexts/billing/notions/Invoice.tel"),
             kind: DriftKind::Modified,
         }]
     );
@@ -330,6 +342,17 @@ fn invoice_notion() -> Notion {
     }
 }
 
+fn billing_owner() -> Owner {
+    Owner::context(ContextId::new("billing").unwrap())
+}
+
+fn invoicing_owner() -> Owner {
+    Owner::capability(CapabilityRef::new(
+        ContextId::new("billing").unwrap(),
+        CapabilityId::new("invoicing").unwrap(),
+    ))
+}
+
 fn drafted_change(id: u32, ops: Vec<StagedOp>) -> Change {
     Change {
         id: ChangeId(id),
@@ -348,7 +371,13 @@ fn compute_state_is_changing_when_an_open_change_has_no_drift() {
 
     write_change(
         &ws,
-        &drafted_change(1, vec![StagedOp::AddNotion(ledger_notion())]),
+        &drafted_change(
+            1,
+            vec![StagedOp::AddOwnedNotion {
+                owner: billing_owner(),
+                notion: ledger_notion(),
+            }],
+        ),
     )
     .unwrap();
     let open_changes = open_change_infos(&ws).unwrap();
@@ -372,14 +401,22 @@ fn compute_state_is_changing_not_drifted_when_the_open_change_claims_the_drifted
     let tmp = corpus_repo();
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
-    let invoice_path = tmp.path().join("telos/notions/Invoice.tel");
+    let invoice_path = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
     let mut content = fs::read_to_string(&invoice_path).unwrap();
     content.push('\n');
     fs::write(&invoice_path, content).unwrap();
 
     write_change(
         &ws,
-        &drafted_change(1, vec![StagedOp::AddNotion(invoice_notion())]),
+        &drafted_change(
+            1,
+            vec![StagedOp::AddOwnedNotion {
+                owner: billing_owner(),
+                notion: invoice_notion(),
+            }],
+        ),
     )
     .unwrap();
     let open_changes = open_change_infos(&ws).unwrap();
@@ -400,16 +437,28 @@ fn compute_state_is_drifted_listing_only_the_path_no_open_change_claims() {
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
     // Two drifted paths: Invoice.tel modified, INT-0017.tel deleted.
-    let invoice_path = tmp.path().join("telos/notions/Invoice.tel");
+    let invoice_path = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
     let mut content = fs::read_to_string(&invoice_path).unwrap();
     content.push('\n');
     fs::write(&invoice_path, content).unwrap();
-    fs::remove_file(tmp.path().join("telos/intents/INT-0017.tel")).unwrap();
+    fs::remove_file(
+        tmp.path()
+            .join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"),
+    )
+    .unwrap();
 
     // The open change claims only INT-0017.tel, not Invoice.tel.
     write_change(
         &ws,
-        &drafted_change(1, vec![StagedOp::RemoveIntent(IntentId(17))]),
+        &drafted_change(
+            1,
+            vec![StagedOp::RemoveOwnedIntent {
+                owner: invoicing_owner(),
+                id: IntentId(17),
+            }],
+        ),
     )
     .unwrap();
     let open_changes = open_change_infos(&ws).unwrap();
@@ -420,7 +469,7 @@ fn compute_state_is_drifted_listing_only_the_path_no_open_change_claims() {
     assert_eq!(
         report.drift,
         vec![DriftEntry {
-            path: RepoPath::new("telos/notions/Invoice.tel"),
+            path: RepoPath::new("telos/contexts/billing/notions/Invoice.tel"),
             kind: DriftKind::Modified,
         }]
     );
@@ -551,4 +600,28 @@ fn coverage_matches_the_corpus_exactly() {
     assert_eq!(cov.scenarios_total, 2);
     assert_eq!(cov.scenarios_proved, 1);
     assert_eq!(cov.intents_implemented, 1);
+}
+
+#[test]
+fn coverage_counts_same_named_notions_in_distinct_contexts() {
+    let tmp = corpus_repo();
+    let terminal = tmp.path().join("telos/contexts/terminal");
+    fs::create_dir_all(terminal.join("notions")).unwrap();
+    fs::write(
+        terminal.join("context.tel"),
+        "context terminal supporting \"Terminal\" {\n  def \"Presents a local projection.\"\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        terminal.join("notions/Invoice.tel"),
+        "notion terminal/Invoice entity {\n  def  \"The terminal's local invoice projection.\"\n}\n",
+    )
+    .unwrap();
+
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let model = ws
+        .load_model()
+        .unwrap_or_else(|diags| panic!("expected both contexts to load cleanly, got {diags:?}"));
+
+    assert_eq!(coverage(&model).notions, 5);
 }

@@ -21,6 +21,7 @@ const snapshot = (version: string): TelosPayload => ({
       scenarios_proved: 0,
       rows: [],
     },
+    contexts: [],
     notions: [],
     intents: [],
     scenarios: [],
@@ -37,6 +38,59 @@ const status = (
   reload_error: string | null = null,
   watcher_error: string | null = null,
 ): LiveStatus => ({ generation, reload_error, watcher_error });
+
+function addOwnedGraphFixture(payload: TelosPayload): void {
+  payload.snapshot.contexts = [
+    {
+      id: 'billing',
+      kind: 'core',
+      title: 'Billing',
+      definition: 'Owns invoicing.',
+      capabilities: [
+        { id: 'billing/invoicing', title: 'Invoicing', definition: 'Issues invoices.' },
+      ],
+      dependencies: [],
+      health: { intents: 1, active_intents: 1, scenarios: 0, proved_scenarios: 0 },
+    },
+    {
+      id: 'shipping',
+      kind: 'supporting',
+      title: 'Shipping',
+      definition: 'Ships orders.',
+      capabilities: [],
+      dependencies: [],
+      health: { intents: 0, active_intents: 0, scenarios: 0, proved_scenarios: 0 },
+    },
+  ];
+  payload.snapshot.intents = [
+    {
+      id: 'INT-1',
+      owner: 'billing/invoicing',
+      title: 'Issue an invoice',
+      status: 'active',
+      telos: 'Invoices record obligations.',
+      canonical: 'intent INT-1',
+      notions: [],
+      constraints: [],
+      implements: [],
+      scenarios: [],
+    },
+  ];
+  payload.snapshot.nodes = [
+    { key: { kind: 'context', id: 'billing' }, label: 'Billing', parent: null },
+    { key: { kind: 'context', id: 'shipping' }, label: 'Shipping', parent: null },
+    {
+      key: { kind: 'capability', id: 'billing/invoicing' },
+      label: 'Invoicing',
+      parent: { kind: 'context', id: 'billing' },
+    },
+    {
+      key: { kind: 'intent', id: 'INT-1' },
+      label: 'Issue an invoice',
+      parent: { kind: 'capability', id: 'billing/invoicing' },
+    },
+  ];
+}
 
 function createScheduler() {
   let nextId = 0;
@@ -583,6 +637,54 @@ describe('live reload controller', () => {
       'graph node entries',
       (payload: any) =>
         (payload.snapshot.nodes = [{ key: { kind: 'unknown', id: 'N' }, label: 'Node' }]),
+    ],
+    [
+      'graph node entries missing their required parent field',
+      (payload: any) =>
+        (payload.snapshot.nodes = [{ key: { kind: 'notion', id: 'N' }, label: 'Node' }]),
+    ],
+    [
+      'graph node entries owned by a non-container node',
+      (payload: any) =>
+        (payload.snapshot.nodes = [
+          {
+            key: { kind: 'notion', id: 'N' },
+            label: 'Node',
+            parent: { kind: 'intent', id: 'INT-1' },
+          },
+        ]),
+    ],
+    [
+      'graph node entries whose parent does not exist',
+      (payload: any) =>
+        (payload.snapshot.nodes = [
+          {
+            key: { kind: 'notion', id: 'N' },
+            label: 'Node',
+            parent: { kind: 'context', id: 'missing' },
+          },
+        ]),
+    ],
+    [
+      'capability graph nodes attached to the wrong existing context',
+      (payload: TelosPayload) => {
+        addOwnedGraphFixture(payload);
+        payload.snapshot.nodes[2].parent = { kind: 'context', id: 'shipping' };
+      },
+    ],
+    [
+      'domain graph nodes attached to the wrong existing owner',
+      (payload: TelosPayload) => {
+        addOwnedGraphFixture(payload);
+        payload.snapshot.nodes[3].parent = { kind: 'context', id: 'shipping' };
+      },
+    ],
+    [
+      'duplicate graph node keys',
+      (payload: TelosPayload) => {
+        addOwnedGraphFixture(payload);
+        payload.snapshot.nodes.push({ ...payload.snapshot.nodes[0] });
+      },
     ],
     [
       'graph edge entries',

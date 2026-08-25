@@ -285,7 +285,11 @@ pub fn coverage(model: &TelosModel) -> Coverage {
         .collect();
 
     Coverage {
-        notions: model.notions.len() as u32,
+        notions: if model.domain_notions.is_empty() {
+            model.notions.len()
+        } else {
+            model.domain_notions.len()
+        } as u32,
         constraints: model.constraints.len() as u32,
         intents_total: model.intents.len() as u32,
         intents_active: model

@@ -1,4 +1,4 @@
-//! `telos context <INT-id | SCN-id>`: the bounded work pack for one intent --
+//! `telos pack <INT-id | SCN-id>`: the bounded work pack for one intent --
 //! the unit an agent receives, never the whole spec.
 //!
 //! The pack is the intent's own canonical block plus everything an
@@ -43,12 +43,13 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-use telos_core::emit::{emit_constraint, emit_intent, emit_notion};
+use telos_core::emit::{
+    emit_constraint, emit_intent, emit_notion, emit_owned_constraint, emit_owned_intent,
+    emit_owned_notion,
+};
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::graph::{NodeRef, Relation};
-use telos_core::ids::{
-    ChangeId, ConstraintId, EntityRef, IntentId, NotionName, RepoPath, ScenarioId,
-};
+use telos_core::ids::{ChangeId, ConstraintId, EntityRef, IntentId, Owner, RepoPath, ScenarioId};
 use telos_core::model::{Binding, Change, Intent, StagedOp, TelosModel};
 use telos_core::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
 use telos_core::semantic::build_model;
@@ -63,7 +64,11 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
     let entity_ref: EntityRef = target.parse().map_err(|_| unparsable(target))?;
     if matches!(
         entity_ref,
-        EntityRef::Notion(_) | EntityRef::Constraint(_) | EntityRef::Change(_)
+        EntityRef::Context(_)
+            | EntityRef::Capability(_)
+            | EntityRef::Notion(_)
+            | EntityRef::Constraint(_)
+            | EntityRef::Change(_)
     ) {
         return Err(not_applicable());
     }
@@ -80,12 +85,12 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
     })
 }
 
-/// Builds the exact public context pack for an intent id.
+/// Builds the exact public work pack for an intent id.
 ///
-/// Rebuild plan uses this boundary rather than rebuilding context semantics
+/// Rebuild plan uses this boundary rather than rebuilding pack semantics
 /// from its combined ordering model. Untouched intents therefore stay on the
 /// persisted base, while an added/edited intent sees only its owning change's
-/// post-overlay model, exactly as `telos context INT-…` does.
+/// post-overlay model, exactly as `telos pack INT-…` does.
 pub(crate) fn pack_for_intent(
     project: &Project,
     disk: &TelosModel,
@@ -127,7 +132,7 @@ fn resolved_pack(
 fn not_applicable() -> TelosError {
     TelosError::new(
         ErrorCode::TelosReferenceUnknown,
-        "`context` applies to intents and scenarios",
+        "`pack` applies to intents and scenarios",
     )
 }
 
@@ -141,7 +146,7 @@ fn not_applicable() -> TelosError {
 /// `telos bind`/`telos test` already judge ownership one level down: the
 /// disk model, and every open change's staged intents -- an intent or
 /// scenario `add`/`edit intent` allocated a moment ago is precisely the one
-/// `telos context` is about to be pointed at.
+/// `telos pack` is about to be pointed at.
 fn resolve_intent<'a>(
     project: &'a Project,
     disk: &TelosModel,
@@ -183,9 +188,11 @@ fn resolve_intent<'a>(
             }
             Err(unknown_scenario(project, disk, *id))
         }
-        EntityRef::Notion(_) | EntityRef::Constraint(_) | EntityRef::Change(_) => {
-            Err(not_applicable())
-        }
+        EntityRef::Context(_)
+        | EntityRef::Capability(_)
+        | EntityRef::Notion(_)
+        | EntityRef::Constraint(_)
+        | EntityRef::Change(_) => Err(not_applicable()),
     }
 }
 
@@ -199,10 +206,14 @@ fn staged_intents(change: &Change) -> std::collections::BTreeMap<IntentId, Inten
     let mut intents = std::collections::BTreeMap::new();
     for op in &change.ops {
         match op {
-            StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => {
+            StagedOp::AddOwnedIntent { intent: i, .. }
+            | StagedOp::EditOwnedIntent { intent: i, .. }
+            | StagedOp::MoveIntent { intent: i, .. }
+            | StagedOp::AddIntent(i)
+            | StagedOp::EditIntent(i) => {
                 intents.insert(i.id, i.clone());
             }
-            StagedOp::RemoveIntent(id) => {
+            StagedOp::RemoveOwnedIntent { id, .. } | StagedOp::RemoveIntent(id) => {
                 intents.remove(id);
             }
             _ => {}
@@ -277,8 +288,12 @@ fn touched_intent_ids(change: &Change) -> BTreeSet<IntentId> {
         .ops
         .iter()
         .filter_map(|op| match op {
-            StagedOp::AddIntent(intent) | StagedOp::EditIntent(intent) => Some(intent.id),
-            StagedOp::RemoveIntent(intent) => Some(*intent),
+            StagedOp::AddOwnedIntent { intent, .. }
+            | StagedOp::EditOwnedIntent { intent, .. }
+            | StagedOp::MoveIntent { intent, .. }
+            | StagedOp::AddIntent(intent)
+            | StagedOp::EditIntent(intent) => Some(intent.id),
+            StagedOp::RemoveOwnedIntent { id, .. } | StagedOp::RemoveIntent(id) => Some(*id),
             _ => None,
         })
         .collect()
@@ -303,7 +318,7 @@ struct ScenarioEntry {
 }
 
 struct NotionEntry {
-    name: NotionName,
+    name: String,
     canonical: String,
 }
 
@@ -325,10 +340,16 @@ struct NeighborEntry {
     direction: &'static str,
 }
 
+struct MappingEntry {
+    from: String,
+    to: String,
+}
+
 /// The complete context pack, already sorted and filtered --
 /// `to_json` and `to_human` each render the same data, once computed here.
 pub(crate) struct Pack {
     id: IntentId,
+    owner: Option<Owner>,
     change: Option<ChangeId>,
     canonical: String,
     scenarios: Vec<ScenarioEntry>,
@@ -336,14 +357,20 @@ pub(crate) struct Pack {
     constraints: Vec<ConstraintEntry>,
     implements: Vec<RepoPath>,
     proves: Vec<ProvesEntry>,
+    mappings: Vec<MappingEntry>,
     neighbors: Vec<NeighborEntry>,
 }
 
 pub(crate) fn build_pack(model: &TelosModel, intent: &Intent, change: Option<ChangeId>) -> Pack {
+    let owner = model.intent_owners.get(&intent.id).cloned();
     Pack {
         id: intent.id,
+        owner: owner.clone(),
         change,
-        canonical: emit_intent(intent),
+        canonical: owner.as_ref().map_or_else(
+            || emit_intent(intent),
+            |owner| emit_owned_intent(owner, intent),
+        ),
         scenarios: scenario_entries(model, intent),
         notions: notion_entries(model, intent),
         constraints: applicable_constraints(model, intent.id)
@@ -351,7 +378,13 @@ pub(crate) fn build_pack(model: &TelosModel, intent: &Intent, change: Option<Cha
             .map(|entry| ConstraintEntry {
                 id: entry.constraint.id,
                 scope: entry.scope,
-                canonical: emit_constraint(entry.constraint),
+                canonical: model
+                    .constraint_owners
+                    .get(&entry.constraint.id)
+                    .map_or_else(
+                        || emit_constraint(entry.constraint),
+                        |owner| emit_owned_constraint(owner.as_ref(), entry.constraint),
+                    ),
             })
             .collect(),
         implements: implementations(model, intent.id),
@@ -362,6 +395,7 @@ pub(crate) fn build_pack(model: &TelosModel, intent: &Intent, change: Option<Cha
                 test: entry.test,
             })
             .collect(),
+        mappings: mapping_entries(model, intent),
         neighbors: neighbor_entries(model, intent.id),
     }
 }
@@ -392,32 +426,42 @@ fn scenario_entries(model: &TelosModel, intent: &Intent) -> Vec<ScenarioEntry> {
 /// exactly this set, once, for both the intent's own node and each
 /// scenario's.
 fn notion_entries(model: &TelosModel, intent: &Intent) -> Vec<NotionEntry> {
-    let mut names: BTreeSet<NotionName> = BTreeSet::new();
-    collect_uses(model, &NodeRef::Intent(intent.id), &mut names);
+    let mut notions: BTreeSet<NodeRef> = BTreeSet::new();
+    collect_uses(model, &NodeRef::Intent(intent.id), &mut notions);
     for scenario in &intent.scenarios {
-        collect_uses(model, &NodeRef::Scenario(scenario.id), &mut names);
+        collect_uses(model, &NodeRef::Scenario(scenario.id), &mut notions);
     }
-    names
+    notions
         .into_iter()
-        .map(|name| {
-            let notion = model
-                .notions
-                .get(&name)
-                .expect("a `uses` edge's target always resolves in a built model");
-            NotionEntry {
-                canonical: emit_notion(notion),
-                name,
+        .filter_map(|node| match node {
+            NodeRef::QualifiedNotion(reference) => {
+                let notion = model.domain_notions.get(&reference)?;
+                let canonical = model.notion_owners.get(&reference).map_or_else(
+                    || emit_notion(notion),
+                    |owner| emit_owned_notion(owner, notion),
+                );
+                Some(NotionEntry {
+                    name: reference.to_string(),
+                    canonical,
+                })
             }
+            NodeRef::Notion(name) => {
+                let notion = model.notions.get(&name)?;
+                Some(NotionEntry {
+                    name: name.to_string(),
+                    canonical: emit_notion(notion),
+                })
+            }
+            _ => None,
         })
         .collect()
 }
 
-fn collect_uses(model: &TelosModel, node: &NodeRef, out: &mut BTreeSet<NotionName>) {
+fn collect_uses(model: &TelosModel, node: &NodeRef, out: &mut BTreeSet<NodeRef>) {
     for (rel, to) in model.graph.out_edges(node) {
-        if *rel == Relation::Uses
-            && let NodeRef::Notion(name) = to
+        if *rel == Relation::Uses && matches!(to, NodeRef::Notion(_) | NodeRef::QualifiedNotion(_))
         {
-            out.insert(name.clone());
+            out.insert(to.clone());
         }
     }
 }
@@ -431,10 +475,15 @@ fn collect_uses(model: &TelosModel, node: &NodeRef, out: &mut BTreeSet<NotionNam
 /// three of the eight relations ever connect two of them.
 fn neighbor_entries(model: &TelosModel, intent_id: IntentId) -> Vec<NeighborEntry> {
     let node = NodeRef::Intent(intent_id);
+    let context = model
+        .intent_owners
+        .get(&intent_id)
+        .map(|owner| &owner.context);
     let mut entries: Vec<NeighborEntry> = Vec::new();
     for (rel, to) in model.graph.out_edges(&node) {
         if is_intent_relation(*rel)
             && let NodeRef::Intent(id) = to
+            && model.intent_owners.get(id).map(|owner| &owner.context) == context
         {
             entries.push(neighbor(model, *id, *rel, "out"));
         }
@@ -442,12 +491,39 @@ fn neighbor_entries(model: &TelosModel, intent_id: IntentId) -> Vec<NeighborEntr
     for (rel, from) in model.graph.in_edges(&node) {
         if is_intent_relation(*rel)
             && let NodeRef::Intent(id) = from
+            && model.intent_owners.get(id).map(|owner| &owner.context) == context
         {
             entries.push(neighbor(model, *id, *rel, "in"));
         }
     }
     entries.sort_by(|a, b| (a.rel, a.id, a.direction).cmp(&(b.rel, b.id, b.direction)));
     entries
+}
+
+fn mapping_entries(model: &TelosModel, intent: &Intent) -> Vec<MappingEntry> {
+    let Some(owner) = model.intent_owners.get(&intent.id) else {
+        return Vec::new();
+    };
+    let local: BTreeSet<_> = notion_entries(model, intent)
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    let mut mappings = Vec::new();
+    for dependency in &model.context_map.dependencies {
+        if dependency.consumer != owner.context {
+            continue;
+        }
+        for mapping in &dependency.mappings {
+            if local.contains(&mapping.to.to_string()) {
+                mappings.push(MappingEntry {
+                    from: mapping.from.to_string(),
+                    to: mapping.to.to_string(),
+                });
+            }
+        }
+    }
+    mappings.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+    mappings
 }
 
 fn is_intent_relation(rel: Relation) -> bool {
@@ -481,6 +557,7 @@ fn neighbor(
 pub(crate) fn to_json(pack: &Pack) -> Value {
     json!({
         "id": pack.id,
+        "owner": pack.owner,
         "change": pack.change,
         "canonical": pack.canonical,
         "scenarios": pack.scenarios.iter().map(|s| json!({
@@ -498,6 +575,9 @@ pub(crate) fn to_json(pack: &Pack) -> Value {
                 "scenario": p.scenario, "test": p.test,
             })).collect::<Vec<_>>(),
         },
+        "mappings": pack.mappings.iter().map(|mapping| json!({
+            "from": mapping.from, "to": mapping.to,
+        })).collect::<Vec<_>>(),
         "neighbors": pack.neighbors.iter().map(|n| json!({
             "id": n.id, "title": n.title, "rel": n.rel.as_str(), "direction": n.direction,
         })).collect::<Vec<_>>(),
@@ -509,6 +589,10 @@ pub(crate) fn to_json(pack: &Pack) -> Value {
 /// from, then one heading per list.
 fn to_human(pack: &Pack) -> String {
     let mut lines = vec![pack.canonical.clone()];
+    lines.push(match &pack.owner {
+        Some(owner) => format!("owner: {owner}"),
+        None => "owner: none".to_string(),
+    });
     lines.push(match pack.change {
         Some(id) => format!("change: {id}"),
         None => "change: none".to_string(),
@@ -536,6 +620,11 @@ fn to_human(pack: &Pack) -> String {
     }
     for p in &pack.proves {
         lines.push(format!("  proves {} -> {}", p.scenario, p.test));
+    }
+
+    lines.push("mappings:".to_string());
+    for mapping in &pack.mappings {
+        lines.push(format!("  {} -> {}", mapping.from, mapping.to));
     }
 
     lines.push("neighbors:".to_string());

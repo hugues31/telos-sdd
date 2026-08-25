@@ -27,7 +27,10 @@ use std::os::unix::fs::PermissionsExt;
 
 use serde_json::{Value, json};
 
-use common::{repo, telos, unsealed_fixture, with_fixture, with_fixture_mut};
+use common::{
+    canonical_payload, telos, unsealed_fixture, with_empty_billing_domain, with_fixture,
+    with_fixture_mut,
+};
 
 // --- plumbing --------------------------------------------------------------
 
@@ -57,11 +60,20 @@ fn read(dir: &Path, rel: &str) -> String {
     fs::read_to_string(dir.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
+fn corpus_intent_path(root: &Path, intent: &str) -> std::path::PathBuf {
+    let capability = if intent == "INT-0017" {
+        "invoicing"
+    } else {
+        "settlement"
+    };
+    root.join(format!(
+        "telos/contexts/billing/capabilities/{capability}/intents/{intent}.tel"
+    ))
+}
+
 /// A fresh git repository with an initialized, sealed and empty `telos/`.
 fn fresh() -> tempfile::TempDir {
-    let tmp = repo();
-    telos(tmp.path(), &["init"]).assert().success();
-    tmp
+    with_empty_billing_domain()
 }
 
 fn open_change(dir: &Path) {
@@ -73,7 +85,10 @@ fn open_change(dir: &Path) {
 /// Stages one op, asserting it landed.
 fn stage(dir: &Path, args: &[&str], payload: &str) {
     let mut cmd = telos(dir, args);
-    let out = cmd.write_stdin(payload.to_string()).output().unwrap();
+    let out = cmd
+        .write_stdin(canonical_payload(args, payload))
+        .output()
+        .unwrap();
     let envelope = json_stdout(&out);
     assert_eq!(
         envelope["ok"],
@@ -116,11 +131,37 @@ fn reconcile_err(dir: &Path) -> Value {
     envelope["error"].clone()
 }
 
+#[test]
+fn reconcile_folds_journal_bindings_into_the_intents_context_file() {
+    let tmp = with_fixture();
+    open_change(tmp.path());
+    stage(
+        tmp.path(),
+        &[
+            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+        ],
+        &json!({"telos": "Invoices begin open and unpaid."}).to_string(),
+    );
+    approve(tmp.path());
+    telos(
+        tmp.path(),
+        &["bind", "src/billing/invoice.rs", "INT-0017", "--json"],
+    )
+    .assert()
+    .success();
+
+    reconcile_ok(tmp.path());
+    let bindings = read(tmp.path(), "telos/contexts/billing/bindings.tel");
+    assert!(bindings.contains("implements \"src/billing/invoice.rs\" -> INT-0017"));
+    assert!(bindings.contains("implements \"src/billing/invoice.rs\" -> INT-0042"));
+    assert!(!tmp.path().join("telos/bindings.tel").exists());
+}
+
 // --- the payloads of the happy path -------------------------------
 
 fn invoice_payload() -> String {
     json!({
-        "name": "Invoice", "kind": "entity",
+        "owner": "billing", "name": "Invoice", "kind": "entity",
         "def": "A bill issued to a Customer for delivered work.",
         "attrs": [ {"name": "state", "type": "enum", "values": ["open", "settled"]} ]
     })
@@ -129,7 +170,7 @@ fn invoice_payload() -> String {
 
 fn payment_received_payload() -> String {
     json!({
-        "name": "PaymentReceived", "kind": "event",
+        "owner": "billing/settlement", "name": "PaymentReceived", "kind": "event",
         "def": "A payment arrived for an invoice.",
         "attrs": [ {"name": "amount", "type": "money"} ]
     })
@@ -146,7 +187,7 @@ fn active_settle_intent_payload() -> String {
 
 fn settle_intent_payload_with_status(status: &str) -> String {
     json!({
-        "title": "Invoices can be settled", "status": status,
+        "owner": "billing/settlement", "title": "Invoices can be settled", "status": status,
         "telos": "Customers must see immediately that their debt is cleared.",
         "statement": { "template": "event-driven", "when": "PaymentReceived",
                        "on": "Invoice", "action": "set Invoice.state = settled" },
@@ -268,22 +309,28 @@ fn reconcile_writes_the_canonical_spec_files_byte_for_byte() {
     reconcile_ok(tmp.path());
 
     assert_eq!(
-        read(tmp.path(), "telos/notions/Invoice.tel"),
-        "notion Invoice entity {\n  \
+        read(tmp.path(), "telos/contexts/billing/notions/Invoice.tel"),
+        "notion billing/Invoice entity {\n  \
            def  \"A bill issued to a Customer for delivered work.\"\n  \
            attr state enum(open, settled)\n\
          }\n"
     );
     assert_eq!(
-        read(tmp.path(), "telos/notions/PaymentReceived.tel"),
-        "notion PaymentReceived event {\n  \
+        read(
+            tmp.path(),
+            "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel"
+        ),
+        "notion billing/settlement/PaymentReceived event {\n  \
            def  \"A payment arrived for an invoice.\"\n  \
            attr amount money\n\
          }\n"
     );
     assert_eq!(
-        read(tmp.path(), "telos/intents/INT-0001.tel"),
-        "intent INT-0001 \"Invoices can be settled\" {\n  \
+        read(
+            tmp.path(),
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0001.tel"
+        ),
+        "intent INT-0001 in billing/settlement \"Invoices can be settled\" {\n  \
            status draft\n  \
            telos  \"Customers must see immediately that their debt is cleared.\"\n  \
            statement event-driven {\n    \
@@ -337,9 +384,9 @@ fn reconcile_seals_the_lock_with_the_change_that_produced_it() {
         "lock does not record its change:\n{lock}"
     );
     for path in [
-        "telos/intents/INT-0001.tel",
-        "telos/notions/Invoice.tel",
-        "telos/notions/PaymentReceived.tel",
+        "telos/contexts/billing/capabilities/settlement/intents/INT-0001.tel",
+        "telos/contexts/billing/notions/Invoice.tel",
+        "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel",
     ] {
         assert!(lock.contains(path), "`{path}` is not sealed:\n{lock}");
     }
@@ -358,7 +405,9 @@ fn reconcile_seals_the_lock_with_the_change_that_produced_it() {
 fn reconcile_refuses_unclaimed_drift() {
     let tmp = approved_int_0042_edit(with_fixture());
     // Drifted *after* the approval, so `approve`'s own gate cannot catch it.
-    let path = tmp.path().join("telos/notions/Invoice.tel");
+    let path = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
     let mut content = fs::read_to_string(&path).unwrap();
     content.push('\n');
     fs::write(&path, content).unwrap();
@@ -368,7 +417,7 @@ fn reconcile_refuses_unclaimed_drift() {
     assert_eq!(error["code"], json!("TELOS_DRIFT_DETECTED"));
     let message = error["message"].as_str().unwrap();
     assert!(
-        message.contains("telos/notions/Invoice.tel"),
+        message.contains("telos/contexts/billing/notions/Invoice.tel"),
         "the drifted path is not named: {message}"
     );
     assert_eq!(error["hint"], json!(DRIFT_HINT));
@@ -384,15 +433,26 @@ fn reconcile_refuses_unclaimed_drift() {
 #[test]
 fn drift_on_the_reconciled_changes_own_claim_does_not_block_it() {
     let tmp = approved_int_0042_edit(with_fixture());
-    let path = tmp.path().join("telos/intents/INT-0042.tel");
+    let path = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
     // Still parseable (the overlay's base is read from disk), but no longer
     // the sealed bytes -- drift on a path this very change claims.
-    let drifted = format!("{}\n", read(tmp.path(), "telos/intents/INT-0042.tel"));
+    let drifted = format!(
+        "{}\n",
+        read(
+            tmp.path(),
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"
+        )
+    );
     fs::write(&path, &drifted).unwrap();
 
     reconcile_ok(tmp.path());
 
-    let written = read(tmp.path(), "telos/intents/INT-0042.tel");
+    let written = read(
+        tmp.path(),
+        "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+    );
     assert!(
         written.contains("Customers must see their debt cleared -- reworded."),
         "the op's post-state did not overwrite the drifted file:\n{written}"
@@ -428,7 +488,9 @@ fn reconcile_refuses_an_unapproved_change() {
         })
     );
     assert!(
-        !tmp.path().join("telos/notions/Invoice.tel").exists(),
+        !tmp.path()
+            .join("telos/contexts/billing/notions/Invoice.tel")
+            .exists(),
         "a refused reconcile must write nothing"
     );
 }
@@ -456,7 +518,11 @@ fn reconcile_refuses_a_change_staged_into_after_its_approval() {
             "hint": "re-approve with `telos change approve CHG-0001`"
         })
     );
-    assert!(!tmp.path().join("telos/notions/Invoice.tel").exists());
+    assert!(
+        !tmp.path()
+            .join("telos/contexts/billing/notions/Invoice.tel")
+            .exists()
+    );
 
     // Re-approving is idempotent and unblocks the same delta.
     approve(tmp.path());
@@ -586,9 +652,9 @@ fn a_code_file_this_changes_own_accept_op_targets_is_still_an_orphan() {
 // --- gate 7: the sealed code coverage -----------------------------------
 
 /// The stable `TELOS_INTEGRITY_VIOLATION` hint for sealed coverage loss.
-const COVERAGE_HINT: &str = "the bindings shrank outside this change; reconcile or abandon the change that claims telos/bindings.tel, or restore them with `telos revert`";
+const COVERAGE_HINT: &str = "the bindings shrank outside this change; reconcile or abandon the change that claims the context bindings file, or restore it with `telos revert`";
 
-/// Hand-edits `telos/bindings.tel` down to its `proves` line, out of
+/// Hand-edits `telos/contexts/billing/bindings.tel` down to its `proves` line, out of
 /// protocol. A sealed spec file, so this is drift.
 fn drop_the_implements_line(dir: &Path) {
     let bindings = read(dir, BINDINGS);
@@ -618,7 +684,7 @@ fn stage_the_ledger_attack(dir: &Path) {
 }
 
 /// The attack, captured: the hand-edits adopted into change A (two `accept`
-/// ops, one of them on `telos/bindings.tel`), and an unrelated change B
+/// ops, one of them on `telos/contexts/billing/bindings.tel`), and an unrelated change B
 /// approved next to it.
 fn ledger_attack() -> (tempfile::TempDir, String, String) {
     let tmp = with_fixture();
@@ -651,7 +717,7 @@ fn reconcile_refuses_a_shrink_of_the_sealed_code_coverage() {
         json!({
             "code": "TELOS_INTEGRITY_VIOLATION",
             "message": "sealing would drop `src/billing/invoice.rs` from the code table: \
-                        no binding covers it and this change does not stage telos/bindings.tel",
+                        no binding covers it and this change does not stage its context bindings file",
             "hint": COVERAGE_HINT
         })
     );
@@ -661,7 +727,7 @@ fn reconcile_refuses_a_shrink_of_the_sealed_code_coverage() {
     );
 }
 
-/// The other half: the change that *stages* `telos/bindings.tel` is the one
+/// The other half: the change that *stages* `telos/contexts/billing/bindings.tel` is the one
 /// that was reviewed for the shrink, so it goes through -- and B, whose
 /// refusal was about a coverage nobody had approved dropping, goes through
 /// right after it.
@@ -812,7 +878,11 @@ fn a_failing_test_run_refuses_the_reconcile_and_reports_the_substituted_command(
     );
     assert!(tmp.path().join(CHG_0001).exists());
     assert!(
-        !read(tmp.path(), "telos/intents/INT-0042.tel").contains("reworded"),
+        !read(
+            tmp.path(),
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"
+        )
+        .contains("reworded"),
         "a refused reconcile must write nothing"
     );
 }
@@ -849,7 +919,7 @@ fn install_snapshot_mutation_runner(root: &Path) {
            printf '\\n// changed during reconcile\\n' >> src/billing.rs\n\
          fi\n\
          if test -f .mutate-spec-during-run; then\n\
-           printf '\\n# changed during reconcile\\n' >> telos/intents/INT-0017.tel\n\
+           printf '\\n# changed during reconcile\\n' >> telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel\n\
          fi\n\
          git hash-object .fake-green >/dev/null 2>&1\n",
     )
@@ -929,7 +999,10 @@ fn full_reconcile_seals_an_unsealed_project() {
         !lock.contains("sealed_by"),
         "a full reseal must not claim a change:\n{lock}"
     );
-    assert!(lock.contains("telos/intents/INT-0042.tel"), "{lock}");
+    assert!(
+        lock.contains("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"),
+        "{lock}"
+    );
     assert!(lock.contains("src/billing/invoice.rs"), "{lock}");
 
     let envelope = json_stdout(&telos(tmp.path(), &["status", "--json"]).output().unwrap());
@@ -965,8 +1038,13 @@ fn full_reconcile_never_reads_the_existing_lock() {
 #[test]
 fn full_reconcile_refuses_a_spec_that_does_not_resolve() {
     let tmp = unsealed_fixture();
-    let path = tmp.path().join("telos/intents/INT-0042.tel");
-    let content = read(tmp.path(), "telos/intents/INT-0042.tel");
+    let path = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
+    let content = read(
+        tmp.path(),
+        "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+    );
     fs::write(
         &path,
         content.replace("requires INT-0017", "requires INT-9999"),
@@ -1023,7 +1101,11 @@ fn ordinary_reconcile_refuses_an_active_scenario_without_a_proof_before_any_writ
     );
     assert_eq!(read(tmp.path(), CHG_0001), change_before);
     assert_eq!(read(tmp.path(), LOCK), lock_before);
-    assert!(!tmp.path().join("telos/intents/INT-0001.tel").exists());
+    assert!(
+        !tmp.path()
+            .join("telos/contexts/billing/capabilities/settlement/intents/INT-0001.tel")
+            .exists()
+    );
 }
 
 #[test]
@@ -1089,7 +1171,13 @@ fn full_reconcile_refuses_spec_bytes_changed_by_its_runner() {
         envelope["error"]["code"],
         json!("TELOS_INTEGRITY_VIOLATION")
     );
-    assert!(read(tmp.path(), "telos/intents/INT-0017.tel").contains("changed during reconcile"));
+    assert!(
+        read(
+            tmp.path(),
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"
+        )
+        .contains("changed during reconcile")
+    );
     assert!(
         !tmp.path().join(LOCK).exists(),
         "a moved snapshot must not receive a successful seal"
@@ -1110,7 +1198,7 @@ fn full_reconcile_without_active_intents_needs_no_runner_or_test_run() {
 fn full_reconcile_treats_a_whitespace_runner_as_absent_for_draft_only_intents() {
     let tmp = unsealed_fixture();
     for intent in ["INT-0017", "INT-0042"] {
-        let path = tmp.path().join(format!("telos/intents/{intent}.tel"));
+        let path = corpus_intent_path(tmp.path(), intent);
         let source = fs::read_to_string(&path).unwrap();
         fs::write(path, source.replace("status active", "status draft")).unwrap();
     }
@@ -1127,7 +1215,7 @@ fn full_reconcile_does_not_invoke_a_configured_runner_for_draft_only_intents() {
 
     let tmp = unsealed_fixture();
     for intent in ["INT-0017", "INT-0042"] {
-        let path = tmp.path().join(format!("telos/intents/{intent}.tel"));
+        let path = corpus_intent_path(tmp.path(), intent);
         let source = fs::read_to_string(&path).unwrap();
         fs::write(path, source.replace("status active", "status draft")).unwrap();
     }
@@ -1204,7 +1292,7 @@ fn an_id_and_full_together_are_a_usage_error() {
 //
 // These drive the real feature loop end to end -- `open`, `add`, `approve`,
 // `test` red, `test` green, `bind`, `reconcile` -- on a project that starts
-// as a bare `telos init`. They assert that `telos/bindings.tel` is *derived*
+// as a bare `telos init`. They assert that `telos/contexts/billing/bindings.tel` is *derived*
 // from the journal at reconcile and
 // never written before it, the witness discipline is a static gate over
 // that journal, and under `tdd = "advisory"` the same verdicts come back
@@ -1226,7 +1314,7 @@ const TEST_FILE: &str = "tests/billing.rs";
 const CODE_FILE: &str = "src/billing.rs";
 
 /// The derived bindings table: written by reconcile, claimed by nobody.
-const BINDINGS: &str = "telos/bindings.tel";
+const BINDINGS: &str = "telos/contexts/billing/bindings.tel";
 
 /// The ids the allocator mints for the delta [`approved_feature`] stages.
 /// Captured from the command results rather than hardcoded -- the loop must
@@ -1369,7 +1457,7 @@ fn approved_feature(dir: &Path, scenarios: Vec<Value>) -> Feature {
     );
 
     let payload = json!({
-        "title": "Invoices can be settled", "status": "active",
+        "owner": "billing/settlement", "title": "Invoices can be settled", "status": "active",
         "telos": "Customers must see immediately that their debt is cleared.",
         "statement": { "template": "event-driven", "when": "PaymentReceived",
                        "on": "Invoice", "action": "set Invoice.state = settled" },
@@ -1526,7 +1614,10 @@ fn ordinary_reconcile_refuses_code_bytes_changed_by_its_runner() {
     );
     assert!(
         !tmp.path()
-            .join(format!("telos/intents/{}.tel", feature.intent))
+            .join(format!(
+                "telos/contexts/billing/capabilities/settlement/intents/{}.tel",
+                feature.intent
+            ))
             .exists(),
         "spec ops were applied despite the snapshot mismatch"
     );
@@ -1538,10 +1629,9 @@ fn ordinary_reconcile_refuses_code_bytes_changed_by_its_runner() {
 #[test]
 fn reconcile_derives_the_bindings_file_from_the_journal() {
     let (tmp, feature) = implemented();
-    assert_eq!(
-        read(tmp.path(), BINDINGS),
-        "",
-        "`bindings.tel` stays empty for the whole life of the change"
+    assert!(
+        !tmp.path().join(BINDINGS).exists(),
+        "`bindings.tel` is absent for the whole life of the change"
     );
 
     reconcile_id_ok(tmp.path(), &feature.change);
@@ -1622,11 +1712,14 @@ fn a_scenario_with_no_run_at_all_is_refused_and_nothing_is_written() {
     );
     assert!(
         !tmp.path()
-            .join(format!("telos/intents/{}.tel", feature.intent))
+            .join(format!(
+                "telos/contexts/billing/capabilities/settlement/intents/{}.tel",
+                feature.intent
+            ))
             .exists(),
         "a refused reconcile must write nothing"
     );
-    assert_eq!(read(tmp.path(), BINDINGS), "", "and derive nothing");
+    assert!(!tmp.path().join(BINDINGS).exists(), "and derive nothing");
 }
 
 /// The red-only state, and the convergent answer it must get.
@@ -1835,7 +1928,10 @@ fn advisory_still_refuses_an_active_scenario_without_a_proof() {
     );
     assert!(
         !tmp.path()
-            .join(format!("telos/intents/{}.tel", feature.intent))
+            .join(format!(
+                "telos/contexts/billing/capabilities/settlement/intents/{}.tel",
+                feature.intent
+            ))
             .exists()
     );
 }
@@ -1878,7 +1974,7 @@ fn stage_corpus_config(dir: &Path, test_cmd: &str) {
 fn config_edit_revalidates_scoped_constraints_before_writing() {
     let tmp = with_fixture_mut(|root| {
         fs::write(root.join(".constraint-green"), "green\n").unwrap();
-        let path = root.join("telos/constraints/CON-0003.tel");
+        let path = root.join("telos/contexts/billing/constraints/CON-0003.tel");
         let source = fs::read_to_string(&path).unwrap();
         let source = source.replace("scope global", "scope INT-0017").replace(
             "check \"git --version\"",
@@ -1940,7 +2036,7 @@ fn config_edit_runs_each_distinct_proof_once_with_the_staged_runner() {
 fn config_edit_treats_a_whitespace_runner_as_absent_for_draft_only_intents() {
     let tmp = with_fixture_mut(|root| {
         for intent in ["INT-0017", "INT-0042"] {
-            let path = root.join(format!("telos/intents/{intent}.tel"));
+            let path = corpus_intent_path(root, intent);
             let source = fs::read_to_string(&path).unwrap();
             fs::write(path, source.replace("status active", "status draft")).unwrap();
         }

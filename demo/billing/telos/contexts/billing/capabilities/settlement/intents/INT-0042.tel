@@ -1,0 +1,15 @@
+intent INT-0042 in billing/settlement "Invoice payment marks it settled" {
+  status draft
+  telos  "Customers must see immediately that their debt is cleared."
+  statement event-driven {
+    when   PaymentReceived on Invoice
+    system shall set Invoice.state = settled
+  }
+  requires INT-0017
+
+  scenario SCN-0107 "full payment settles the invoice" {
+    given Invoice { state: open, balance: "120.00 EUR" }
+    when  PaymentReceived { amount: "120.00 EUR" }
+    then  Invoice.state == settled
+  }
+}

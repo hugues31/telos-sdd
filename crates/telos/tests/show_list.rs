@@ -13,6 +13,43 @@ use serde_json::{Value, json};
 
 use common::{telos, with_fixture};
 
+#[test]
+fn list_exposes_domain_owners_and_filters_by_context_and_capability() {
+    let tmp = with_fixture();
+
+    let contexts = telos(tmp.path(), &["list", "context", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        json_stdout(&contexts)["result"]["items"],
+        json!([{"id": "billing", "kind": "core", "title": "Billing"}])
+    );
+
+    let intents = telos(
+        tmp.path(),
+        &[
+            "list",
+            "intent",
+            "--context",
+            "billing",
+            "--capability",
+            "settlement",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(
+        json_stdout(&intents)["result"]["items"],
+        json!([{
+            "id": "INT-0042",
+            "owner": "billing/settlement",
+            "status": "active",
+            "title": "Invoice payment marks it settled"
+        }])
+    );
+}
+
 /// Parses a command's stdout as a JSON envelope.
 fn json_stdout(out: &std::process::Output) -> Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
@@ -41,7 +78,8 @@ fn corpus_file(rel: &str) -> String {
 #[test]
 fn show_intent_human_contains_the_exact_canonical_block() {
     let tmp = with_fixture();
-    let canonical = corpus_file("telos/intents/INT-0042.tel");
+    let canonical =
+        corpus_file("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
 
     let out = telos(tmp.path(), &["show", "INT-0042"]).output().unwrap();
 
@@ -66,7 +104,7 @@ fn show_intent_human_contains_the_exact_canonical_block() {
 fn show_notion_json_reports_the_entity_and_its_incoming_uses_edge() {
     let tmp = with_fixture();
 
-    let out = telos(tmp.path(), &["show", "Invoice", "--json"])
+    let out = telos(tmp.path(), &["show", "NOT:billing/Invoice", "--json"])
         .output()
         .unwrap();
 
@@ -221,12 +259,14 @@ fn list_scenario_json_reports_id_title_and_owning_intent() {
             {
                 "id": "SCN-0091",
                 "title": "a newly issued invoice is open",
-                "intent": "INT-0017"
+                "intent": "INT-0017",
+                "owner": "billing/invoicing"
             },
             {
                 "id": "SCN-0107",
                 "title": "full payment settles the invoice",
-                "intent": "INT-0042"
+                "intent": "INT-0042",
+                "owner": "billing/settlement"
             },
         ])
     );
@@ -252,22 +292,26 @@ fn list_notion_json_is_sorted_alphabetically() {
         envelope["result"]["items"],
         json!([
             {
-                "name": "Customer",
+                "name": {"context": "billing", "notion": "Customer"},
+                "owner": "billing",
                 "kind": "entity",
                 "def": "A person or company that receives invoices."
             },
             {
-                "name": "Invoice",
+                "name": {"context": "billing", "notion": "Invoice"},
+                "owner": "billing",
                 "kind": "entity",
                 "def": "A bill issued to a Customer for delivered work."
             },
             {
-                "name": "InvoiceIssued",
+                "name": {"context": "billing", "notion": "InvoiceIssued"},
+                "owner": "billing/invoicing",
                 "kind": "event",
                 "def": "An invoice was issued to a customer."
             },
             {
-                "name": "PaymentReceived",
+                "name": {"context": "billing", "notion": "PaymentReceived"},
+                "owner": "billing/settlement",
                 "kind": "event",
                 "def": "A payment arrived for an invoice."
             },

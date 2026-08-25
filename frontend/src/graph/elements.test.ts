@@ -1,18 +1,44 @@
 import { describe, expect, it } from 'vitest';
 
 import type { GraphEdgeView, GraphNodeView } from '../data/types';
-import { buildGraphElements, dimmedElementIds, nodeId } from './elements';
+import { buildGraphElements, dimmedElementIds, graphSelectionId, nodeId } from './elements';
+import type { VisibleGraphEdge } from './projection';
+
+const context = { kind: 'context', id: 'billing' } as const;
+const capability = { kind: 'capability', id: 'billing/settlement' } as const;
 
 const nodes: GraphNodeView[] = [
-  { key: { kind: 'notion', id: 'Invoice' }, label: 'A bill.' },
-  { key: { kind: 'intent', id: 'INT-0042' }, label: 'Settle invoices' },
-  { key: { kind: 'scenario', id: 'SCN-0107' }, label: 'Full payment' },
-  { key: { kind: 'constraint', id: 'CON-0011' }, label: 'No unwraps' },
-  { key: { kind: 'code', id: 'src/invoice.rs' }, label: 'src/invoice.rs' },
-  { key: { kind: 'test', id: 'tests/invoice.rs::settles' }, label: 'settles' },
+  { key: context, label: 'Billing', parent: null },
+  { key: capability, label: 'Settlement', parent: context },
+  { key: { kind: 'notion', id: 'Invoice' }, label: 'A bill.', parent: context },
+  {
+    key: { kind: 'intent', id: 'INT-0042' },
+    label: 'Settle invoices',
+    parent: capability,
+  },
+  {
+    key: { kind: 'scenario', id: 'SCN-0107' },
+    label: 'Full payment',
+    parent: capability,
+  },
+  {
+    key: { kind: 'constraint', id: 'CON-0011' },
+    label: 'No unwraps',
+    parent: null,
+  },
+  {
+    key: { kind: 'code', id: 'src/invoice.rs' },
+    label: 'src/invoice.rs',
+    parent: null,
+  },
+  {
+    key: { kind: 'test', id: 'tests/invoice.rs::settles' },
+    label: 'settles',
+    parent: null,
+  },
 ];
 
-const edges: GraphEdgeView[] = [
+const semanticEdges: GraphEdgeView[] = [
   {
     from: { kind: 'intent', id: 'INT-0042' },
     relation: 'uses',
@@ -43,125 +69,121 @@ const edges: GraphEdgeView[] = [
     relation: 'proves',
     to: { kind: 'scenario', id: 'SCN-0107' },
   },
-  {
-    from: { kind: 'intent', id: 'INT-0042' },
-    relation: 'refines',
-    to: { kind: 'intent', id: 'INT-0001' },
-  },
-  {
-    from: { kind: 'intent', id: 'INT-0001' },
-    relation: 'excludes',
-    to: { kind: 'intent', id: 'INT-0042' },
-  },
 ];
+
+const edges: VisibleGraphEdge[] = semanticEdges.map((edge) => ({
+  ...edge,
+  relation: edge.relation as VisibleGraphEdge['relation'],
+  members: [edge],
+}));
 
 describe('nodeId', () => {
   it('uses the canonical Rust dom_key format', () => {
     expect(nodeId({ kind: 'scenario', id: 'SCN-0107' })).toBe('scenario:SCN-0107');
   });
+
+  it('derives the rendered id for retained node and edge selections', () => {
+    expect(
+      graphSelectionId({ type: 'node', entity: context, label: 'Billing' }),
+    ).toBe('context:billing');
+    expect(
+      graphSelectionId({
+        type: 'edge',
+        relation: 'uses',
+        source: semanticEdges[0].from,
+        target: semanticEdges[0].to,
+        members: [semanticEdges[0]],
+      }),
+    ).toBe('edge:intent%3AINT-0042:uses:notion%3AInvoice');
+  });
 });
 
 describe('buildGraphElements', () => {
-  it('maps all six node kinds and preserves selection data', () => {
-    const elements = buildGraphElements(nodes, []);
+  it('emits contexts before capabilities and assigns compound parents', () => {
+    const nodeElements = buildGraphElements(nodes, []).filter(
+      (element) => element.group === 'nodes',
+    );
 
-    expect(elements).toEqual([
-      {
-        group: 'nodes',
-        data: { id: 'notion:Invoice', kind: 'notion', entityId: 'Invoice', label: 'A bill.' },
-      },
-      {
-        group: 'nodes',
-        data: {
-          id: 'intent:INT-0042',
-          kind: 'intent',
-          entityId: 'INT-0042',
-          label: 'Settle invoices',
-        },
-      },
-      {
-        group: 'nodes',
-        data: {
-          id: 'scenario:SCN-0107',
-          kind: 'scenario',
-          entityId: 'SCN-0107',
-          label: 'Full payment',
-        },
-      },
-      {
-        group: 'nodes',
-        data: {
-          id: 'constraint:CON-0011',
-          kind: 'constraint',
-          entityId: 'CON-0011',
-          label: 'No unwraps',
-        },
-      },
-      {
-        group: 'nodes',
-        data: {
-          id: 'code:src/invoice.rs',
-          kind: 'code',
-          entityId: 'src/invoice.rs',
-          label: 'src/invoice.rs',
-        },
-      },
-      {
-        group: 'nodes',
-        data: {
-          id: 'test:tests/invoice.rs::settles',
-          kind: 'test',
-          entityId: 'tests/invoice.rs::settles',
-          label: 'settles',
-        },
-      },
+    expect(nodeElements.map((element) => element.data.id)).toEqual([
+      'context:billing',
+      'capability:billing/settlement',
+      'notion:Invoice',
+      'intent:INT-0042',
+      'scenario:SCN-0107',
+      'constraint:CON-0011',
+      'code:src/invoice.rs',
+      'test:tests/invoice.rs::settles',
     ]);
+    expect(nodeElements[0].data.parent).toBeUndefined();
+    expect(nodeElements[0].data.container).toBe(true);
+    expect(nodeElements[1].data.parent).toBe('context:billing');
+    expect(nodeElements[1].data.container).toBe(true);
+    expect(nodeElements[2].data.parent).toBe('context:billing');
+    expect(nodeElements[2].data.container).toBeUndefined();
+    expect(nodeElements[3].data.parent).toBe('capability:billing/settlement');
+    expect(nodeElements[6].data.parent).toBeUndefined();
   });
 
-  it('gives parallel relations stable unique ids and preserves both endpoints', () => {
-    const elements = buildGraphElements(nodes.slice(0, 2), edges.slice(0, 2));
+  it('marks container labels as expanded or collapsed', () => {
+    const nodeElements = buildGraphElements(
+      nodes,
+      [],
+      new Set(['capability:billing/settlement']),
+    ).filter((element) => element.group === 'nodes');
 
-    expect(elements.slice(2)).toEqual([
-      {
-        group: 'edges',
-        data: {
-          id: 'edge:intent%3AINT-0042:uses:notion%3AInvoice',
-          source: 'intent:INT-0042',
-          target: 'notion:Invoice',
-          relation: 'uses',
-          sourceKind: 'intent',
-          sourceId: 'INT-0042',
-          targetKind: 'notion',
-          targetId: 'Invoice',
-        },
-      },
-      {
-        group: 'edges',
-        data: {
-          id: 'edge:intent%3AINT-0042:requires:notion%3AInvoice',
-          source: 'intent:INT-0042',
-          target: 'notion:Invoice',
-          relation: 'requires',
-          sourceKind: 'intent',
-          sourceId: 'INT-0042',
-          targetKind: 'notion',
-          targetId: 'Invoice',
-        },
-      },
-    ]);
+    expect(nodeElements[0].data.label).toBe('− Billing');
+    expect(nodeElements[0].data.collapsed).toBeUndefined();
+    expect(nodeElements[1].data.label).toBe('+ Settlement');
+    expect(nodeElements[1].data.collapsed).toBe(true);
+    expect(nodeElements[2].data.label).toBe('A bill.');
+    expect(nodeElements[2].data.collapsed).toBeUndefined();
   });
 
-  it('adds deterministic occurrence ordinals to identical parallel edges', () => {
-    const duplicate = edges[0];
-    const elements = buildGraphElements(nodes.slice(0, 2), [duplicate, duplicate]);
+  it('caps long rendered labels without losing the full selection label', () => {
+    const longLabel = '1234567890123456789012345678901234567890EXTRA';
+    const element = buildGraphElements(
+      [
+        { key: context, label: 'Billing', parent: null },
+        { key: capability, label: 'Settlement', parent: context },
+        {
+          key: { kind: 'intent', id: 'INT-0042' },
+          label: longLabel,
+          parent: capability,
+        },
+      ],
+      [],
+    ).find((candidate) => candidate.data.id === 'intent:INT-0042');
 
-    expect(elements.slice(2).map((element) => element.data.id)).toEqual([
-      'edge:intent%3AINT-0042:uses:notion%3AInvoice:0',
-      'edge:intent%3AINT-0042:uses:notion%3AInvoice:1',
-    ]);
+    expect(element?.data.rawLabel).toBe(longLabel);
+    expect(element?.data.label).toBe('123456789012345678901234567890123456789…');
   });
 
-  it('preserves every graph relation value', () => {
+  it('preserves the members and count of an aggregated visible edge', () => {
+    const duplicate = { ...semanticEdges[0] };
+    const aggregated: VisibleGraphEdge = {
+      ...edges[0],
+      members: [semanticEdges[0], duplicate],
+    };
+    const edgeElement = buildGraphElements(nodes, [aggregated]).find(
+      (element) => element.group === 'edges',
+    );
+
+    expect(edgeElement?.data).toEqual({
+      id: 'edge:intent%3AINT-0042:uses:notion%3AInvoice',
+      source: 'intent:INT-0042',
+      target: 'notion:Invoice',
+      relation: 'uses',
+      sourceKind: 'intent',
+      sourceId: 'INT-0042',
+      targetKind: 'notion',
+      targetId: 'Invoice',
+      count: 2,
+      displayLabel: 'uses ×2',
+      members: [semanticEdges[0], duplicate],
+    });
+  });
+
+  it('preserves every visible relation value', () => {
     const relationData = buildGraphElements(nodes, edges)
       .filter((element) => element.group === 'edges')
       .map((element) => element.data.relation);
@@ -173,8 +195,6 @@ describe('buildGraphElements', () => {
       'constrains',
       'implements',
       'proves',
-      'refines',
-      'excludes',
     ]);
   });
 });
@@ -184,29 +204,12 @@ describe('dimmedElementIds', () => {
     expect([...dimmedElementIds(buildGraphElements(nodes, edges), 'all')]).toEqual([]);
   });
 
-  it('dims unrelated edges and nodes for a precise relation', () => {
+  it('keeps compound boundaries visible while dimming unrelated ordinary nodes', () => {
     const dimmed = dimmedElementIds(buildGraphElements(nodes, edges), 'proves');
 
-    expect([...dimmed]).toEqual([
-      'notion:Invoice',
-      'intent:INT-0042',
-      'constraint:CON-0011',
-      'code:src/invoice.rs',
-      'edge:intent%3AINT-0042:uses:notion%3AInvoice',
-      'edge:intent%3AINT-0042:requires:notion%3AInvoice',
-      'edge:scenario%3ASCN-0107:verifies:intent%3AINT-0042',
-      'edge:constraint%3ACON-0011:constrains:intent%3AINT-0042',
-      'edge:code%3Asrc%2Finvoice.rs:implements:intent%3AINT-0042',
-      'edge:intent%3AINT-0042:refines:intent%3AINT-0001',
-      'edge:intent%3AINT-0001:excludes:intent%3AINT-0042',
-    ]);
-  });
-
-  it('dims the complete mounted graph when the selected canonical relation has no matches', () => {
-    const elements = buildGraphElements(nodes, edges.slice(1, 2));
-
-    expect([...dimmedElementIds(elements, 'proves')].sort()).toEqual(
-      elements.map((element) => element.data.id as string).sort(),
-    );
+    expect(dimmed.has('context:billing')).toBe(false);
+    expect(dimmed.has('capability:billing/settlement')).toBe(false);
+    expect(dimmed.has('notion:Invoice')).toBe(true);
+    expect(dimmed.has('test:tests/invoice.rs::settles')).toBe(false);
   });
 });

@@ -127,13 +127,21 @@ pub fn floors(model: &TelosModel, open: &[Change], sealed_by: Option<ChangeId>) 
         floor.change = floor.change.max(change.id.0);
         for op in &change.ops {
             match op {
-                StagedOp::AddIntent(intent) | StagedOp::EditIntent(intent) => {
+                StagedOp::AddIntent(intent)
+                | StagedOp::EditIntent(intent)
+                | StagedOp::AddOwnedIntent { intent, .. }
+                | StagedOp::EditOwnedIntent { intent, .. }
+                | StagedOp::MoveIntent { intent, .. } => {
                     floor.intent = floor.intent.max(intent.id.0);
                     for scenario in &intent.scenarios {
                         floor.scenario = floor.scenario.max(scenario.id.0);
                     }
                 }
-                StagedOp::AddConstraint(constraint) | StagedOp::EditConstraint(constraint) => {
+                StagedOp::AddConstraint(constraint)
+                | StagedOp::EditConstraint(constraint)
+                | StagedOp::AddOwnedConstraint { constraint, .. }
+                | StagedOp::EditOwnedConstraint { constraint, .. }
+                | StagedOp::MoveConstraint { constraint, .. } => {
                     floor.constraint = floor.constraint.max(constraint.id.0);
                 }
                 StagedOp::AddNotion(_)
@@ -143,6 +151,7 @@ pub fn floors(model: &TelosModel, open: &[Change], sealed_by: Option<ChangeId>) 
                 | StagedOp::RemoveConstraint(_)
                 | StagedOp::EditConfig(_)
                 | StagedOp::Accept { .. } => {}
+                _ => {}
             }
         }
     }

@@ -14,6 +14,7 @@
 
 const notionCustomer = {
   name: 'Customer',
+  owner: 'billing',
   kind: 'entity',
   definition: 'A person or company that receives invoices.',
   canonical: `notion Customer entity {
@@ -25,6 +26,7 @@ const notionCustomer = {
 
 const notionInvoice = {
   name: 'Invoice',
+  owner: 'billing',
   kind: 'entity',
   definition: 'A bill issued to a Customer for delivered work.',
   canonical: `notion Invoice entity {
@@ -38,6 +40,7 @@ const notionInvoice = {
 
 const notionInvoiceIssued = {
   name: 'InvoiceIssued',
+  owner: 'billing/invoicing',
   kind: 'event',
   definition: 'An invoice was issued to a customer.',
   canonical: `notion InvoiceIssued event {
@@ -48,6 +51,7 @@ const notionInvoiceIssued = {
 
 const notionPaymentReceived = {
   name: 'PaymentReceived',
+  owner: 'billing/settlement',
   kind: 'event',
   definition: 'A payment arrived for an invoice.',
   canonical: `notion PaymentReceived event {
@@ -59,6 +63,7 @@ const notionPaymentReceived = {
 
 const notionBillingClerk = {
   name: 'BillingClerk',
+  owner: 'billing',
   kind: 'actor',
   definition: 'A staff member who manages customer invoices.',
   canonical: `notion BillingClerk actor {
@@ -70,6 +75,7 @@ const notionBillingClerk = {
 
 const notionDueDatePassed = {
   name: 'DueDatePassed',
+  owner: 'billing/collection',
   kind: 'event',
   definition: "An invoice's payment due date passed without full payment.",
   canonical: `notion DueDatePassed event {
@@ -80,6 +86,7 @@ const notionDueDatePassed = {
 
 const notionInvoiceVoided = {
   name: 'InvoiceVoided',
+  owner: 'billing/invoicing',
   kind: 'event',
   definition: 'An invoice was voided by a billing clerk before payment.',
   canonical: `notion InvoiceVoided event {
@@ -90,6 +97,7 @@ const notionInvoiceVoided = {
 
 const notionLateFee = {
   name: 'LateFee',
+  owner: 'billing/collection',
   kind: 'value',
   definition: 'A flat fee charged when an invoice remains unpaid past its due date.',
   canonical: `notion LateFee value {
@@ -101,6 +109,7 @@ const notionLateFee = {
 
 const notionOverdue = {
   name: 'Overdue',
+  owner: 'billing/collection',
   kind: 'state',
   definition: 'An invoice has passed its due date while still unpaid.',
   canonical: `notion Overdue state {
@@ -125,6 +134,7 @@ const notions = [
 
 const constraintCon0003 = {
   id: 'CON-0003',
+  owner: 'billing',
   kind: 'architecture',
   title: 'Hexagonal boundaries',
   scope: 'global',
@@ -137,6 +147,7 @@ const constraintCon0003 = {
 
 const constraintCon0011 = {
   id: 'CON-0011',
+  owner: 'billing',
   kind: 'quality',
   title: 'No unchecked unwraps in billing handlers',
   scope: 'INT-0042, INT-0053',
@@ -149,6 +160,7 @@ const constraintCon0011 = {
 
 const constraintCon0019 = {
   id: 'CON-0019',
+  owner: 'project',
   kind: 'stack',
   title: 'Money stays fixed-point',
   scope: 'global',
@@ -241,6 +253,7 @@ const scenarios = [scn0034, scn0091, scn0107, scn0108, scn0142, scn0143, scn0158
 const intents = [
   {
     id: 'INT-0005',
+    owner: 'billing/invoicing',
     title: 'Legacy invoice numbering scheme',
     status: 'deprecated',
     telos: 'Invoice numbers must stay globally unique.',
@@ -265,6 +278,7 @@ const intents = [
   },
   {
     id: 'INT-0017',
+    owner: 'billing/invoicing',
     title: 'Issuing an invoice opens it',
     status: 'draft',
     telos: 'An invoice must start its life open and unpaid.',
@@ -290,6 +304,7 @@ const intents = [
   },
   {
     id: 'INT-0042',
+    owner: 'billing/settlement',
     title: 'Invoice payment marks it settled',
     status: 'active',
     telos: 'Customers must see immediately that their debt is cleared.',
@@ -322,6 +337,7 @@ const intents = [
   },
   {
     id: 'INT-0053',
+    owner: 'billing/collection',
     title: 'Overdue invoices accrue a late fee',
     status: 'active',
     telos: 'Customers must be discouraged from letting invoices go unpaid.',
@@ -353,6 +369,7 @@ const intents = [
   },
   {
     id: 'INT-0061',
+    owner: 'billing/invoicing',
     title: 'Billing clerks can void an unpaid invoice',
     status: 'active',
     telos: 'Clerks must be able to correct a wrongly issued invoice before it is paid.',
@@ -379,6 +396,7 @@ const intents = [
   },
   {
     id: 'INT-0074',
+    owner: 'billing/settlement',
     title: 'Partial payments reduce the invoice balance',
     status: 'draft',
     telos: 'Customers must see their remaining balance update after every partial payment.',
@@ -417,41 +435,48 @@ const proofs = [
   { test: 'tests/billing.rs::scn_0158_a_clerk_voids_an_open_invoice', scenario: 'SCN-0158' },
 ];
 
-// --- graph (nodes sorted notion < intent < scenario < constraint < code < test,
-// edges sorted by (from, relation, to) — the same order ViewSnapshot::build
-// produces via its BTreeSet collections) ------------------------------------
+// --- graph -----------------------------------------------------------------
+
+function ownerParent(owner) {
+  if (owner === 'project') return null;
+  return owner.includes('/')
+    ? { kind: 'capability', id: owner }
+    : { kind: 'context', id: owner };
+}
+
+const intentOwners = new Map(intents.map((intent) => [intent.id, intent.owner]));
 
 const nodes = [
-  { key: { kind: 'notion', id: 'BillingClerk' }, label: notionBillingClerk.definition },
-  { key: { kind: 'notion', id: 'Customer' }, label: notionCustomer.definition },
-  { key: { kind: 'notion', id: 'DueDatePassed' }, label: notionDueDatePassed.definition },
-  { key: { kind: 'notion', id: 'Invoice' }, label: notionInvoice.definition },
-  { key: { kind: 'notion', id: 'InvoiceIssued' }, label: notionInvoiceIssued.definition },
-  { key: { kind: 'notion', id: 'InvoiceVoided' }, label: notionInvoiceVoided.definition },
-  { key: { kind: 'notion', id: 'LateFee' }, label: notionLateFee.definition },
-  { key: { kind: 'notion', id: 'Overdue' }, label: notionOverdue.definition },
-  { key: { kind: 'notion', id: 'PaymentReceived' }, label: notionPaymentReceived.definition },
-  { key: { kind: 'intent', id: 'INT-0005' }, label: 'Legacy invoice numbering scheme' },
-  { key: { kind: 'intent', id: 'INT-0017' }, label: 'Issuing an invoice opens it' },
-  { key: { kind: 'intent', id: 'INT-0042' }, label: 'Invoice payment marks it settled' },
-  { key: { kind: 'intent', id: 'INT-0053' }, label: 'Overdue invoices accrue a late fee' },
-  { key: { kind: 'intent', id: 'INT-0061' }, label: 'Billing clerks can void an unpaid invoice' },
-  { key: { kind: 'intent', id: 'INT-0074' }, label: 'Partial payments reduce the invoice balance' },
-  { key: { kind: 'scenario', id: 'SCN-0034' }, label: scn0034.title },
-  { key: { kind: 'scenario', id: 'SCN-0091' }, label: scn0091.title },
-  { key: { kind: 'scenario', id: 'SCN-0107' }, label: scn0107.title },
-  { key: { kind: 'scenario', id: 'SCN-0108' }, label: scn0108.title },
-  { key: { kind: 'scenario', id: 'SCN-0142' }, label: scn0142.title },
-  { key: { kind: 'scenario', id: 'SCN-0143' }, label: scn0143.title },
-  { key: { kind: 'scenario', id: 'SCN-0158' }, label: scn0158.title },
-  { key: { kind: 'scenario', id: 'SCN-0166' }, label: scn0166.title },
-  { key: { kind: 'constraint', id: 'CON-0003' }, label: constraintCon0003.title },
-  { key: { kind: 'constraint', id: 'CON-0011' }, label: constraintCon0011.title },
-  { key: { kind: 'constraint', id: 'CON-0019' }, label: constraintCon0019.title },
-  { key: { kind: 'code', id: 'src/billing/clerk.rs' }, label: 'src/billing/clerk.rs' },
-  { key: { kind: 'code', id: 'src/billing/invoice.rs' }, label: 'src/billing/invoice.rs' },
-  { key: { kind: 'test', id: 'tests/billing.rs::scn_0107_full_payment_settles_the_invoice' }, label: 'tests/billing.rs::scn_0107_full_payment_settles_the_invoice' },
-  { key: { kind: 'test', id: 'tests/billing.rs::scn_0158_a_clerk_voids_an_open_invoice' }, label: 'tests/billing.rs::scn_0158_a_clerk_voids_an_open_invoice' },
+  { key: { kind: 'context', id: 'billing' }, label: 'Billing', parent: null },
+  { key: { kind: 'capability', id: 'billing/invoicing' }, label: 'Invoicing', parent: { kind: 'context', id: 'billing' } },
+  { key: { kind: 'capability', id: 'billing/collection' }, label: 'Collection', parent: { kind: 'context', id: 'billing' } },
+  { key: { kind: 'capability', id: 'billing/settlement' }, label: 'Settlement', parent: { kind: 'context', id: 'billing' } },
+  { key: { kind: 'notion', id: 'BillingClerk' }, label: notionBillingClerk.definition, parent: ownerParent(notionBillingClerk.owner) },
+  { key: { kind: 'notion', id: 'Customer' }, label: notionCustomer.definition, parent: ownerParent(notionCustomer.owner) },
+  { key: { kind: 'notion', id: 'DueDatePassed' }, label: notionDueDatePassed.definition, parent: ownerParent(notionDueDatePassed.owner) },
+  { key: { kind: 'notion', id: 'Invoice' }, label: notionInvoice.definition, parent: ownerParent(notionInvoice.owner) },
+  { key: { kind: 'notion', id: 'InvoiceIssued' }, label: notionInvoiceIssued.definition, parent: ownerParent(notionInvoiceIssued.owner) },
+  { key: { kind: 'notion', id: 'InvoiceVoided' }, label: notionInvoiceVoided.definition, parent: ownerParent(notionInvoiceVoided.owner) },
+  { key: { kind: 'notion', id: 'LateFee' }, label: notionLateFee.definition, parent: ownerParent(notionLateFee.owner) },
+  { key: { kind: 'notion', id: 'Overdue' }, label: notionOverdue.definition, parent: ownerParent(notionOverdue.owner) },
+  { key: { kind: 'notion', id: 'PaymentReceived' }, label: notionPaymentReceived.definition, parent: ownerParent(notionPaymentReceived.owner) },
+  ...intents.map((intent) => ({
+    key: { kind: 'intent', id: intent.id },
+    label: intent.title,
+    parent: ownerParent(intent.owner),
+  })),
+  ...scenarios.map((scenario) => ({
+    key: { kind: 'scenario', id: scenario.id },
+    label: scenario.title,
+    parent: ownerParent(intentOwners.get(scenario.intent)),
+  })),
+  { key: { kind: 'constraint', id: 'CON-0003' }, label: constraintCon0003.title, parent: ownerParent(constraintCon0003.owner) },
+  { key: { kind: 'constraint', id: 'CON-0011' }, label: constraintCon0011.title, parent: ownerParent(constraintCon0011.owner) },
+  { key: { kind: 'constraint', id: 'CON-0019' }, label: constraintCon0019.title, parent: ownerParent(constraintCon0019.owner) },
+  { key: { kind: 'code', id: 'src/billing/clerk.rs' }, label: 'src/billing/clerk.rs', parent: null },
+  { key: { kind: 'code', id: 'src/billing/invoice.rs' }, label: 'src/billing/invoice.rs', parent: null },
+  { key: { kind: 'test', id: 'tests/billing.rs::scn_0107_full_payment_settles_the_invoice' }, label: 'tests/billing.rs::scn_0107_full_payment_settles_the_invoice', parent: null },
+  { key: { kind: 'test', id: 'tests/billing.rs::scn_0158_a_clerk_voids_an_open_invoice' }, label: 'tests/billing.rs::scn_0158_a_clerk_voids_an_open_invoice', parent: null },
 ];
 
 function edge(fromKind, fromId, relation, toKind, toId) {
@@ -529,6 +554,27 @@ const coverage = {
   ),
 };
 
+const contexts = [
+  {
+    id: 'billing',
+    kind: 'core',
+    title: 'Billing',
+    definition: 'Owns invoice issuance, collection and settlement rules.',
+    capabilities: [
+      { id: 'billing/invoicing', title: 'Invoicing', definition: 'Issues and corrects invoices.' },
+      { id: 'billing/collection', title: 'Collection', definition: 'Handles overdue debt.' },
+      { id: 'billing/settlement', title: 'Settlement', definition: 'Applies incoming payments.' },
+    ],
+    dependencies: [],
+    health: {
+      intents: intents.length,
+      active_intents: intents.filter((intent) => intent.status === 'active').length,
+      scenarios: scenarios.length,
+      proved_scenarios: scenarios.filter((scenario) => scenario.proves.length > 0).length,
+    },
+  },
+];
+
 // --- dashboard --------------------------------------------------------------
 
 const dashboard = {
@@ -547,13 +593,14 @@ const dashboard = {
 
 window.__TELOS_DATA__ = {
   meta: {
-    version: '0.8.2',
+    version: '0.9.0',
     build_date: '2026-08-21',
     mode: 'live',
   },
   snapshot: {
     dashboard,
     coverage,
+    contexts,
     notions,
     intents,
     scenarios,

@@ -76,7 +76,7 @@ const DRAFTED_ONE_ADD: &str = concat!(
     "change CHG-0002 \"Introduce the ledger\" {\n",
     "  status drafted\n",
     "\n",
-    "  op add notion Ledger entity {\n",
+    "  op add notion billing/Ledger entity {\n",
     "    def  \"A record of every posting.\"\n",
     "    attr balance money\n",
     "  }\n",
@@ -91,13 +91,13 @@ const APPROVED_MULTI: &str = concat!(
     "  status approved\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
-    "  op edit notion Invoice entity {\n",
+    "  op edit notion billing/Invoice entity {\n",
     "    def  \"A bill issued to a Customer.\"\n",
     "    attr state enum(open, settled)\n",
     "    rel  issued-to -> Customer\n",
     "  }\n",
     "\n",
-    "  op add intent INT-0042 \"Payment settles the invoice\" {\n",
+    "  op add intent INT-0042 in billing/settlement \"Payment settles the invoice\" {\n",
     "    status active\n",
     "    telos  \"Customers must see their debt cleared.\"\n",
     "    statement event-driven {\n",
@@ -112,9 +112,8 @@ const APPROVED_MULTI: &str = concat!(
     "    }\n",
     "  }\n",
     "\n",
-    "  op add constraint CON-0009 quality \"Balances stay positive\" {\n",
+    "  op add constraint CON-0009 in capability billing/settlement quality \"Balances stay positive\" {\n",
     "    rule  Invoice.balance >= 0\n",
-    "    scope INT-0042\n",
     "    check \"git --version\"\n",
     "  }\n",
     "}\n",
@@ -125,11 +124,11 @@ const REMOVE_AND_ACCEPT: &str = concat!(
     "change CHG-0004 \"Retire the legacy pieces\" {\n",
     "  status drafted\n",
     "\n",
-    "  op remove notion Ledger\n",
+    "  op remove notion billing/Ledger\n",
     "\n",
-    "  op remove intent INT-0017\n",
+    "  op remove intent INT-0017 from billing/invoicing\n",
     "\n",
-    "  op remove constraint CON-0003\n",
+    "  op remove constraint CON-0003 from billing\n",
     "\n",
     "  op accept \"telos/telos.toml\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
     "}\n",
@@ -144,7 +143,7 @@ const IMPLEMENTING_WITH_DIGEST: &str = concat!(
     "  status implementing\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
-    "  op remove notion Ledger\n",
+    "  op remove notion billing/Ledger\n",
     "}\n",
 );
 
@@ -155,7 +154,7 @@ const IMPLEMENTING_RUNS_ONLY: &str = concat!(
     "  status implementing\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
-    "  op remove notion Ledger\n",
+    "  op remove notion billing/Ledger\n",
     "\n",
     "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
     "  run  SCN-0107 green \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
@@ -169,7 +168,7 @@ const IMPLEMENTING_RUNS_AND_BINDS: &str = concat!(
     "  status implementing\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
-    "  op remove notion Ledger\n",
+    "  op remove notion billing/Ledger\n",
     "\n",
     "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
     "  bind \"src/billing.rs\" -> INT-0042\n",
@@ -242,7 +241,7 @@ fn ops_keep_their_staged_order() {
     assert_eq!(
         shape,
         vec![
-            ("remove", "notion", "Ledger".to_string()),
+            ("remove", "notion", "billing/Ledger".to_string()),
             ("remove", "intent", "INT-0017".to_string()),
             ("remove", "constraint", "CON-0003".to_string()),
             ("accept", "file", "telos/telos.toml".to_string()),
@@ -259,18 +258,18 @@ fn ops_keep_their_staged_order() {
 fn add_and_edit_carry_the_whole_nested_entity() {
     let ops = parse_ok(APPROVED_MULTI).ops;
     assert_eq!(ops.len(), 3);
-    let StagedOp::EditNotion(notion) = &ops[0] else {
+    let StagedOp::EditOwnedNotion { notion, .. } = &ops[0] else {
         panic!("the first op edits a notion");
     };
     assert_eq!(notion.name.as_str(), "Invoice");
     assert_eq!(notion.attrs.len(), 1);
     assert_eq!(notion.rels.len(), 1);
-    let StagedOp::AddIntent(intent) = &ops[1] else {
+    let StagedOp::AddOwnedIntent { intent, .. } = &ops[1] else {
         panic!("the second op adds an intent");
     };
     assert_eq!(intent.title, "Payment settles the invoice");
     assert_eq!(intent.scenarios.len(), 1);
-    let StagedOp::AddConstraint(constraint) = &ops[2] else {
+    let StagedOp::AddOwnedConstraint { constraint, .. } = &ops[2] else {
         panic!("the third op adds a constraint");
     };
     assert_eq!(constraint.check.as_deref(), Some("git --version"));
@@ -360,10 +359,13 @@ fn a_remove_op_naming_the_wrong_kind_of_id_says_which_one_it_wanted() {
     let cases = [
         ("op remove intent CON-0003", "expected an intent id"),
         ("op remove constraint INT-0017", "expected a constraint id"),
-        ("op remove notion INT-0017", "expected a notion name"),
+        (
+            "op remove notion billing/INT-0017",
+            "expected a capability id",
+        ),
         (
             "op remove ledger Ledger",
-            "expected `notion`, `intent` or `constraint`",
+            "expected `context`, `capability`, `notion`, `intent` or `constraint`",
         ),
     ];
     for (op, expected) in cases {
@@ -383,7 +385,7 @@ fn an_unknown_verb_names_the_four_ops() {
     );
     assert_reports(
         &parse_err(src),
-        "expected `add`, `edit`, `remove` or `accept`",
+        "expected `add`, `edit`, `remove`, `move` or `accept`",
     );
 }
 
@@ -436,7 +438,7 @@ fn a_journalled_change_claims_its_test_files_and_bound_paths() {
     // in progress, admissible to *its* reconcile -- so it is claimed.
     let claims = parse_ok(IMPLEMENTING_RUNS_AND_BINDS).claims();
     for path in [
-        "telos/notions/Ledger.tel",
+        "telos/contexts/billing/notions/Ledger.tel",
         "tests/billing.rs",
         "src/billing.rs",
         "src/ledger.rs",
@@ -451,16 +453,16 @@ fn a_journalled_change_claims_its_test_files_and_bound_paths() {
 /// change file that tries does not parse.
 ///
 /// Asserting that some well-behaved fixture's `claims()` happens to exclude
-/// `telos/bindings.tel` would have proved nothing: a change file is a text
+/// `telos/contexts/billing/bindings.tel` would have proved nothing: a change file is a text
 /// file, `claims()` returns what the journal holds, and reconcile's drift
 /// gate admits any path the change claims. This is the test that closes
 /// that door.
 #[test]
 fn a_journal_line_naming_the_spec_tree_does_not_parse() {
     for line in [
-        "  bind \"telos/bindings.tel\" -> INT-0042",
-        "  run  SCN-0107 green \"telos/bindings.tel\" \"e69de29\"",
-        "  run  SCN-0107 red \"telos/intents/INT-0042.tel::scn_0107\" \"e69de29\"",
+        "  bind \"telos/contexts/billing/bindings.tel\" -> INT-0042",
+        "  run  SCN-0107 green \"telos/contexts/billing/bindings.tel\" \"e69de29\"",
+        "  run  SCN-0107 red \"telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel::scn_0107\" \"e69de29\"",
     ] {
         let src = format!(
             "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
@@ -543,7 +545,7 @@ fn an_op_may_not_follow_a_journal_line() {
         "\n",
         "  bind \"src/billing.rs\" -> INT-0042\n",
         "\n",
-        "  op remove notion Ledger\n",
+        "  op remove notion billing/Ledger\n",
         "}\n",
     );
     assert_reports(&parse_err(src), "expected `run`, `bind` or `}`, found `op`");
@@ -559,7 +561,7 @@ fn a_broken_nested_block_does_not_swallow_the_ops_that_follow() {
         "change CHG-0001 \"x\" {\n",
         "  status drafted\n",
         "\n",
-        "  op add notion Ledger entity {\n",
+        "  op add notion billing/Ledger entity {\n",
         "    def  \"A record.\"\n",
         "    attr balance wobbly\n",
         "  }\n",
@@ -571,4 +573,18 @@ fn a_broken_nested_block_does_not_swallow_the_ops_that_follow() {
     assert_reports(&diags, "expected an attribute type");
     assert_reports(&diags, "expected the blob oid string after the path");
     assert_eq!(diags.len(), 2, "{diags:#?}");
+}
+
+#[test]
+fn a_change_rejects_legacy_entity_declarations_without_an_owner() {
+    for declaration in [
+        "notion Ledger entity {\n    def  \"A record.\"\n  }",
+        "intent INT-0042 \"Legacy intent\" {\n    status draft\n    telos  \"No owner.\"\n    statement ubiquitous {\n      system shall \"record it\"\n    }\n  }",
+        "constraint CON-0009 quality \"Legacy constraint\" {\n    rule  \"No owner.\"\n    scope global\n  }",
+    ] {
+        let src = format!(
+            "change CHG-0001 \"Legacy declaration\" {{\n  status drafted\n\n  op add {declaration}\n}}\n"
+        );
+        assert_reports(&parse_err(&src), "owner");
+    }
 }

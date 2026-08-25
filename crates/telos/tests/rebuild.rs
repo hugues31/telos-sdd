@@ -45,19 +45,19 @@ fn write_runner_config(root: &Path, command: &str) {
     .unwrap();
 }
 
-fn context(dir: &Path, id: &str) -> Value {
-    let (ok, envelope) = run(dir, &["context", id, "--json"]);
-    assert!(ok, "context failed: {envelope:#}");
+fn pack(dir: &Path, id: &str) -> Value {
+    let (ok, envelope) = run(dir, &["pack", id, "--json"]);
+    assert!(ok, "pack failed: {envelope:#}");
     envelope["result"].clone()
 }
 
-fn assert_plan_contexts_equal_public_context(dir: &Path, plan: &Value) {
+fn assert_plan_packs_equal_public_pack(dir: &Path, plan: &Value) {
     for step in plan["result"]["steps"].as_array().unwrap() {
         let intent = step["intent"].as_str().unwrap();
         assert_eq!(
-            step["context"],
-            context(dir, intent),
-            "plan context for {intent} diverged from public context"
+            step["pack"],
+            pack(dir, intent),
+            "plan pack for {intent} diverged from public pack"
         );
     }
 }
@@ -75,58 +75,56 @@ fn billing_plan_has_exact_metadata_and_the_full_frozen_context_results() {
     assert_eq!(steps[1]["n"], json!(2));
     assert_eq!(steps[1]["intent"], json!("INT-0042"));
     assert_eq!(steps[1]["requires"], json!(["INT-0017"]));
-    assert_eq!(steps[0]["context"], context(tmp.path(), "INT-0017"));
-    assert_eq!(steps[1]["context"], context(tmp.path(), "INT-0042"));
+    assert_eq!(steps[0]["pack"], pack(tmp.path(), "INT-0017"));
+    assert_eq!(steps[1]["pack"], pack(tmp.path(), "INT-0042"));
 
-    assert_eq!(steps[0]["context"]["id"], json!("INT-0017"));
-    assert_eq!(steps[0]["context"]["change"], Value::Null);
-    assert_eq!(steps[0]["context"]["scenarios"][0]["id"], json!("SCN-0091"));
+    assert_eq!(steps[0]["pack"]["id"], json!("INT-0017"));
+    assert_eq!(steps[0]["pack"]["change"], Value::Null);
+    assert_eq!(steps[0]["pack"]["scenarios"][0]["id"], json!("SCN-0091"));
     assert_eq!(
-        steps[0]["context"]["notions"]
+        steps[0]["pack"]["notions"]
             .as_array()
             .unwrap()
             .iter()
             .map(|entry| entry["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["Customer", "Invoice", "InvoiceIssued"]
+        [
+            "billing/Customer",
+            "billing/Invoice",
+            "billing/InvoiceIssued"
+        ]
     );
+    assert_eq!(steps[0]["pack"]["constraints"][0]["id"], json!("CON-0003"));
     assert_eq!(
-        steps[0]["context"]["constraints"][0]["id"],
-        json!("CON-0003")
-    );
-    assert_eq!(
-        steps[0]["context"]["bindings"],
+        steps[0]["pack"]["bindings"],
         json!({
             "implements": [],
             "proves": [{"scenario": "SCN-0091", "test": "tests/billing.rs"}]
         })
     );
-    assert_eq!(steps[0]["context"]["neighbors"][0]["id"], json!("INT-0042"));
+    assert_eq!(steps[0]["pack"]["neighbors"][0]["id"], json!("INT-0042"));
 
-    assert_eq!(steps[1]["context"]["id"], json!("INT-0042"));
-    assert_eq!(steps[1]["context"]["change"], Value::Null);
-    assert_eq!(steps[1]["context"]["scenarios"][0]["id"], json!("SCN-0107"));
+    assert_eq!(steps[1]["pack"]["id"], json!("INT-0042"));
+    assert_eq!(steps[1]["pack"]["change"], Value::Null);
+    assert_eq!(steps[1]["pack"]["scenarios"][0]["id"], json!("SCN-0107"));
     assert_eq!(
-        steps[1]["context"]["notions"]
+        steps[1]["pack"]["notions"]
             .as_array()
             .unwrap()
             .iter()
             .map(|entry| entry["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["Invoice", "PaymentReceived"]
+        ["billing/Invoice", "billing/PaymentReceived"]
     );
+    assert_eq!(steps[1]["pack"]["constraints"][0]["id"], json!("CON-0003"));
     assert_eq!(
-        steps[1]["context"]["constraints"][0]["id"],
-        json!("CON-0003")
-    );
-    assert_eq!(
-        steps[1]["context"]["bindings"],
+        steps[1]["pack"]["bindings"],
         json!({
             "implements": ["src/billing/invoice.rs"],
             "proves": [{"scenario": "SCN-0107", "test": FULL_PAYMENT_TEST}],
         })
     );
-    assert_eq!(steps[1]["context"]["neighbors"][0]["id"], json!("INT-0017"));
+    assert_eq!(steps[1]["pack"]["neighbors"][0]["id"], json!("INT-0017"));
 
     let out = telos(tmp.path(), &["rebuild", "plan"]).output().unwrap();
     assert!(out.status.success());
@@ -145,7 +143,7 @@ fn progress_fixture() -> tempfile::TempDir {
     )
     .unwrap();
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         format!(
             "proves     \"tests/billing.rs::scn_0091\" -> SCN-0091\n\
              proves     \"{FULL_PAYMENT_TEST}\" -> SCN-0107\n"
@@ -206,7 +204,7 @@ fn multiple_proofs_are_sorted_deduplicated_and_conjunctive() {
     fs::write(tmp.path().join("tests/proof_a.rs"), "fn scn_0091_a() {}\n").unwrap();
     fs::write(tmp.path().join("tests/proof_b.rs"), "fn scn_0091_b() {}\n").unwrap();
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         "proves \"tests/proof_b.rs::scn_0091_b\" -> SCN-0091\n\
          proves \"tests/proof_a.rs::scn_0091_a\" -> SCN-0091\n\
          proves \"tests/proof_a.rs::scn_0091_a\" -> SCN-0091\n",
@@ -239,7 +237,7 @@ fn one_proof_shared_by_two_scenarios_runs_once_and_projects_one_outcome() {
     );
     fs::write(tmp.path().join("tests/shared.rs"), "whole-file proof\n").unwrap();
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         "proves \"tests/shared.rs\" -> SCN-0091\n\
          proves \"tests/shared.rs\" -> SCN-0107\n",
     )
@@ -270,7 +268,7 @@ fn a_stale_bound_name_is_red_even_when_the_runner_would_exit_zero() {
     )
     .unwrap();
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         "proves \"tests/billing.rs::scn_0091_stale_name\" -> SCN-0091\n",
     )
     .unwrap();
@@ -298,7 +296,7 @@ fn proof_targets_sort_structurally_by_path_then_optional_name() {
     fs::write(tmp.path().join("tests/a"), "fn scn_0091_z() {}\n").unwrap();
     fs::write(tmp.path().join("tests/a-"), "whole-file proof\n").unwrap();
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         "proves \"tests/a-\" -> SCN-0091\n\
          proves \"tests/a::scn_0091_z\" -> SCN-0091\n",
     )
@@ -320,7 +318,7 @@ fn leading_runner_whitespace_is_preserved_in_the_displayed_command() {
     fs::write(tmp.path().join(".green-scn_0091"), "green\n").unwrap();
     fs::write(tmp.path().join("tests/billing.rs"), "fn scn_0091() {}\n").unwrap();
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         "proves \"tests/billing.rs::scn_0091\" -> SCN-0091\n",
     )
     .unwrap();
@@ -352,7 +350,7 @@ fn a_legitimate_path_with_spaces_and_shell_metacharacters_is_one_safe_filter_arg
     write_runner_config(tmp.path(), runner);
     fs::write(tmp.path().join(test_path), "whole-file proof\n").unwrap();
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         format!("proves \"{test_path}\" -> SCN-0091\n"),
     )
     .unwrap();
@@ -385,7 +383,11 @@ fn unsafe_or_escaping_proof_paths_are_rejected_and_never_run() {
             .unwrap();
         bindings.push_str("proves \"tests/telos-link\" -> SCN-0091\n");
     }
-    fs::write(tmp.path().join("telos/bindings.tel"), bindings).unwrap();
+    fs::write(
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
+        bindings,
+    )
+    .unwrap();
 
     let (ok, envelope) = run(tmp.path(), &["rebuild", "status", "--json"]);
 
@@ -405,7 +407,7 @@ fn absent_proofs_and_missing_test_files_are_red_rows_not_command_errors() {
     let tmp = unsealed_fixture();
     write_runner_config(tmp.path(), "git hash-object .green-{filter}");
     fs::write(
-        tmp.path().join("telos/bindings.tel"),
+        tmp.path().join("telos/contexts/billing/bindings.tel"),
         "proves \"tests/missing.rs::scn_0107\" -> SCN-0107\n",
     )
     .unwrap();
@@ -450,6 +452,7 @@ fn stage_draft(dir: &Path, motivation: &str) -> (String, String) {
     let out = telos(dir, &["add", "intent", "--change", &change, "--json"])
         .write_stdin(
             json!({
+                "owner": "billing/settlement",
                 "title": format!("Draft for {motivation}"),
                 "status": "draft",
                 "telos": format!("Purpose for {motivation}"),
@@ -485,6 +488,7 @@ fn changing_plan_and_status_include_an_added_intent_and_its_green_journal_proof(
     )
     .write_stdin(
         json!({
+            "owner": "billing/settlement",
             "title": "Refunds can reopen invoices",
             "status": "active",
             "telos": "Refunded invoices need renewed settlement.",
@@ -520,14 +524,14 @@ fn changing_plan_and_status_include_an_added_intent_and_its_green_journal_proof(
     assert_eq!(witnessed["result"]["witness"], json!("green"));
 
     let plan = success(tmp.path(), &["rebuild", "plan", "--json"]);
-    assert_plan_contexts_equal_public_context(tmp.path(), &plan);
+    assert_plan_packs_equal_public_pack(tmp.path(), &plan);
     let added_step = &plan["result"]["steps"][2];
     assert_eq!(added_step["intent"], json!("INT-0043"));
     assert_eq!(added_step["requires"], json!(["INT-0042"]));
-    assert_eq!(added_step["context"]["change"], json!("CHG-0001"));
-    assert_eq!(added_step["context"]["scenarios"][0]["proved"], json!(true));
+    assert_eq!(added_step["pack"]["change"], json!("CHG-0001"));
+    assert_eq!(added_step["pack"]["scenarios"][0]["proved"], json!(true));
     assert_eq!(
-        added_step["context"]["bindings"]["proves"],
+        added_step["pack"]["bindings"]["proves"],
         json!([{
             "scenario":"SCN-0108",
             "test":"tests/billing.rs::scn_0108_rebuild_refund"
@@ -622,9 +626,9 @@ fn changing_plan_folds_all_changes_in_id_order_and_marks_each_intents_owner() {
             second_intent.as_str()
         ]
     );
-    assert_eq!(steps[2]["context"]["change"], json!(first_change));
-    assert_eq!(steps[3]["context"]["change"], json!(second_change));
-    assert_plan_contexts_equal_public_context(tmp.path(), &envelope);
+    assert_eq!(steps[2]["pack"]["change"], json!(first_change));
+    assert_eq!(steps[3]["pack"]["change"], json!(second_change));
+    assert_plan_packs_equal_public_pack(tmp.path(), &envelope);
 }
 
 fn stage_title_edit(dir: &Path, intent: &str, title: &str, motivation: &str) -> String {
@@ -660,13 +664,13 @@ fn multi_change_plan_uses_each_public_owner_overlay_pack() {
 
     let plan = success(tmp.path(), &["rebuild", "plan", "--json"]);
 
-    assert_plan_contexts_equal_public_context(tmp.path(), &plan);
+    assert_plan_packs_equal_public_pack(tmp.path(), &plan);
     assert_eq!(
-        plan["result"]["steps"][0]["context"]["change"],
+        plan["result"]["steps"][0]["pack"]["change"],
         json!("CHG-0001")
     );
     assert_eq!(
-        plan["result"]["steps"][1]["context"]["change"],
+        plan["result"]["steps"][1]["pack"]["change"],
         json!("CHG-0002")
     );
 }
@@ -742,7 +746,7 @@ fn conflicting_changes_fail_with_the_first_deterministic_integrity_error() {
     assert_eq!(
         envelope["error"]["message"],
         json!(format!(
-            "telos/intents/{first_intent}.tel is claimed by both CHG-0001 and CHG-0002"
+            "telos/contexts/billing/capabilities/settlement/intents/{first_intent}.tel is claimed by both CHG-0001 and CHG-0002"
         ))
     );
 }
@@ -751,7 +755,10 @@ fn conflicting_changes_fail_with_the_first_deterministic_integrity_error() {
 fn sealed_source_and_spec_drift_refuse_both_rebuild_subcommands() {
     for (path, suffix) in [
         ("src/billing/invoice.rs", "\n// drift\n"),
-        ("telos/intents/INT-0042.tel", "\n"),
+        (
+            "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+            "\n",
+        ),
     ] {
         for subcommand in ["plan", "status"] {
             let tmp = with_fixture();

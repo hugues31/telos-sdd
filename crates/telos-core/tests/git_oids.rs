@@ -217,7 +217,7 @@ fn discover_reports_telos_git_error_outside_a_repository() {
 fn sample_lock() -> Lock {
     let mut spec = BTreeMap::new();
     spec.insert(
-        RepoPath::new("telos/notions/Invoice.tel"),
+        RepoPath::new("telos/contexts/billing/notions/Invoice.tel"),
         Oid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
     );
     spec.insert(
@@ -232,8 +232,8 @@ fn sample_lock() -> Lock {
     );
 
     Lock {
-        version: 1,
-        tool: "telos 0.7.0".to_string(),
+        version: 2,
+        tool: "telos 0.9.0".to_string(),
         sealed_by: Some(ChangeId(7)),
         spec_digest: Lock::compute_digest(&spec),
         spec,
@@ -339,7 +339,7 @@ fn lock_write_quotes_paths_as_toml_keys() {
 
     assert!(
         text.contains(
-            "\"telos/notions/Invoice.tel\" = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+            "\"telos/contexts/billing/notions/Invoice.tel\" = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
         ),
         "got:\n{text}"
     );
@@ -379,8 +379,8 @@ fn lock_read_tolerates_reformatted_toml() {
         &path,
         r#"
             spec_digest = "sha256:deadbeef"
-            version     = 1
-            tool = "telos 0.7.0"
+            version     = 2
+            tool = "telos 0.9.0"
 
             [code]
             "src/billing/invoice.rs" = "cccccccccccccccccccccccccccccccccccccccc"
@@ -393,8 +393,8 @@ fn lock_read_tolerates_reformatted_toml() {
 
     let lock = Lock::read(&path).unwrap().unwrap();
 
-    assert_eq!(lock.version, 1);
-    assert_eq!(lock.tool, "telos 0.7.0");
+    assert_eq!(lock.version, 2);
+    assert_eq!(lock.tool, "telos 0.9.0");
     assert_eq!(lock.sealed_by, None);
     assert_eq!(lock.spec_digest, "sha256:deadbeef");
     assert_eq!(
@@ -409,7 +409,7 @@ fn lock_read_tolerates_reformatted_toml() {
 fn compute_digest_is_stable_under_insertion_order_permutation() {
     let mut a: BTreeMap<RepoPath, Oid> = BTreeMap::new();
     a.insert(
-        RepoPath::new("telos/notions/Invoice.tel"),
+        RepoPath::new("telos/contexts/billing/notions/Invoice.tel"),
         Oid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
     );
     a.insert(
@@ -423,7 +423,7 @@ fn compute_digest_is_stable_under_insertion_order_permutation() {
         Oid("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
     );
     b.insert(
-        RepoPath::new("telos/notions/Invoice.tel"),
+        RepoPath::new("telos/contexts/billing/notions/Invoice.tel"),
         Oid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
     );
 

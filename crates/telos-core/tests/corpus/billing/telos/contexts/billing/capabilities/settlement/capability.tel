@@ -1,0 +1,3 @@
+capability billing/settlement "Settlement" {
+  def "Records payments and settles invoices."
+}

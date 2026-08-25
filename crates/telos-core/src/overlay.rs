@@ -69,7 +69,8 @@ use std::collections::BTreeMap;
 use crate::config::Config;
 use crate::emit::{emit_constraint, emit_intent, emit_notion};
 use crate::error::{Diagnostic, ErrorCode, TelosError};
-use crate::ids::{NotionName, RepoPath};
+use crate::ids::{ContextId, IntentId, NotionName, RepoPath, ScenarioId};
+use crate::model::change::context_bindings_path;
 use crate::model::{Binding, Change, Notion, Rule, Scope, StagedOp, TelFile, TelosModel};
 use crate::semantic::{build_model, expr_notions, scenario_notions, statement_notions};
 use crate::suggest::closest;
@@ -107,7 +108,9 @@ pub fn apply_config_ops(base: &Config, ops: &[StagedOp]) -> Config {
 pub fn notions_of(base: &[(RepoPath, TelFile)]) -> BTreeMap<NotionName, Notion> {
     base.iter()
         .filter_map(|(_, file)| match file {
-            TelFile::Notion(notion) => Some((notion.name.clone(), notion.clone())),
+            TelFile::Notion(notion) | TelFile::OwnedNotion { notion, .. } => {
+                Some((notion.name.clone(), notion.clone()))
+            }
             _ => None,
         })
         .collect()
@@ -129,9 +132,18 @@ pub fn unknown_entity(base: &[(RepoPath, TelFile)], entity: &str, key: &str) -> 
     let known: Vec<String> = base
         .iter()
         .filter_map(|(_, file)| match (entity, file) {
+            ("context", TelFile::Context(context)) => Some(context.id.to_string()),
+            ("capability", TelFile::Capability(capability)) => Some(capability.id.to_string()),
             ("notion", TelFile::Notion(n)) => Some(n.name.to_string()),
+            ("notion", TelFile::OwnedNotion { owner, notion }) => {
+                Some(format!("{}/{}", owner.context, notion.name))
+            }
             ("intent", TelFile::Intent(i)) => Some(i.id.to_string()),
+            ("intent", TelFile::OwnedIntent { intent, .. }) => Some(intent.id.to_string()),
             ("constraint", TelFile::Constraint(c)) => Some(c.id.to_string()),
+            ("constraint", TelFile::OwnedConstraint { constraint, .. }) => {
+                Some(constraint.id.to_string())
+            }
             _ => None,
         })
         .collect();
@@ -199,6 +211,90 @@ fn apply_one(base: &mut Vec<(RepoPath, TelFile)>, op: &StagedOp) -> Result<(), T
         // one.
         StagedOp::Accept { .. } | StagedOp::EditConfig(_) => Ok(()),
 
+        StagedOp::AddContext(context) => add(base, op, TelFile::Context(context.clone())),
+        StagedOp::AddCapability(capability) => {
+            add(base, op, TelFile::Capability(capability.clone()))
+        }
+        StagedOp::AddOwnedNotion { owner, notion } => add(
+            base,
+            op,
+            TelFile::OwnedNotion {
+                owner: owner.clone(),
+                notion: notion.clone(),
+            },
+        ),
+        StagedOp::AddOwnedIntent { owner, intent } => add(
+            base,
+            op,
+            TelFile::OwnedIntent {
+                owner: owner.clone(),
+                intent: intent.clone(),
+            },
+        ),
+        StagedOp::AddOwnedConstraint { owner, constraint } => add(
+            base,
+            op,
+            TelFile::OwnedConstraint {
+                owner: owner.clone(),
+                constraint: constraint.clone(),
+            },
+        ),
+
+        StagedOp::EditContext(context) => edit(base, op, TelFile::Context(context.clone())),
+        StagedOp::EditCapability(capability) => {
+            edit(base, op, TelFile::Capability(capability.clone()))
+        }
+        StagedOp::EditOwnedNotion { owner, notion } => edit(
+            base,
+            op,
+            TelFile::OwnedNotion {
+                owner: owner.clone(),
+                notion: notion.clone(),
+            },
+        ),
+        StagedOp::EditOwnedIntent { owner, intent } => edit(
+            base,
+            op,
+            TelFile::OwnedIntent {
+                owner: owner.clone(),
+                intent: intent.clone(),
+            },
+        ),
+        StagedOp::EditOwnedConstraint { owner, constraint } => edit(
+            base,
+            op,
+            TelFile::OwnedConstraint {
+                owner: owner.clone(),
+                constraint: constraint.clone(),
+            },
+        ),
+        StagedOp::EditContextMap(map) => edit(base, op, TelFile::ContextMap(map.clone())),
+
+        StagedOp::MoveNotion { to, notion, .. } => move_entity(
+            base,
+            op,
+            TelFile::OwnedNotion {
+                owner: to.clone(),
+                notion: notion.clone(),
+            },
+        ),
+        StagedOp::MoveIntent { to, intent, .. } => move_entity(
+            base,
+            op,
+            TelFile::OwnedIntent {
+                owner: to.clone(),
+                intent: intent.clone(),
+            },
+        ),
+        StagedOp::MoveConstraint { to, constraint, .. } => move_entity(
+            base,
+            op,
+            TelFile::OwnedConstraint {
+                owner: to.clone(),
+                constraint: constraint.clone(),
+            },
+        ),
+
         StagedOp::AddNotion(n) => add(base, op, TelFile::Notion(n.clone())),
         StagedOp::AddIntent(i) => add(base, op, TelFile::Intent(i.clone())),
         StagedOp::AddConstraint(c) => add(base, op, TelFile::Constraint(c.clone())),
@@ -207,10 +303,36 @@ fn apply_one(base: &mut Vec<(RepoPath, TelFile)>, op: &StagedOp) -> Result<(), T
         StagedOp::EditIntent(i) => edit(base, op, TelFile::Intent(i.clone())),
         StagedOp::EditConstraint(c) => edit(base, op, TelFile::Constraint(c.clone())),
 
-        StagedOp::RemoveNotion(_) | StagedOp::RemoveIntent(_) | StagedOp::RemoveConstraint(_) => {
-            remove(base, op)
-        }
+        StagedOp::RemoveContext(_)
+        | StagedOp::RemoveCapability(_)
+        | StagedOp::RemoveOwnedNotion { .. }
+        | StagedOp::RemoveOwnedIntent { .. }
+        | StagedOp::RemoveOwnedConstraint { .. }
+        | StagedOp::RemoveNotion(_)
+        | StagedOp::RemoveIntent(_)
+        | StagedOp::RemoveConstraint(_) => remove(base, op),
     }
+}
+
+fn move_entity(
+    base: &mut Vec<(RepoPath, TelFile)>,
+    op: &StagedOp,
+    file: TelFile,
+) -> Result<(), TelosError> {
+    let source = op.source_path().expect("move has a source path");
+    let Some(slot) = base.iter().position(|(path, _)| *path == source) else {
+        return Err(unknown_entity(base, op.entity(), &op.key()));
+    };
+    if base.iter().any(|(path, _)| *path == op.target_path()) {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            format!("move target `{}` already exists", op.target_path()),
+        ));
+    }
+    base.remove(slot);
+    base.push((op.target_path(), file));
+    base.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    Ok(())
 }
 
 /// Inserts `file` at `op`'s target path, refusing if the base already holds
@@ -287,19 +409,27 @@ fn label(op: &StagedOp) -> String {
 /// referrer.
 fn first_referrer(base: &[(RepoPath, TelFile)], removed: &TelFile) -> Option<String> {
     match removed {
-        TelFile::Notion(notion) => first_notion_referrer(base, &notion.name),
-        TelFile::Intent(intent) => {
+        TelFile::Notion(notion) | TelFile::OwnedNotion { notion, .. } => {
+            first_notion_referrer(base, &notion.name)
+        }
+        TelFile::Intent(intent) | TelFile::OwnedIntent { intent, .. } => {
             let scenarios: Vec<_> = intent.scenarios.iter().map(|s| s.id).collect();
             first_intent_referrer(base, intent.id, &scenarios)
         }
-        TelFile::Constraint(_) | TelFile::Bindings(_) => None,
+        TelFile::Constraint(_)
+        | TelFile::OwnedConstraint { .. }
+        | TelFile::Bindings(_)
+        | TelFile::ContextBindings { .. }
+        | TelFile::Context(_)
+        | TelFile::Capability(_)
+        | TelFile::ContextMap(_) => None,
     }
 }
 
 fn first_notion_referrer(base: &[(RepoPath, TelFile)], name: &NotionName) -> Option<String> {
     for (_, file) in base {
         match file {
-            TelFile::Notion(other) => {
+            TelFile::Notion(other) | TelFile::OwnedNotion { notion: other, .. } => {
                 let targeted = other.rels.iter().any(|rel| rel.target.node == *name)
                     || other.attrs.iter().any(|attr| match &attr.ty {
                         crate::model::AttrType::Ref(target) => target == name,
@@ -309,7 +439,7 @@ fn first_notion_referrer(base: &[(RepoPath, TelFile)], name: &NotionName) -> Opt
                     return Some(format!("notion `{}` references it", other.name));
                 }
             }
-            TelFile::Intent(intent) => {
+            TelFile::Intent(intent) | TelFile::OwnedIntent { intent, .. } => {
                 if statement_notions(&intent.statement).contains(name) {
                     return Some(format!("{} uses it", intent.id));
                 }
@@ -319,7 +449,7 @@ fn first_notion_referrer(base: &[(RepoPath, TelFile)], name: &NotionName) -> Opt
                     }
                 }
             }
-            TelFile::Constraint(constraint) => {
+            TelFile::Constraint(constraint) | TelFile::OwnedConstraint { constraint, .. } => {
                 if let Rule::Machine(expr) = &constraint.rule {
                     let mut notions = Default::default();
                     expr_notions(expr, &mut notions);
@@ -328,7 +458,11 @@ fn first_notion_referrer(base: &[(RepoPath, TelFile)], name: &NotionName) -> Opt
                     }
                 }
             }
-            TelFile::Bindings(_) => {}
+            TelFile::Bindings(_)
+            | TelFile::ContextBindings { .. }
+            | TelFile::Context(_)
+            | TelFile::Capability(_)
+            | TelFile::ContextMap(_) => {}
         }
     }
     None
@@ -341,7 +475,7 @@ fn first_intent_referrer(
 ) -> Option<String> {
     for (_, file) in base {
         match file {
-            TelFile::Intent(other) => {
+            TelFile::Intent(other) | TelFile::OwnedIntent { intent: other, .. } => {
                 let relations = [
                     ("refines", &other.refines),
                     ("requires", &other.requires),
@@ -353,14 +487,14 @@ fn first_intent_referrer(
                     }
                 }
             }
-            TelFile::Constraint(constraint) => {
+            TelFile::Constraint(constraint) | TelFile::OwnedConstraint { constraint, .. } => {
                 if let Scope::Intents(ids) = &constraint.scope
                     && ids.iter().any(|scoped| scoped.node == id)
                 {
                     return Some(format!("{} constrains it", constraint.id));
                 }
             }
-            TelFile::Bindings(bindings) => {
+            TelFile::Bindings(bindings) | TelFile::ContextBindings { bindings, .. } => {
                 for binding in bindings {
                     match binding {
                         Binding::Implements { path, intent } if intent.node == id => {
@@ -375,7 +509,11 @@ fn first_intent_referrer(
                     }
                 }
             }
-            TelFile::Notion(_) => {}
+            TelFile::Notion(_)
+            | TelFile::OwnedNotion { .. }
+            | TelFile::Context(_)
+            | TelFile::Capability(_)
+            | TelFile::ContextMap(_) => {}
         }
     }
     None
@@ -426,15 +564,62 @@ pub fn apply_ops_idempotent(
         // exactly as in `apply_ops`.
         let post = match op {
             StagedOp::Accept { .. } | StagedOp::EditConfig(_) => continue,
+            StagedOp::AddContext(context) | StagedOp::EditContext(context) => {
+                Some(TelFile::Context(context.clone()))
+            }
+            StagedOp::AddCapability(capability) | StagedOp::EditCapability(capability) => {
+                Some(TelFile::Capability(capability.clone()))
+            }
+            StagedOp::AddOwnedNotion { owner, notion }
+            | StagedOp::EditOwnedNotion { owner, notion } => Some(TelFile::OwnedNotion {
+                owner: owner.clone(),
+                notion: notion.clone(),
+            }),
+            StagedOp::AddOwnedIntent { owner, intent }
+            | StagedOp::EditOwnedIntent { owner, intent } => Some(TelFile::OwnedIntent {
+                owner: owner.clone(),
+                intent: intent.clone(),
+            }),
+            StagedOp::AddOwnedConstraint { owner, constraint }
+            | StagedOp::EditOwnedConstraint { owner, constraint } => {
+                Some(TelFile::OwnedConstraint {
+                    owner: owner.clone(),
+                    constraint: constraint.clone(),
+                })
+            }
+            StagedOp::EditContextMap(map) => Some(TelFile::ContextMap(map.clone())),
+            StagedOp::MoveNotion { to, notion, .. } => Some(TelFile::OwnedNotion {
+                owner: to.clone(),
+                notion: notion.clone(),
+            }),
+            StagedOp::MoveIntent { to, intent, .. } => Some(TelFile::OwnedIntent {
+                owner: to.clone(),
+                intent: intent.clone(),
+            }),
+            StagedOp::MoveConstraint { to, constraint, .. } => Some(TelFile::OwnedConstraint {
+                owner: to.clone(),
+                constraint: constraint.clone(),
+            }),
             StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => Some(TelFile::Notion(n.clone())),
             StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => Some(TelFile::Intent(i.clone())),
             StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => {
                 Some(TelFile::Constraint(c.clone()))
             }
-            StagedOp::RemoveNotion(_)
+            StagedOp::RemoveContext(_)
+            | StagedOp::RemoveCapability(_)
+            | StagedOp::RemoveOwnedNotion { .. }
+            | StagedOp::RemoveOwnedIntent { .. }
+            | StagedOp::RemoveOwnedConstraint { .. }
+            | StagedOp::RemoveNotion(_)
             | StagedOp::RemoveIntent(_)
             | StagedOp::RemoveConstraint(_) => None,
         };
+
+        if let Some(source) = op.source_path()
+            && let Some(slot) = base.iter().position(|(path, _)| *path == source)
+        {
+            base.remove(slot);
+        }
 
         let path = op.target_path();
         let slot = base.iter().position(|(p, _)| *p == path);
@@ -472,7 +657,8 @@ pub fn validate_ops_idempotent(
 }
 
 /// Folds a change's journal into the spec state as bindings, extending
-/// -- or creating -- the `telos/bindings.tel` entry of `files`.
+/// or creating the bindings file of the context that owns the referenced
+/// intent or scenario.
 ///
 /// This is what makes `bindings.tel` a *derived* file: `telos bind` and the
 /// first green run of `telos test` write journal lines, never bindings, and
@@ -503,29 +689,64 @@ pub fn fold_journal_bindings(
         return files;
     }
 
-    let path = RepoPath::new(BINDINGS_PATH);
-    let slot = files.iter().position(|(p, file)| {
-        // A `bindings.tel` the parser produced is always `TelFile::Bindings`;
-        // the pattern is what keeps this total rather than an `expect`.
-        *p == path && matches!(file, TelFile::Bindings(_))
-    });
-    let mut bindings = match slot {
-        Some(slot) => match files.remove(slot).1 {
-            TelFile::Bindings(existing) => existing,
-            other => unreachable!("the slot was matched as Bindings, got {other:?}"),
-        },
-        None => Vec::new(),
-    };
-
+    let (intent_contexts, scenario_contexts) = binding_owners(&files);
     for binding in folded {
+        let context = match &binding {
+            Binding::Implements { intent, .. } => intent_contexts.get(&intent.node),
+            Binding::Proves { scenario, .. } => scenario_contexts.get(&scenario.node),
+        };
+        // Unowned forms only exist in isolated legacy unit fixtures. A real
+        // workspace rejects their paths before reaching the overlay.
+        let path = context
+            .map(context_bindings_path)
+            .unwrap_or_else(|| RepoPath::new(BINDINGS_PATH));
+        let slot = files.iter().position(|(candidate, file)| {
+            *candidate == path
+                && matches!(
+                    (context, file),
+                    (Some(_), TelFile::ContextBindings { .. }) | (None, TelFile::Bindings(_))
+                )
+        });
+        let mut bindings = match slot {
+            Some(slot) => match files.remove(slot).1 {
+                TelFile::ContextBindings { bindings, .. } | TelFile::Bindings(bindings) => bindings,
+                other => unreachable!("the slot was matched as bindings, got {other:?}"),
+            },
+            None => Vec::new(),
+        };
         if !bindings.iter().any(|held| same_binding(held, &binding)) {
             bindings.push(binding);
         }
+        let file = match context {
+            Some(context) => TelFile::ContextBindings {
+                context: context.clone(),
+                bindings,
+            },
+            None => TelFile::Bindings(bindings),
+        };
+        files.push((path, file));
     }
-
-    files.push((path, TelFile::Bindings(bindings)));
     files.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
     files
+}
+
+fn binding_owners(
+    files: &[(RepoPath, TelFile)],
+) -> (
+    BTreeMap<IntentId, ContextId>,
+    BTreeMap<ScenarioId, ContextId>,
+) {
+    let mut intents = BTreeMap::new();
+    let mut scenarios = BTreeMap::new();
+    for (_, file) in files {
+        if let TelFile::OwnedIntent { owner, intent } = file {
+            intents.insert(intent.id, owner.context.clone());
+            for scenario in &intent.scenarios {
+                scenarios.insert(scenario.id, owner.context.clone());
+            }
+        }
+    }
+    (intents, scenarios)
 }
 
 /// Whether two bindings are the same line, ignoring the spans they were
@@ -574,12 +795,42 @@ pub fn op_before_after(
     };
     let pre = apply_ops(base.to_vec(), &ops[..idx]).unwrap_or_else(|_| base.to_vec());
 
-    let before = find_file(&pre, &op.target_path()).map(emit);
+    let before_path = op.source_path().unwrap_or_else(|| op.target_path());
+    let before = find_file(&pre, &before_path).map(emit);
     let after = match op {
+        StagedOp::AddContext(context) | StagedOp::EditContext(context) => {
+            Some(crate::emit::emit_context(context))
+        }
+        StagedOp::AddCapability(capability) | StagedOp::EditCapability(capability) => {
+            Some(crate::emit::emit_capability(capability))
+        }
+        StagedOp::AddOwnedNotion { owner, notion }
+        | StagedOp::EditOwnedNotion { owner, notion } => {
+            Some(crate::emit::emit_owned_notion(owner, notion))
+        }
+        StagedOp::AddOwnedIntent { owner, intent }
+        | StagedOp::EditOwnedIntent { owner, intent } => {
+            Some(crate::emit::emit_owned_intent(owner, intent))
+        }
+        StagedOp::AddOwnedConstraint { owner, constraint }
+        | StagedOp::EditOwnedConstraint { owner, constraint } => Some(
+            crate::emit::emit_owned_constraint(owner.as_ref(), constraint),
+        ),
+        StagedOp::EditContextMap(map) => Some(crate::emit::emit_context_map(map)),
+        StagedOp::MoveNotion { to, notion, .. } => Some(crate::emit::emit_owned_notion(to, notion)),
+        StagedOp::MoveIntent { to, intent, .. } => Some(crate::emit::emit_owned_intent(to, intent)),
+        StagedOp::MoveConstraint { to, constraint, .. } => {
+            Some(crate::emit::emit_owned_constraint(to.as_ref(), constraint))
+        }
         StagedOp::AddNotion(n) | StagedOp::EditNotion(n) => Some(emit_notion(n)),
         StagedOp::AddIntent(i) | StagedOp::EditIntent(i) => Some(emit_intent(i)),
         StagedOp::AddConstraint(c) | StagedOp::EditConstraint(c) => Some(emit_constraint(c)),
-        StagedOp::RemoveNotion(_)
+        StagedOp::RemoveContext(_)
+        | StagedOp::RemoveCapability(_)
+        | StagedOp::RemoveOwnedNotion { .. }
+        | StagedOp::RemoveOwnedIntent { .. }
+        | StagedOp::RemoveOwnedConstraint { .. }
+        | StagedOp::RemoveNotion(_)
         | StagedOp::RemoveIntent(_)
         | StagedOp::RemoveConstraint(_)
         | StagedOp::Accept { .. } => None,
@@ -601,8 +852,8 @@ mod tests {
     //! already holds.
 
     use super::*;
-    use crate::ids::{IntentId, ScenarioId};
-    use crate::model::change::fixtures::{implementing_change, invoice};
+    use crate::ids::{IntentId, Owner, ScenarioId};
+    use crate::model::change::fixtures::{implementing_change, int_0017, invoice};
     use crate::model::{Binding, TestRef};
     use crate::span::{Sp, Span};
 
@@ -648,6 +899,39 @@ mod tests {
             RepoPath::new("telos/notions/Invoice.tel"),
             TelFile::Notion(invoice()),
         )
+    }
+
+    #[test]
+    fn journal_bindings_are_folded_into_the_referenced_intents_context() {
+        let mut intent = int_0017();
+        intent.id = IntentId(1);
+        intent.scenarios[0].id = ScenarioId(1);
+        let context = ContextId::new("billing").unwrap();
+        let owner = Owner::capability("billing/invoicing".parse().unwrap());
+        let base = vec![(
+            crate::model::change::owned_intent_path(&owner, intent.id),
+            TelFile::OwnedIntent { owner, intent },
+        )];
+
+        let files = fold_journal_bindings(base, &implementing_change());
+        let path = context_bindings_path(&context);
+        let bindings = files
+            .iter()
+            .find_map(|(candidate, file)| match file {
+                TelFile::ContextBindings {
+                    context: held,
+                    bindings,
+                } if candidate == &path && held == &context => Some(bindings),
+                _ => None,
+            })
+            .expect("the context owns a derived bindings file");
+
+        assert_eq!(bindings, &vec![proves(), implements(Span::default())]);
+        assert!(
+            files
+                .iter()
+                .all(|(candidate, _)| candidate.as_str() != BINDINGS_PATH)
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-use common::{telos, with_fixture};
+use common::{canonical_payload, telos, with_fixture};
 
 /// Parses a command's stdout as a JSON envelope.
 fn json_stdout(out: &std::process::Output) -> Value {
@@ -37,8 +37,8 @@ const CHG_0001: &str = "telos/changes/CHG-0001.tel";
 const CANONICAL_OPEN_CHANGE: &str =
     "change CHG-0001 \"Invoices can be settled\" {\n  status open\n}\n";
 
-/// The `telos/notions/Invoice.tel` path, drifted by several tests.
-const INVOICE_TEL: &str = "telos/notions/Invoice.tel";
+/// The `telos/contexts/billing/notions/Invoice.tel` path, drifted by several tests.
+const INVOICE_TEL: &str = "telos/contexts/billing/notions/Invoice.tel";
 
 /// The exact `TELOS_DRIFT_DETECTED` hint, frozen by `docs/contracts.md`.
 const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
@@ -636,7 +636,10 @@ fn check_without_sealed_passes_while_a_change_is_open() {
 /// binaries share no code but `common`.
 fn stage_ok(dir: &std::path::Path, args: &[&str], payload: &str) -> Value {
     let mut cmd = telos(dir, args);
-    let out = cmd.write_stdin(payload.to_string()).output().unwrap();
+    let out = cmd
+        .write_stdin(canonical_payload(args, payload))
+        .output()
+        .unwrap();
     let envelope = json_stdout(&out);
     assert_eq!(
         envelope["ok"],
@@ -649,13 +652,14 @@ fn stage_ok(dir: &std::path::Path, args: &[&str], payload: &str) -> Value {
 /// A small `add notion` payload with no attrs or rels -- the minimal 1-op
 /// change `change diff`'s golden test stages.
 fn vendor_payload() -> String {
-    json!({"name": "Vendor", "kind": "actor", "def": "A party the business pays."}).to_string()
+    json!({"owner": "billing", "name": "Vendor", "kind": "actor", "def": "A party the business pays."}).to_string()
 }
 
 /// The canonical block `add notion` with [`vendor_payload`] produces --
 /// `emit_notion`'s own output, unindented, the exact bytes `change diff`
 /// must report as the op's `after`.
-const VENDOR_CANONICAL: &str = "notion Vendor actor {\n  def  \"A party the business pays.\"\n}\n";
+const VENDOR_CANONICAL: &str =
+    "notion billing/Vendor actor {\n  def  \"A party the business pays.\"\n}\n";
 
 /// Whether `digest` is `sha256:` followed by exactly 64 lowercase hex
 /// digits -- the shape `change diff`/`change approve` must report,
@@ -706,7 +710,7 @@ fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
             "n": 1,
             "op": "add",
             "entity": "notion",
-            "key": "Vendor",
+            "key": "billing/Vendor",
             "before": null,
             "after": VENDOR_CANONICAL,
         }])
@@ -726,7 +730,9 @@ fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
 #[test]
 fn change_diff_of_an_edit_reports_the_corpus_block_as_before_and_the_patch_as_after() {
     let tmp = with_fixture();
-    let int_0017_path = tmp.path().join("telos/intents/INT-0017.tel");
+    let int_0017_path = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel");
     let before = fs::read_to_string(&int_0017_path).unwrap();
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
@@ -790,9 +796,12 @@ fn change_diff_human_mode_prints_per_op_sections() {
         out.status
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("#1 add notion Vendor"), "{stdout}");
+    assert!(stdout.contains("#1 add notion billing/Vendor"), "{stdout}");
     assert!(stdout.contains("before: (none)"), "{stdout}");
-    assert!(stdout.contains("after:\nnotion Vendor actor {"), "{stdout}");
+    assert!(
+        stdout.contains("after:\nnotion billing/Vendor actor {"),
+        "{stdout}"
+    );
 }
 
 /// `approve` writes `status approved` and a `digest` line into the change
@@ -837,7 +846,7 @@ fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
            status approved\n  \
            digest \"{digest}\"\n\
          \n  \
-           op add notion Vendor actor {{\n    \
+           op add notion billing/Vendor actor {{\n    \
              def  \"A party the business pays.\"\n  \
            }}\n\
          }}\n"

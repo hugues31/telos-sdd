@@ -10,7 +10,13 @@ import { notionUsedBy, snapshot } from '../data/snapshot';
 import { filterNotions, groupNotions } from './page-data';
 
 const query = ref('');
-const filteredNotions = computed(() => filterNotions(snapshot.value.snapshot.notions, query.value));
+const owner = ref('');
+const owners = computed(() => [...new Set(snapshot.value.snapshot.notions.map((notion) => notion.owner))].sort());
+const filteredNotions = computed(() =>
+  filterNotions(snapshot.value.snapshot.notions, query.value).filter(
+    (notion) => owner.value === '' || notion.owner === owner.value,
+  ),
+);
 const groups = computed(() => groupNotions(filteredNotions.value));
 </script>
 
@@ -22,13 +28,20 @@ const groups = computed(() => groupNotions(filteredNotions.value));
       <aside class="glossary__toc" aria-labelledby="glossary-toc-heading">
         <h2 id="glossary-toc-heading">Contents</h2>
         <SearchInput v-model="query" ariaLabel="Search glossary" placeholder="Search notions" />
+        <label class="glossary__owner-filter">
+          Domain owner
+          <select v-model="owner">
+            <option value="">All contexts and capabilities</option>
+            <option v-for="item in owners" :key="item" :value="item">{{ item }}</option>
+          </select>
+        </label>
         <p class="glossary__count" role="status">
           {{ filteredNotions.length }} {{ filteredNotions.length === 1 ? 'notion' : 'notions' }}
         </p>
 
         <nav v-if="groups.length" aria-label="Glossary entries">
-          <section v-for="group in groups" :key="group.kind" class="glossary__toc-group">
-            <h3>{{ group.kind }}</h3>
+          <section v-for="group in groups" :key="`${group.owner}-${group.kind}`" class="glossary__toc-group">
+            <h3>{{ group.owner }} · {{ group.kind }}</h3>
             <ul>
               <li v-for="notion in group.notions" :key="notion.name">
                 <RouterLink :to="{ hash: `#notion-${notion.name}` }">{{ notion.name }}</RouterLink>
@@ -48,11 +61,11 @@ const groups = computed(() => groupNotions(filteredNotions.value));
         <section
           v-else
           v-for="group in groups"
-          :key="group.kind"
+          :key="`${group.owner}-${group.kind}`"
           class="glossary__group"
-          :aria-labelledby="`notion-kind-${group.kind}`"
+          :aria-labelledby="`notion-kind-${group.owner}-${group.kind}`"
         >
-          <h2 :id="`notion-kind-${group.kind}`">{{ group.kind }}</h2>
+          <h2 :id="`notion-kind-${group.owner}-${group.kind}`">{{ group.owner }} · {{ group.kind }}</h2>
           <article
             v-for="notion in group.notions"
             :id="`notion-${notion.name}`"
@@ -91,6 +104,8 @@ const groups = computed(() => groupNotions(filteredNotions.value));
 .glossary__toc { align-self: start; position: sticky; top: calc(var(--header-height) + 1rem); max-height: calc(100vh - var(--header-height) - 2rem); overflow-y: auto; padding-right: 0.5rem; }
 .glossary__toc h2, .glossary__group > h2 { font-size: 1.125rem; }
 .glossary__count, .glossary-card__muted { color: var(--color-text-muted); font-size: 0.875rem; }
+.glossary__owner-filter { display: grid; gap: 0.35rem; margin-top: 0.75rem; color: var(--color-text-muted); font-size: 0.8125rem; }
+.glossary__owner-filter select { width: 100%; padding: 0.5rem; border: 1px solid var(--color-border); border-radius: 0.4rem; color: var(--color-text); background: var(--color-surface); }
 .glossary__toc-group { margin-top: 1rem; }
 .glossary__toc-group h3 { margin-bottom: 0.25rem; color: var(--color-text-muted); font-size: 0.8125rem; text-transform: capitalize; }
 .glossary__toc-group ul, .glossary-card__consumer-list { margin: 0; padding: 0; list-style: none; }

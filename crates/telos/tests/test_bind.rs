@@ -739,7 +739,9 @@ fn test_with_an_explicit_file_picks_it_and_still_names_the_function() {
 #[test]
 fn test_refuses_unclaimed_drift_outside_the_test_file() {
     let tmp = approved_with_a_drifted_test();
-    let invoice = tmp.path().join("telos/notions/Invoice.tel");
+    let invoice = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
     let mut src = fs::read_to_string(&invoice).unwrap();
     src.push('\n');
     fs::write(&invoice, src).unwrap();
@@ -836,7 +838,7 @@ fn test_requires_exactly_one_of_a_scenario_and_all() {
 /// new file is in neither).
 const NEW_CODE_FILE: &str = "src/billing/new.rs";
 
-/// The corpus' already-bound code file -- `telos/bindings.tel` implements
+/// The corpus' already-bound code file -- `telos/contexts/billing/bindings.tel` implements
 /// `INT-0042` with it -- so editing it after the seal is exactly the drift
 /// the carve-out tests below claim through `telos bind`.
 const INVOICE_CODE: &str = "src/billing/invoice.rs";
@@ -889,7 +891,7 @@ fn approved_owning_int_0042() -> TempDir {
 /// to the id the allocator hands back.
 fn new_intent_payload() -> String {
     json!({
-        "title": "Invoices can be cancelled", "status": "draft",
+        "owner": "billing/settlement", "title": "Invoices can be cancelled", "status": "draft",
         "telos": "Customers must be able to void an invoice raised in error.",
         "statement": { "template": "event-driven", "when": "PaymentReceived",
                        "on": "Invoice", "action": "set Invoice.state = cancelled" },
@@ -1245,7 +1247,12 @@ fn bind_of_a_path_under_telos_is_refused() {
 
     let error = error_of(
         tmp.path(),
-        &["bind", "telos/bindings.tel", BOUND_INTENT, "--json"],
+        &[
+            "bind",
+            "telos/contexts/billing/bindings.tel",
+            BOUND_INTENT,
+            "--json",
+        ],
     );
 
     assert_eq!(error["code"], json!("TELOS_REFERENCE_UNKNOWN"));
@@ -1268,7 +1275,9 @@ fn bind_of_a_path_under_telos_is_refused() {
 fn bind_refuses_unclaimed_drift_elsewhere() {
     let tmp = approved_owning_int_0042();
     fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
-    let invoice_notion = tmp.path().join("telos/notions/Invoice.tel");
+    let invoice_notion = tmp
+        .path()
+        .join("telos/contexts/billing/notions/Invoice.tel");
     let mut src = fs::read_to_string(&invoice_notion).unwrap();
     src.push('\n');
     fs::write(&invoice_notion, src).unwrap();

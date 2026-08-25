@@ -25,6 +25,10 @@ pub enum ErrorCode {
     TelosConstraintFailed,
     TelosChangeStateInvalid,
     TelosFileClaimed,
+    /// A specification file is in a legacy or non-canonical location.
+    TelosLayoutViolation,
+    /// A declared relation crosses a bounded-context rule.
+    TelosContextBoundaryViolation,
     // Initialization and engine error codes.
     /// No `telos/` directory or no `telos.lock`.
     TelosNotInitialized,
@@ -148,6 +152,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosFileClaimed)?,
             "\"TELOS_FILE_CLAIMED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosLayoutViolation)?,
+            "\"TELOS_LAYOUT_VIOLATION\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosContextBoundaryViolation)?,
+            "\"TELOS_CONTEXT_BOUNDARY_VIOLATION\""
         );
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosNotInitialized)?,

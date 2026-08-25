@@ -8,15 +8,10 @@ mod common;
 use std::fs;
 
 use serde_json::{Value, json};
-use telos_core::git::Oid;
 use telos_core::ids::RepoPath;
 use telos_core::lock::Lock;
 
 use common::{repo, telos, with_fixture};
-
-/// The git OID of an empty blob -- what `telos/bindings.tel` must hash to
-/// right after `init`, on every OS.
-const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 /// Parses a command's stdout as a JSON envelope.
 fn json_stdout(out: &std::process::Output) -> Value {
@@ -37,7 +32,7 @@ fn version_flag_prints_telos_version() {
     telos(tmp.path(), &["--version"])
         .assert()
         .success()
-        .stdout("telos 0.8.2\n");
+        .stdout("telos 0.9.0\n");
 }
 
 #[test]
@@ -46,7 +41,7 @@ fn version_subcommand_prints_telos_version() {
     telos(tmp.path(), &["version"])
         .assert()
         .success()
-        .stdout("telos 0.8.2\n");
+        .stdout("telos 0.9.0\n");
 }
 
 #[test]
@@ -59,7 +54,7 @@ fn version_subcommand_json_reports_the_crate_version() {
         "expected exit 0, got {:?}",
         out.status
     );
-    assert_eq!(json_stdout(&out)["result"]["version"], json!("0.8.2"));
+    assert_eq!(json_stdout(&out)["result"]["version"], json!("0.9.0"));
 }
 
 // --- init: the happy path ----------------------------------------------
@@ -79,12 +74,17 @@ fn init_seals_an_empty_repository() {
     let lock = Lock::read(&lock_path)
         .expect("the lock parses")
         .expect("the lock exists");
-    assert_eq!(lock.version, 1);
+    assert_eq!(lock.version, 2);
     assert_eq!(lock.sealed_by, None);
-    assert_eq!(
-        lock.spec.get(&RepoPath::new("telos/bindings.tel")),
-        Some(&Oid(EMPTY_BLOB.to_string())),
-        "`telos/bindings.tel` must be sealed as the empty blob"
+    assert!(
+        lock.spec
+            .keys()
+            .any(|path| path.as_str() == "telos/telos.toml")
+    );
+    assert!(
+        lock.spec
+            .keys()
+            .any(|path| path.as_str() == "telos/context-map.tel")
     );
     assert!(lock.code.is_empty(), "a fresh project has no bindings");
 }
@@ -95,7 +95,7 @@ fn init_creates_the_whole_telos_tree() {
     telos(tmp.path(), &["init"]).assert().success();
 
     let telos_dir = tmp.path().join("telos");
-    for sub in ["notions", "intents", "constraints", "changes"] {
+    for sub in ["contexts", "constraints", "changes"] {
         assert!(
             telos_dir.join(sub).is_dir(),
             "expected telos/{sub}/ to be a directory"
@@ -106,9 +106,8 @@ fn init_creates_the_whole_telos_tree() {
         "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = []\n"
     );
     assert_eq!(
-        fs::read(telos_dir.join("bindings.tel")).unwrap(),
-        Vec::<u8>::new(),
-        "`bindings.tel` starts empty, to the byte"
+        fs::read_to_string(telos_dir.join("context-map.tel")).unwrap(),
+        "context-map {\n}\n"
     );
 }
 

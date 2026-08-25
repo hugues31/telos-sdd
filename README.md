@@ -9,8 +9,11 @@
 **Keep software intent typed, reviewable, and testable.**
 
 Telos is a local Rust CLI for specification-driven development. It stores
-notions, intents, scenarios, constraints, and bindings as a typed,
-referentially checked model committed with your project. Changes pass through
+bounded contexts, capabilities, notions, intents, scenarios, constraints, and
+per-context bindings as a typed, referentially checked model committed with
+your project. Context ownership, dependency direction, vocabulary
+qualification, and production-file boundaries are enforced without an LLM.
+Changes pass through
 reviewable transactions, and coherent states are sealed with Git blob IDs so
 out-of-protocol edits are visible.
 
@@ -102,7 +105,7 @@ printf '%s\n' '{"status":"active"}' \
 telos change diff CHG-0001 --json
 telos change approve CHG-0001 --expected-digest '<digest from diff>' --json
 
-telos context INT-0042 --json
+telos pack INT-0042 --json
 telos test SCN-0107 --json
 # Implement SCN-0107 while keeping the witnessed test unchanged.
 telos bind src/billing/invoice.rs INT-0042 --json
@@ -144,8 +147,8 @@ the complete reconstruction protocol.
 
 | Task | Commands |
 |---|---|
-| Inspect | `status`, `check`, `show`, `list`, `query`, `impact`, `context` |
-| Change the model | `change open|list|diff|approve|reconcile|abandon`, `add`, `edit`, `remove` |
+| Inspect | `status`, `check`, `show`, `list`, `query`, `impact`, `pack`, `map` |
+| Change the model | `change open|list|diff|approve|reconcile|abandon`, `add`, `edit`, `move`, `map --change`, `remove` |
 | Record evidence | `test`, `bind` |
 | Resolve drift | `adopt`, `revert` |
 | Present | `view`, `view --export` |

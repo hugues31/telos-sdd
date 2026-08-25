@@ -1,5 +1,6 @@
 import { GRAPH_RELATIONS, type GraphEdgeView, type GraphRelation } from '../data/types';
 import type { RelationFilter } from './elements';
+import type { VisibleGraphRelation } from './projection';
 
 export interface RelationOption {
   value: RelationFilter;
@@ -8,7 +9,9 @@ export interface RelationOption {
 
 const RELATION_OPTIONS: readonly RelationOption[] = [
   { value: 'all', label: 'All' },
-  ...GRAPH_RELATIONS.map((value) => ({ value, label: relationLabel(value) })),
+  ...GRAPH_RELATIONS.filter(
+    (value): value is VisibleGraphRelation => value !== 'belongs-to',
+  ).map((value) => ({ value, label: relationLabel(value) })),
 ];
 
 export function relationLabel(relation: GraphRelation): string {

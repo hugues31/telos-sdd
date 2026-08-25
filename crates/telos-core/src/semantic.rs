@@ -26,7 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Diagnostic, ErrorCode};
 use crate::graph::{Graph, NodeRef, Relation};
-use crate::ids::{ConstraintId, FieldName, IntentId, NotionName, RepoPath, ScenarioId};
+use crate::ids::{
+    CapabilityRef, ConstraintId, ContextId, FieldName, IntentId, NotionName, NotionRef, Owner,
+    RepoPath, ScenarioId,
+};
 use crate::model::{
     Action, Attr, AttrRef, AttrType, Binding, Constraint, Expr, InstanceStep, Intent, IntentStatus,
     Literal, Notion, NotionKind, Operand, Rule, Scenario, Scope, SourceKind, Statement, TelFile,
@@ -44,10 +47,12 @@ pub fn build_model(files: Vec<(RepoPath, TelFile)>) -> Result<TelosModel, Vec<Di
         model: &model,
         origins: &origins,
         file: None,
+        context: None,
         diagnostics: Vec::new(),
     };
     checker.run();
     diagnostics.extend(checker.diagnostics);
+    check_domain_boundaries(&model, &origins, &mut diagnostics);
 
     let graph = relation_graph(&model);
     model.graph = graph;
@@ -67,6 +72,9 @@ pub fn build_model(files: Vec<(RepoPath, TelFile)>) -> Result<TelosModel, Vec<Di
 /// name the file of the entity it is about (and both files of a duplicate).
 #[derive(Debug, Default)]
 struct Origins {
+    contexts: BTreeMap<ContextId, RepoPath>,
+    capabilities: BTreeMap<CapabilityRef, RepoPath>,
+    domain_notions: BTreeMap<NotionRef, RepoPath>,
     notions: BTreeMap<NotionName, RepoPath>,
     intents: BTreeMap<IntentId, RepoPath>,
     constraints: BTreeMap<ConstraintId, RepoPath>,
@@ -87,6 +95,103 @@ fn collect(
 
     for (path, file) in files {
         match file {
+            TelFile::Context(context) => {
+                model
+                    .sources
+                    .insert(path.clone(), SourceKind::Context(context.id.clone()));
+                match origins.contexts.get(&context.id) {
+                    Some(first) => diagnostics.push(duplicate(
+                        format!("context `{}`", context.id),
+                        first,
+                        &path,
+                    )),
+                    None => {
+                        origins.contexts.insert(context.id.clone(), path);
+                        model.contexts.insert(context.id.clone(), context);
+                    }
+                }
+            }
+            TelFile::Capability(capability) => {
+                model
+                    .sources
+                    .insert(path.clone(), SourceKind::Capability(capability.id.clone()));
+                match origins.capabilities.get(&capability.id) {
+                    Some(first) => diagnostics.push(duplicate(
+                        format!("capability `{}`", capability.id),
+                        first,
+                        &path,
+                    )),
+                    None => {
+                        origins.capabilities.insert(capability.id.clone(), path);
+                        model.capabilities.insert(capability.id.clone(), capability);
+                    }
+                }
+            }
+            TelFile::OwnedNotion { owner, notion } => {
+                let reference = NotionRef::new(owner.context.clone(), notion.name.clone());
+                model
+                    .sources
+                    .insert(path.clone(), SourceKind::QualifiedNotion(reference.clone()));
+                match origins.domain_notions.get(&reference) {
+                    Some(first) => {
+                        diagnostics.push(duplicate(format!("notion `{reference}`"), first, &path))
+                    }
+                    None => {
+                        origins.domain_notions.insert(reference.clone(), path);
+                        model
+                            .notions
+                            .entry(notion.name.clone())
+                            .or_insert_with(|| notion.clone());
+                        model.notion_owners.insert(reference.clone(), owner);
+                        model.domain_notions.insert(reference, notion);
+                    }
+                }
+            }
+            TelFile::OwnedIntent { owner, intent } => {
+                model
+                    .sources
+                    .insert(path.clone(), SourceKind::Intent(intent.id));
+                match origins.intents.get(&intent.id) {
+                    Some(first) => {
+                        diagnostics.push(duplicate(format!("intent {}", intent.id), first, &path))
+                    }
+                    None => {
+                        origins.intents.insert(intent.id, path.clone());
+                        claim_scenarios(&intent, &path, &mut model, &origins, diagnostics);
+                        model.intent_owners.insert(intent.id, owner);
+                        model.intents.insert(intent.id, intent);
+                    }
+                }
+            }
+            TelFile::OwnedConstraint { owner, constraint } => {
+                model
+                    .sources
+                    .insert(path.clone(), SourceKind::Constraint(constraint.id));
+                match origins.constraints.get(&constraint.id) {
+                    Some(first) => diagnostics.push(duplicate(
+                        format!("constraint {}", constraint.id),
+                        first,
+                        &path,
+                    )),
+                    None => {
+                        origins.constraints.insert(constraint.id, path);
+                        model.constraint_owners.insert(constraint.id, owner);
+                        model.constraints.insert(constraint.id, constraint);
+                    }
+                }
+            }
+            TelFile::ContextBindings { context, bindings } => {
+                model.sources.insert(path.clone(), SourceKind::Bindings);
+                for binding in bindings {
+                    origins.bindings.push(path.clone());
+                    model.binding_contexts.push(context.clone());
+                    model.bindings.push(binding);
+                }
+            }
+            TelFile::ContextMap(context_map) => {
+                model.sources.insert(path, SourceKind::ContextMap);
+                model.context_map = context_map;
+            }
             TelFile::Notion(notion) => {
                 model
                     .sources
@@ -200,25 +305,46 @@ struct Checker<'a> {
     origins: &'a Origins,
     /// The file the entity being checked was declared in.
     file: Option<RepoPath>,
+    /// Unqualified tactical references always resolve in this context.
+    context: Option<ContextId>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl<'a> Checker<'a> {
     fn run(&mut self) {
         let model = self.model;
-        for (name, notion) in &model.notions {
-            self.file = self.origins.notions.get(name).cloned();
-            self.check_notion(notion);
+        if model.domain_notions.is_empty() {
+            for (name, notion) in &model.notions {
+                self.context = None;
+                self.file = self.origins.notions.get(name).cloned();
+                self.check_notion(notion);
+            }
+        } else {
+            for (reference, notion) in &model.domain_notions {
+                self.context = Some(reference.context.clone());
+                self.file = self.origins.domain_notions.get(reference).cloned();
+                self.check_notion(notion);
+            }
         }
         for (id, intent) in &model.intents {
+            self.context = model
+                .intent_owners
+                .get(id)
+                .map(|owner| owner.context.clone());
             self.file = self.origins.intents.get(id).cloned();
             self.check_intent(intent);
         }
         for (id, constraint) in &model.constraints {
+            self.context = model
+                .constraint_owners
+                .get(id)
+                .and_then(Option::as_ref)
+                .map(|owner| owner.context.clone());
             self.file = self.origins.constraints.get(id).cloned();
             self.check_constraint(constraint);
         }
         for (binding, file) in model.bindings.iter().zip(&self.origins.bindings) {
+            self.context = None;
             self.file = Some(file.clone());
             self.check_binding(binding);
         }
@@ -251,6 +377,24 @@ impl<'a> Checker<'a> {
     /// go on checking what hangs off it.
     fn require_notion(&mut self, name: &NotionName) -> Option<&'a Notion> {
         let model = self.model;
+        if let Some(context) = &self.context {
+            let reference = NotionRef::new(context.clone(), name.clone());
+            if let Some(notion) = model.domain_notions.get(&reference) {
+                return Some(notion);
+            }
+            let known: Vec<&str> = model
+                .domain_notions
+                .keys()
+                .filter(|candidate| candidate.context == *context)
+                .map(|candidate| candidate.notion.as_str())
+                .collect();
+            self.reference(with_suggestion(
+                format!("unknown notion `{name}`"),
+                name.as_str(),
+                &known,
+            ));
+            return None;
+        }
         if let Some(notion) = model.notions.get(name) {
             return Some(notion);
         }
@@ -628,14 +772,396 @@ pub(crate) fn scenario_notions(scenario: &Scenario) -> BTreeSet<NotionName> {
     out
 }
 
+// --- strategic domain boundaries ---------------------------------------
+
+fn check_domain_boundaries(
+    model: &TelosModel,
+    origins: &Origins,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if model.contexts.is_empty()
+        && model.capabilities.is_empty()
+        && model.intent_owners.is_empty()
+        && model.domain_notions.is_empty()
+    {
+        return;
+    }
+
+    for (id, capability) in &model.capabilities {
+        if !model.contexts.contains_key(&id.context) {
+            diagnostics.push(boundary(
+                format!(
+                    "capability `{}` belongs to unknown context `{}`",
+                    id, id.context
+                ),
+                origins.capabilities.get(id).cloned(),
+            ));
+        }
+        debug_assert_eq!(&capability.id, id);
+    }
+
+    for (reference, owner) in &model.notion_owners {
+        check_owner_exists(
+            model,
+            owner,
+            format!("notion `{reference}`"),
+            origins.domain_notions.get(reference).cloned(),
+            diagnostics,
+        );
+        if let Some(notion) = model.domain_notions.get(reference) {
+            let mut targets: BTreeSet<NotionName> = notion
+                .rels
+                .iter()
+                .map(|relation| relation.target.node.clone())
+                .collect();
+            targets.extend(
+                notion
+                    .attrs
+                    .iter()
+                    .filter_map(|attribute| match &attribute.ty {
+                        AttrType::Ref(target) => Some(target.clone()),
+                        _ => None,
+                    }),
+            );
+            for target in targets {
+                check_local_notion(
+                    model,
+                    &owner.context,
+                    &target,
+                    format!("notion `{reference}`"),
+                    origins.domain_notions.get(reference).cloned(),
+                    diagnostics,
+                );
+            }
+        }
+    }
+    for (id, owner) in &model.intent_owners {
+        check_owner_exists(
+            model,
+            owner,
+            format!("intent {id}"),
+            origins.intents.get(id).cloned(),
+            diagnostics,
+        );
+    }
+    for (id, owner) in &model.constraint_owners {
+        if let Some(owner) = owner {
+            check_owner_exists(
+                model,
+                owner,
+                format!("constraint {id}"),
+                origins.constraints.get(id).cloned(),
+                diagnostics,
+            );
+        }
+    }
+
+    let map_file = model
+        .sources
+        .iter()
+        .find_map(|(path, kind)| matches!(kind, SourceKind::ContextMap).then(|| path.clone()));
+    let mut dependency_graph = Graph::default();
+    let declared_dependencies: BTreeSet<(ContextId, ContextId)> = model
+        .context_map
+        .dependencies
+        .iter()
+        .map(|dependency| (dependency.consumer.clone(), dependency.supplier.clone()))
+        .collect();
+
+    for dependency in &model.context_map.dependencies {
+        for (role, context) in [
+            ("consumer", &dependency.consumer),
+            ("supplier", &dependency.supplier),
+        ] {
+            if !model.contexts.contains_key(context) {
+                diagnostics.push(boundary(
+                    format!("dependency {role} `{context}` is not a declared context"),
+                    map_file.clone(),
+                ));
+            }
+        }
+        dependency_graph.add_edge(
+            NodeRef::Context(dependency.consumer.clone()),
+            Relation::DependsOn,
+            NodeRef::Context(dependency.supplier.clone()),
+        );
+        for mapping in &dependency.mappings {
+            if mapping.from.context != dependency.supplier
+                || mapping.to.context != dependency.consumer
+            {
+                diagnostics.push(boundary(
+                    format!(
+                        "mapping must point from supplier `{}` to consumer `{}`: {} -> {}",
+                        dependency.supplier, dependency.consumer, mapping.from, mapping.to
+                    ),
+                    map_file.clone(),
+                ));
+            }
+            for reference in [&mapping.from, &mapping.to] {
+                if !model.domain_notions.contains_key(reference) {
+                    diagnostics.push(boundary(
+                        format!("mapping references unknown notion `{reference}`"),
+                        map_file.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(cycle) = dependency_graph.find_cycle(Relation::DependsOn) {
+        let rendered: Vec<String> = cycle.iter().map(NodeRef::to_string).collect();
+        diagnostics.push(boundary(
+            format!("context dependency cycle: {}", rendered.join(" → ")),
+            map_file,
+        ));
+    }
+
+    for (id, intent) in &model.intents {
+        let Some(owner) = model.intent_owners.get(id) else {
+            continue;
+        };
+        let mut used = statement_notions(&intent.statement);
+        for scenario in &intent.scenarios {
+            used.extend(scenario_notions(scenario));
+        }
+        for notion in used {
+            check_local_notion(
+                model,
+                &owner.context,
+                &notion,
+                format!("intent {id}"),
+                origins.intents.get(id).cloned(),
+                diagnostics,
+            );
+        }
+        for relation in &intent.refines {
+            check_intent_context_relation(
+                model,
+                owner,
+                relation.node,
+                "refines",
+                false,
+                &declared_dependencies,
+                origins.intents.get(id).cloned(),
+                diagnostics,
+            );
+        }
+        for relation in &intent.excludes {
+            check_intent_context_relation(
+                model,
+                owner,
+                relation.node,
+                "excludes",
+                false,
+                &declared_dependencies,
+                origins.intents.get(id).cloned(),
+                diagnostics,
+            );
+        }
+        for relation in &intent.requires {
+            check_intent_context_relation(
+                model,
+                owner,
+                relation.node,
+                "requires",
+                true,
+                &declared_dependencies,
+                origins.intents.get(id).cloned(),
+                diagnostics,
+            );
+        }
+    }
+
+    let mut production_owners: BTreeMap<&RepoPath, ContextId> = BTreeMap::new();
+    for (index, binding) in model.bindings.iter().enumerate() {
+        let Some(binding_context) = model.binding_contexts.get(index) else {
+            continue;
+        };
+        if let Binding::Implements { path, intent } = binding {
+            if let Some(intent_owner) = model.intent_owners.get(&intent.node)
+                && intent_owner.context != *binding_context
+            {
+                diagnostics.push(boundary(
+                    format!(
+                        "binding in context `{binding_context}` implements {} owned by `{}`",
+                        intent.node, intent_owner.context
+                    ),
+                    origins.bindings.get(index).cloned(),
+                ));
+            }
+            if let Some(first) = production_owners.get(path) {
+                if first != binding_context {
+                    diagnostics.push(boundary(
+                        format!(
+                            "production file `{path}` implements intents from contexts `{first}` and `{binding_context}`"
+                        ),
+                        origins.bindings.get(index).cloned(),
+                    ));
+                }
+            } else {
+                production_owners.insert(path, binding_context.clone());
+            }
+        }
+    }
+}
+
+fn check_local_notion(
+    model: &TelosModel,
+    context: &ContextId,
+    notion: &NotionName,
+    referrer: String,
+    file: Option<RepoPath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let reference = NotionRef::new(context.clone(), notion.clone());
+    if !model.domain_notions.contains_key(&reference)
+        && model
+            .domain_notions
+            .keys()
+            .any(|candidate| candidate.notion == *notion)
+    {
+        diagnostics.push(boundary(
+            format!(
+                "{referrer} references `{reference}`, which is not owned by context `{context}`"
+            ),
+            file,
+        ));
+    }
+}
+
+fn check_owner_exists(
+    model: &TelosModel,
+    owner: &Owner,
+    entity: String,
+    file: Option<RepoPath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !model.contexts.contains_key(&owner.context) {
+        diagnostics.push(boundary(
+            format!("{entity} belongs to unknown context `{}`", owner.context),
+            file.clone(),
+        ));
+    }
+    if let Some(capability) = owner.capability_ref()
+        && !model.capabilities.contains_key(&capability)
+    {
+        diagnostics.push(boundary(
+            format!("{entity} belongs to unknown capability `{capability}`"),
+            file,
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_intent_context_relation(
+    model: &TelosModel,
+    source: &Owner,
+    target_id: IntentId,
+    relation: &str,
+    dependency_allowed: bool,
+    dependencies: &BTreeSet<(ContextId, ContextId)>,
+    file: Option<RepoPath>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(target) = model.intent_owners.get(&target_id) else {
+        return;
+    };
+    if source.context == target.context {
+        return;
+    }
+    let allowed = dependency_allowed
+        && dependencies.contains(&(source.context.clone(), target.context.clone()));
+    if !allowed {
+        diagnostics.push(boundary(
+            format!(
+                "cross-context `{relation}` from `{}` to `{}` is not allowed",
+                source.context, target.context
+            ),
+            file,
+        ));
+    }
+}
+
+fn boundary(message: String, file: Option<RepoPath>) -> Diagnostic {
+    Diagnostic {
+        code: ErrorCode::TelosContextBoundaryViolation,
+        message,
+        hint: Some(
+            "declare the ownership/dependency explicitly or keep the relation inside one context"
+                .to_string(),
+        ),
+        file,
+        line: None,
+        col: None,
+    }
+}
+
 // --- phase 3: the relation graph -----------------------------------------
 
 /// Builds the graph from declared relations plus derived `uses` edges.
 fn relation_graph(model: &TelosModel) -> Graph {
     let mut graph = Graph::default();
 
+    for capability in model.capabilities.keys() {
+        graph.add_edge(
+            NodeRef::Capability(capability.clone()),
+            Relation::BelongsTo,
+            NodeRef::Context(capability.context.clone()),
+        );
+    }
+    for (notion, owner) in &model.notion_owners {
+        let target = match owner.capability_ref() {
+            Some(capability) => NodeRef::Capability(capability),
+            None => NodeRef::Context(owner.context.clone()),
+        };
+        graph.add_edge(
+            NodeRef::QualifiedNotion(notion.clone()),
+            Relation::BelongsTo,
+            target,
+        );
+    }
+    for (intent, owner) in &model.intent_owners {
+        if let Some(capability) = owner.capability_ref() {
+            graph.add_edge(
+                NodeRef::Intent(*intent),
+                Relation::BelongsTo,
+                NodeRef::Capability(capability),
+            );
+        }
+    }
+    for (constraint, owner) in &model.constraint_owners {
+        if let Some(owner) = owner {
+            let target = match owner.capability_ref() {
+                Some(capability) => NodeRef::Capability(capability),
+                None => NodeRef::Context(owner.context.clone()),
+            };
+            graph.add_edge(
+                NodeRef::Constraint(*constraint),
+                Relation::BelongsTo,
+                target,
+            );
+        }
+    }
+    for dependency in &model.context_map.dependencies {
+        graph.add_edge(
+            NodeRef::Context(dependency.consumer.clone()),
+            Relation::DependsOn,
+            NodeRef::Context(dependency.supplier.clone()),
+        );
+        for mapping in &dependency.mappings {
+            graph.add_edge(
+                NodeRef::QualifiedNotion(mapping.from.clone()),
+                Relation::MapsTo,
+                NodeRef::QualifiedNotion(mapping.to.clone()),
+            );
+        }
+    }
+
     for intent in model.intents.values() {
         let node = NodeRef::Intent(intent.id);
+        let context = model
+            .intent_owners
+            .get(&intent.id)
+            .map(|owner| owner.context.clone());
         let declared = [
             (Relation::Refines, &intent.refines),
             (Relation::Requires, &intent.requires),
@@ -647,13 +1173,23 @@ fn relation_graph(model: &TelosModel) -> Graph {
             }
         }
         for name in statement_notions(&intent.statement) {
-            graph.add_edge(node.clone(), Relation::Uses, NodeRef::Notion(name));
+            let target = match &context {
+                Some(context) => NodeRef::QualifiedNotion(NotionRef::new(context.clone(), name)),
+                None => NodeRef::Notion(name),
+            };
+            graph.add_edge(node.clone(), Relation::Uses, target);
         }
         for scenario in &intent.scenarios {
             let scenario_node = NodeRef::Scenario(scenario.id);
             graph.add_edge(scenario_node.clone(), Relation::Verifies, node.clone());
             for name in scenario_notions(scenario) {
-                graph.add_edge(scenario_node.clone(), Relation::Uses, NodeRef::Notion(name));
+                let target = match &context {
+                    Some(context) => {
+                        NodeRef::QualifiedNotion(NotionRef::new(context.clone(), name))
+                    }
+                    None => NodeRef::Notion(name),
+                };
+                graph.add_edge(scenario_node.clone(), Relation::Uses, target);
             }
         }
     }

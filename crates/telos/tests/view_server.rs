@@ -542,7 +542,9 @@ fn asset_head_matches_get_headers_without_a_body() {
 fn reloads_last_good_snapshot_and_recovers_after_invalid_edits() {
     let tmp = with_fixture();
     let before = telos_bytes(tmp.path());
-    let intent_path = tmp.path().join("telos/intents/INT-0042.tel");
+    let intent_path = tmp
+        .path()
+        .join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
     let original = fs::read_to_string(&intent_path).unwrap();
     let changed = original.replace(
         "Invoice payment marks it settled",
@@ -567,7 +569,11 @@ fn reloads_last_good_snapshot_and_recovers_after_invalid_edits() {
     let valid_data = session_get(&url, &cookie, "/data.js");
     let valid_payload = data_payload(&valid_data);
     assert_eq!(valid_payload["snapshot"]["dashboard"]["state"], "drifted");
-    assert!(valid_data.text().contains("telos/intents/INT-0042.tel"));
+    assert!(
+        valid_data
+            .text()
+            .contains("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel")
+    );
     let valid_status: Value =
         serde_json::from_slice(&session_get(&url, &cookie, "/live.json").body).unwrap();
     let valid_generation = valid_status["generation"].as_u64().unwrap();
@@ -614,7 +620,9 @@ fn reloads_last_good_snapshot_and_recovers_after_invalid_edits() {
 #[test]
 fn live_view_observes_drifted_and_changing_projects() {
     let drifted = with_fixture();
-    let intent_path = drifted.path().join("telos/intents/INT-0042.tel");
+    let intent_path = drifted
+        .path()
+        .join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
     let changed = fs::read_to_string(&intent_path).unwrap().replace(
         "Invoice payment marks it settled",
         "Drifted invoice payment",

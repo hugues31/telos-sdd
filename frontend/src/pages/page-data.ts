@@ -3,6 +3,7 @@ import type { NotionKind, NotionView } from '../data/types';
 export const notionKinds: NotionKind[] = ['actor', 'entity', 'value', 'event', 'state'];
 
 export interface NotionGroup {
+  owner: string;
   kind: NotionKind;
   notions: NotionView[];
 }
@@ -19,9 +20,16 @@ export function filterNotions(notions: NotionView[], query: string): NotionView[
 }
 
 export function groupNotions(notions: NotionView[]): NotionGroup[] {
-  return notionKinds
-    .map((kind) => ({ kind, notions: notions.filter((notion) => notion.kind === kind) }))
-    .filter((group) => group.notions.length > 0);
+  const owners = [...new Set(notions.map((notion) => notion.owner))].sort();
+  return owners.flatMap((owner) =>
+    notionKinds
+      .map((kind) => ({
+        owner,
+        kind,
+        notions: notions.filter((notion) => notion.owner === owner && notion.kind === kind),
+      }))
+      .filter((group) => group.notions.length > 0),
+  );
 }
 
 export function percentage(value: number, total: number): number {

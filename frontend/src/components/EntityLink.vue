@@ -31,6 +31,10 @@ const props = withDefaults(
 
 const to = computed<RouteLocationRaw | null>(() => {
   switch (props.entity.kind) {
+    case 'context':
+      return { name: 'contexts', hash: `#context-${props.entity.id}` };
+    case 'capability':
+      return { name: 'contexts', hash: `#capability-${props.entity.id.replace('/', '-')}` };
     case 'intent':
       return { name: 'intent-detail', params: { id: props.entity.id } };
     case 'scenario': {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import type { RouteLocationRaw } from 'vue-router';
 
 import EmptyState from '../components/EmptyState.vue';
@@ -9,13 +9,52 @@ import { scenarioToIntent, snapshot } from '../data/snapshot';
 import type { GraphKey } from '../data/types';
 import CytoGraph from '../graph/CytoGraph.vue';
 import type { RelationFilter } from '../graph/elements';
+import {
+  containerNodeIds,
+  loadCollapsedIds,
+  normalizeCollapsedIds,
+  safeSessionStorage,
+  storeCollapsedIds,
+  toggleCollapsedId,
+} from '../graph/collapse';
+import { projectVisibleGraph } from '../graph/projection';
 import { relationLabel, relationOptionsFor } from '../graph/relations';
 import { useGraphSelection } from '../graph/selection';
 
-const nodes = computed(() => snapshot.value.snapshot.nodes);
-const edges = computed(() => snapshot.value.snapshot.edges);
+const rawNodes = computed(() => snapshot.value.snapshot.nodes);
+const rawEdges = computed(() => snapshot.value.snapshot.edges);
+const collapseStorage = typeof window === 'undefined' ? null : safeSessionStorage(window);
+const collapsedIds = ref<Set<string>>(
+  collapseStorage === null ? new Set() : loadCollapsedIds(collapseStorage, rawNodes.value),
+);
+const visibleGraph = computed(() =>
+  projectVisibleGraph(rawNodes.value, rawEdges.value, collapsedIds.value),
+);
+const nodes = computed(() => visibleGraph.value.nodes);
+const edges = computed(() => visibleGraph.value.edges);
 const { selected, setSelection } = useGraphSelection(nodes, edges);
 const relationFilter = ref<RelationFilter>('all');
+
+function persistCollapsedIds(next: Set<string>): void {
+  collapsedIds.value = next;
+  if (collapseStorage !== null) storeCollapsedIds(collapseStorage, next);
+}
+
+function toggleContainer(id: string): void {
+  persistCollapsedIds(toggleCollapsedId(collapsedIds.value, id));
+}
+
+function expandAll(): void {
+  persistCollapsedIds(new Set());
+}
+
+function collapseAll(): void {
+  persistCollapsedIds(new Set(containerNodeIds(rawNodes.value)));
+}
+
+watch(rawNodes, (nextNodes) => {
+  persistCollapsedIds(normalizeCollapsedIds(nextNodes, collapsedIds.value));
+});
 
 const relationOptions = computed(() => relationOptionsFor(edges.value));
 
@@ -43,6 +82,10 @@ const summary = computed(() => {
 
 function entityDestination(entity: GraphKey): RouteLocationRaw | null {
   switch (entity.kind) {
+    case 'context':
+      return { name: 'contexts', hash: `#context-${entity.id}` };
+    case 'capability':
+      return { name: 'contexts', hash: `#capability-${entity.id.replace('/', '-')}` };
     case 'intent':
       return { name: 'intent-detail', params: { id: entity.id } };
     case 'scenario': {
@@ -107,7 +150,12 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
           :nodes="nodes"
           :edges="edges"
           :relation-filter="relationFilter"
+          :collapsed-ids="[...collapsedIds]"
+          :selection="selected"
           @select="setSelection($event)"
+          @toggle-container="toggleContainer"
+          @expand-all="expandAll"
+          @collapse-all="collapseAll"
         />
 
         <aside class="selection-panel" aria-live="polite">
@@ -134,6 +182,16 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
                 <dd><EntityLink :entity="selected.target" /></dd>
               </div>
             </dl>
+            <details v-if="selected.members.length > 1" class="selection-panel__members">
+              <summary>{{ selected.members.length }} semantic relations</summary>
+              <ol>
+                <li v-for="(member, index) in selected.members" :key="index">
+                  <EntityLink :entity="member.from" />
+                  <span> — {{ relationLabel(member.relation) }} → </span>
+                  <EntityLink :entity="member.to" />
+                </li>
+              </ol>
+            </details>
             <RouterLink v-if="openDestination" :to="openDestination" class="selection-panel__open">
               Open
             </RouterLink>
@@ -260,6 +318,26 @@ const openDestination = computed<RouteLocationRaw | null>(() => {
 .selection-panel__edge dd {
   margin: 0.25rem 0 0;
   overflow-wrap: anywhere;
+}
+
+.selection-panel__members {
+  margin-top: 1rem;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+
+.selection-panel__members summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.selection-panel__members ol {
+  margin: 0.625rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.selection-panel__members li + li {
+  margin-top: 0.375rem;
 }
 
 .selection-panel__open {

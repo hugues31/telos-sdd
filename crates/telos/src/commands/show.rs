@@ -23,10 +23,15 @@ use std::fs;
 use serde_json::{Value, json};
 
 use telos_core::changes::read_change;
-use telos_core::emit::{emit_constraint, emit_intent, emit_notion};
+use telos_core::emit::{
+    emit_capability, emit_constraint, emit_context, emit_intent, emit_notion,
+    emit_owned_constraint, emit_owned_intent, emit_owned_notion,
+};
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::graph::NodeRef;
-use telos_core::ids::{ChangeId, ConstraintId, EntityRef, IntentId, NotionName, ScenarioId};
+use telos_core::ids::{
+    CapabilityRef, ChangeId, ConstraintId, ContextId, EntityRef, IntentId, NotionRef, ScenarioId,
+};
 use telos_core::model::TelosModel;
 use telos_core::suggest;
 use telos_core::workspace::Workspace;
@@ -51,6 +56,8 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
     let model = ws.load_model().map_err(diagnostics_to_error)?;
 
     match entity_ref {
+        EntityRef::Context(id) => show_context(&model, &id),
+        EntityRef::Capability(id) => show_capability(&model, &id),
         EntityRef::Notion(name) => show_notion(&model, &name),
         EntityRef::Intent(id) => show_intent(&model, id),
         EntityRef::Scenario(id) => show_scenario(&model, id),
@@ -58,6 +65,30 @@ pub fn run(ctx: &Ctx, target: &str) -> CmdResult {
         // Handled above, before the model was ever loaded.
         EntityRef::Change(id) => show_change(&ws, id),
     }
+}
+
+fn show_context(model: &TelosModel, id: &ContextId) -> CmdResult {
+    let Some(context) = model.contexts.get(id) else {
+        return Err(unknown("context", id, None));
+    };
+    Ok(entity_outcome(
+        json!(context),
+        emit_context(context),
+        model,
+        &NodeRef::Context(id.clone()),
+    ))
+}
+
+fn show_capability(model: &TelosModel, id: &CapabilityRef) -> CmdResult {
+    let Some(capability) = model.capabilities.get(id) else {
+        return Err(unknown("capability", id, None));
+    };
+    Ok(entity_outcome(
+        json!(capability),
+        emit_capability(capability),
+        model,
+        &NodeRef::Capability(id.clone()),
+    ))
 }
 
 /// `show CHG-0001`: the change's own fields, its ops as descriptors, and
@@ -119,16 +150,24 @@ fn read_change_file(ws: &Workspace, id: ChangeId) -> Result<String, TelosError> 
     })
 }
 
-fn show_notion(model: &TelosModel, name: &NotionName) -> CmdResult {
-    let Some(notion) = model.notions.get(name) else {
-        let known: Vec<&str> = model.notions.keys().map(NotionName::as_str).collect();
-        let hint = suggest::closest(name.as_str(), known.iter().copied())
-            .map(|c| format!("closest is `{c}`"));
+fn show_notion(model: &TelosModel, name: &NotionRef) -> CmdResult {
+    let Some(notion) = model.domain_notions.get(name) else {
+        let target = name.to_string();
+        let known: Vec<String> = model
+            .domain_notions
+            .keys()
+            .map(ToString::to_string)
+            .collect();
+        let hint = suggest::closest(&target, known.iter().map(String::as_str))
+            .map(|candidate| format!("closest is `{candidate}`"));
         return Err(unknown("notion", name, hint));
     };
 
-    let node = NodeRef::Notion(name.clone());
-    let canonical = emit_notion(notion);
+    let node = NodeRef::QualifiedNotion(name.clone());
+    let canonical = model.notion_owners.get(name).map_or_else(
+        || emit_notion(notion),
+        |owner| emit_owned_notion(owner, notion),
+    );
     Ok(entity_outcome(json!(notion), canonical, model, &node))
 }
 
@@ -141,7 +180,10 @@ fn show_intent(model: &TelosModel, id: IntentId) -> CmdResult {
     };
 
     let node = NodeRef::Intent(id);
-    let canonical = emit_intent(intent);
+    let canonical = model.intent_owners.get(&id).map_or_else(
+        || emit_intent(intent),
+        |owner| emit_owned_intent(owner, intent),
+    );
     Ok(entity_outcome(json!(intent), canonical, model, &node))
 }
 
@@ -154,7 +196,10 @@ fn show_constraint(model: &TelosModel, id: ConstraintId) -> CmdResult {
     };
 
     let node = NodeRef::Constraint(id);
-    let canonical = emit_constraint(constraint);
+    let canonical = model.constraint_owners.get(&id).map_or_else(
+        || emit_constraint(constraint),
+        |owner| emit_owned_constraint(owner.as_ref(), constraint),
+    );
     Ok(entity_outcome(json!(constraint), canonical, model, &node))
 }
 

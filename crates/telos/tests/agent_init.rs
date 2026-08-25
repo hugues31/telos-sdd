@@ -206,7 +206,7 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
         &[
             "telos change open",
             "telos impact",
-            "telos context",
+            "telos pack",
             "telos change diff",
             "telos change approve",
         ],
@@ -226,7 +226,7 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
     ordered(
         &implementer,
         &[
-            "telos context",
+            "telos pack",
             "telos test SCN-",
             "same test bytes",
             "telos bind",
@@ -251,8 +251,14 @@ fn ordered(haystack: &str, needles: &[&str]) {
 fn guard_denies_direct_file_writes_under_telos() {
     let tmp = repo();
     for (tool_name, tool_input) in [
-        ("Edit", json!({"file_path": "telos/intents/INT-0001.tel"})),
-        ("Write", json!({"file_path": "./telos/bindings.tel"})),
+        (
+            "Edit",
+            json!({"file_path": "telos/contexts/billing/capabilities/invoicing/intents/INT-0001.tel"}),
+        ),
+        (
+            "Write",
+            json!({"file_path": "./telos/contexts/billing/bindings.tel"}),
+        ),
         (
             "apply_patch",
             json!({"command": "*** Update File: telos/telos.toml"}),
@@ -279,7 +285,10 @@ fn guard_resolves_file_tool_paths_from_hook_cwd_not_repo_root() {
     fs::create_dir_all(&cwd).unwrap();
 
     for (tool_name, tool_input) in [
-        ("Edit", json!({"file_path": "../telos/bindings.tel"})),
+        (
+            "Edit",
+            json!({"file_path": "../telos/contexts/billing/bindings.tel"}),
+        ),
         (
             "apply_patch",
             json!({"command": "*** Update File: ../telos/telos.toml"}),
@@ -310,7 +319,12 @@ fn guard_resolves_bash_paths_from_hook_cwd_not_repo_root() {
     fs::create_dir_all(&cwd).unwrap();
 
     assert_eq!(
-        bash_decision_at(tmp.path(), &cwd, "claude", "touch ../telos/bindings.tel",),
+        bash_decision_at(
+            tmp.path(),
+            &cwd,
+            "claude",
+            "touch ../telos/contexts/billing/bindings.tel",
+        ),
         "deny"
     );
     assert_eq!(
@@ -323,11 +337,11 @@ fn guard_resolves_bash_paths_from_hook_cwd_not_repo_root() {
 fn guard_checks_newline_background_and_supported_shell_wrappers() {
     let tmp = repo();
     for command in [
-        "echo ok\ntouch telos/bindings.tel",
-        "echo ok & touch telos/bindings.tel",
-        "bash -c \"touch telos/bindings.tel\"",
-        "sh -c \"rm telos/bindings.tel\"",
-        "command touch telos/bindings.tel",
+        "echo ok\ntouch telos/contexts/billing/bindings.tel",
+        "echo ok & touch telos/contexts/billing/bindings.tel",
+        "bash -c \"touch telos/contexts/billing/bindings.tel\"",
+        "sh -c \"rm telos/contexts/billing/bindings.tel\"",
+        "command touch telos/contexts/billing/bindings.tel",
     ] {
         assert_eq!(
             bash_decision(tmp.path(), "claude", command),
@@ -371,9 +385,9 @@ fn guard_fails_closed_on_ambiguous_shell_syntax() {
     let tmp = repo();
     for command in [
         "bash -c \"$TELOS_COMMAND\"",
-        "touch $(printf telos/bindings.tel)",
-        "touch `printf telos/bindings.tel`",
-        "touch \"telos/bindings.tel",
+        "touch $(printf telos/contexts/billing/bindings.tel)",
+        "touch `printf telos/contexts/billing/bindings.tel`",
+        "touch \"telos/contexts/billing/bindings.tel",
     ] {
         assert_eq!(
             bash_decision(tmp.path(), "claude", command),
@@ -387,20 +401,20 @@ fn guard_fails_closed_on_ambiguous_shell_syntax() {
 fn guard_denies_opaque_inline_interpreter_evaluation() {
     let tmp = repo();
     for command in [
-        r#"python3 -c "open('telos/bindings.tel','w').write('x')""#,
-        r#"python3 -W ignore -c "open('telos/bindings.tel','w').write('x')""#,
+        r#"python3 -c "open('telos/contexts/billing/bindings.tel','w').write('x')""#,
+        r#"python3 -W ignore -c "open('telos/contexts/billing/bindings.tel','w').write('x')""#,
         r#"python -c "print('no visible path')""#,
-        r#"ruby -e "File.write('telos/bindings.tel', 'x')""#,
-        r#"ruby -I lib -e "File.write('telos/bindings.tel', 'x')""#,
-        r#"perl -e "open(F, '>', 'telos/bindings.tel')""#,
-        r#"perl -I lib -e "open(F, '>', 'telos/bindings.tel')""#,
-        r#"node -e "require('fs').writeFileSync('telos/bindings.tel','x')""#,
-        r#"node --require preload.js -e "require('fs').writeFileSync('telos/bindings.tel','x')""#,
-        r#"php -r "file_put_contents('telos/bindings.tel', 'x');""#,
-        r#"php -d display_errors=1 -r "file_put_contents('telos/bindings.tel', 'x');""#,
-        r#"lua -e "io.open('telos/bindings.tel', 'w')""#,
-        r#"lua -l helper -e "io.open('telos/bindings.tel', 'w')""#,
-        r#"awk 'BEGIN { print "x" > "telos/bindings.tel" }'"#,
+        r#"ruby -e "File.write('telos/contexts/billing/bindings.tel', 'x')""#,
+        r#"ruby -I lib -e "File.write('telos/contexts/billing/bindings.tel', 'x')""#,
+        r#"perl -e "open(F, '>', 'telos/contexts/billing/bindings.tel')""#,
+        r#"perl -I lib -e "open(F, '>', 'telos/contexts/billing/bindings.tel')""#,
+        r#"node -e "require('fs').writeFileSync('telos/contexts/billing/bindings.tel','x')""#,
+        r#"node --require preload.js -e "require('fs').writeFileSync('telos/contexts/billing/bindings.tel','x')""#,
+        r#"php -r "file_put_contents('telos/contexts/billing/bindings.tel', 'x');""#,
+        r#"php -d display_errors=1 -r "file_put_contents('telos/contexts/billing/bindings.tel', 'x');""#,
+        r#"lua -e "io.open('telos/contexts/billing/bindings.tel', 'w')""#,
+        r#"lua -l helper -e "io.open('telos/contexts/billing/bindings.tel', 'w')""#,
+        r#"awk 'BEGIN { print "x" > "telos/contexts/billing/bindings.tel" }'"#,
     ] {
         assert_eq!(
             bash_decision(tmp.path(), "claude", command),
@@ -464,7 +478,7 @@ fn guard_round_two_denies_shell_wrapper_options_before_c() {
         bash_decision(
             tmp.path(),
             "claude",
-            "bash --norc -c \"touch telos/bindings.tel\"",
+            "bash --norc -c \"touch telos/contexts/billing/bindings.tel\"",
         ),
         "deny"
     );
@@ -474,7 +488,7 @@ fn guard_round_two_denies_shell_wrapper_options_before_c() {
 fn guard_round_two_denies_clobber_redirect_operator() {
     let tmp = repo();
     for command in [
-        "echo x >| telos/bindings.tel",
+        "echo x >| telos/contexts/billing/bindings.tel",
         "telos status --json >| telos/status.json",
     ] {
         assert_eq!(
@@ -489,7 +503,7 @@ fn guard_round_two_denies_clobber_redirect_operator() {
 fn guard_round_two_denies_unproven_shell_path_expansions() {
     let tmp = repo();
     for command in [
-        "touch ~+/telos/bindings.tel",
+        "touch ~+/telos/contexts/billing/bindings.tel",
         "rm -rf telo?",
         "rm -rf telo[s]",
         "rm -rf telo*",
@@ -527,7 +541,7 @@ fn guard_round_two_extracts_key_value_paths() {
         bash_decision(
             tmp.path(),
             "claude",
-            "dd if=/dev/null of=telos/bindings.tel",
+            "dd if=/dev/null of=telos/contexts/billing/bindings.tel",
         ),
         "deny"
     );
@@ -585,8 +599,8 @@ fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() 
         .success();
     stage_drafted_config_change(tmp.path(), &["codex"]);
     fs::write(
-        tmp.path().join("telos/notions/Drift.tel"),
-        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+        tmp.path().join("telos/constraints/CON-0900.tel"),
+        "constraint CON-0900 in project quality \"Prompt-time drift\" {\n  rule  \"Prompt-time drift.\"\n}\n",
     )
     .unwrap();
     let rules = read(tmp.path(), ".codex/rules/telos.rules");
@@ -625,9 +639,9 @@ fn guard_round_two_codex_allows_only_direct_actions_matched_by_rendered_rules() 
 fn guard_round_two_fails_closed_on_combined_directory_changes() {
     let tmp = repo();
     for command in [
-        "cd crates && touch ../telos/bindings.tel",
-        "bash -c \"cd crates; touch ../telos/bindings.tel\"",
-        "pushd crates; rm ../telos/bindings.tel",
+        "cd crates && touch ../telos/contexts/billing/bindings.tel",
+        "bash -c \"cd crates; touch ../telos/contexts/billing/bindings.tel\"",
+        "pushd crates; rm ../telos/contexts/billing/bindings.tel",
     ] {
         assert_eq!(
             bash_decision(tmp.path(), "claude", command),
@@ -703,9 +717,9 @@ fn tool_decision(
 fn guard_denies_direct_shell_mutations_but_allows_inspection_and_source_edits() {
     let tmp = repo();
     for command in [
-        "touch telos/intents/new.tel",
-        "rm telos/bindings.tel",
-        "mv draft.tel telos/intents/INT-0001.tel",
+        "touch telos/contexts/billing/capabilities/invoicing/intents/new.tel",
+        "rm telos/contexts/billing/bindings.tel",
+        "mv draft.tel telos/contexts/billing/capabilities/invoicing/intents/INT-0001.tel",
         "echo changed > telos/telos.toml",
         "sed -i s/old/new/ telos/telos.toml",
     ] {
@@ -719,7 +733,7 @@ fn guard_denies_direct_shell_mutations_but_allows_inspection_and_source_edits() 
     for command in [
         "telos status --json",
         "telos show INT-0001 --json",
-        "telos context INT-0001 --json",
+        "telos pack INT-0001 --json",
         "telos change diff CHG-0001 --json",
         "cat telos/telos.toml",
         "echo telosophy",
@@ -845,13 +859,13 @@ fn guard_surfaces_repository_derived_decision_context() {
 fn guard_surfaces_sorted_current_drift_context_for_adopt_and_revert() {
     let tmp = with_fixture();
     fs::write(
-        tmp.path().join("telos/notions/Alpha.tel"),
-        "notion Alpha entity \"An untracked notion.\"\n",
+        tmp.path().join("telos/constraints/CON-0901.tel"),
+        "constraint CON-0901 in project quality \"Alpha drift\" {\n  rule  \"An untracked rule.\"\n}\n",
     )
     .expect("write Alpha drift");
     fs::write(
-        tmp.path().join("telos/notions/Zeta.tel"),
-        "notion Zeta entity \"Another untracked notion.\"\n",
+        tmp.path().join("telos/constraints/CON-0902.tel"),
+        "constraint CON-0902 in project quality \"Zeta drift\" {\n  rule  \"Another untracked rule.\"\n}\n",
     )
     .expect("write Zeta drift");
 
@@ -860,7 +874,7 @@ fn guard_surfaces_sorted_current_drift_context_for_adopt_and_revert() {
         .expect("fixture is sealed")
         .spec_digest;
     let expected = format!(
-        "drift paths [telos/notions/Alpha.tel, telos/notions/Zeta.tel]; sealed spec digest {sealed_digest}"
+        "drift paths [telos/constraints/CON-0901.tel, telos/constraints/CON-0902.tel]; sealed spec digest {sealed_digest}"
     );
     let token = current_drift_token(tmp.path());
 
@@ -935,14 +949,14 @@ fn guard_denies_tokens_made_stale_while_the_native_prompt_is_open() {
 
     let drift = with_fixture();
     fs::write(
-        drift.path().join("telos/notions/Alpha.tel"),
-        "notion Alpha entity {\n  def  \"First drift.\"\n}\n",
+        drift.path().join("telos/constraints/CON-0901.tel"),
+        "constraint CON-0901 in project quality \"First drift\" {\n  rule  \"First drift.\"\n}\n",
     )
     .unwrap();
     let stale_state = current_drift_token(drift.path());
     fs::write(
-        drift.path().join("telos/notions/Zeta.tel"),
-        "notion Zeta entity {\n  def  \"Later drift.\"\n}\n",
+        drift.path().join("telos/constraints/CON-0902.tel"),
+        "constraint CON-0902 in project quality \"Later drift\" {\n  rule  \"Later drift.\"\n}\n",
     )
     .unwrap();
 
@@ -1043,8 +1057,8 @@ fn codex_guard_uses_undecided_output_for_allowed_commands() {
         .success();
     stage_drafted_config_change(tmp.path(), &["codex"]);
     fs::write(
-        tmp.path().join("telos/notions/Drift.tel"),
-        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+        tmp.path().join("telos/constraints/CON-0900.tel"),
+        "constraint CON-0900 in project quality \"Prompt-time drift\" {\n  rule  \"Prompt-time drift.\"\n}\n",
     )
     .unwrap();
     let digest = current_change_digest(tmp.path());
@@ -1142,8 +1156,8 @@ fn claude_asks_for_resolved_human_decisions_without_trusting_descriptions() {
     let tmp = repo();
     telos(tmp.path(), &["init"]).assert().success();
     fs::write(
-        tmp.path().join("telos/notions/Drift.tel"),
-        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+        tmp.path().join("telos/constraints/CON-0900.tel"),
+        "constraint CON-0900 in project quality \"Prompt-time drift\" {\n  rule  \"Prompt-time drift.\"\n}\n",
     )
     .unwrap();
     let token = current_drift_token(tmp.path());
@@ -1184,8 +1198,8 @@ fn codex_guard_never_returns_ask_and_rules_own_native_prompts() {
         .success();
     stage_drafted_config_change(tmp.path(), &["codex"]);
     fs::write(
-        tmp.path().join("telos/notions/Drift.tel"),
-        "notion Drift entity {\n  def  \"Prompt-time drift.\"\n}\n",
+        tmp.path().join("telos/constraints/CON-0900.tel"),
+        "constraint CON-0900 in project quality \"Prompt-time drift\" {\n  rule  \"Prompt-time drift.\"\n}\n",
     )
     .unwrap();
     let digest = current_change_digest(tmp.path());

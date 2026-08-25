@@ -1,0 +1,3 @@
+constraint CON-0003 in context billing architecture "Hexagonal boundaries" {
+  rule  "Domain code must not import adapter modules."
+}

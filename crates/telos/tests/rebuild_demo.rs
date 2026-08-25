@@ -457,10 +457,7 @@ fn implement_batch(
         ],
         &documented_json(root, "intent-activation"),
     );
-    assert_eq!(
-        staged["claims"],
-        json!([format!("telos/intents/{}.tel", batch.intent)])
-    );
+    assert_eq!(staged["claims"], json!([intent_spec_path(batch.intent)]));
     assert_eq!(staged["scenario_ids"], json!([]));
 
     if batch.intent == INT_0017 {
@@ -480,8 +477,8 @@ fn implement_batch(
         assert_eq!(
             staged_constraint["claims"],
             json!([
-                format!("telos/constraints/{CONSTRAINT}.tel"),
-                format!("telos/intents/{}.tel", batch.intent)
+                intent_spec_path(batch.intent),
+                format!("telos/contexts/billing/constraints/{CONSTRAINT}.tel")
             ])
         );
     }
@@ -627,6 +624,15 @@ fn implement_batch(
     (progress_before, red, green, progress)
 }
 
+fn intent_spec_path(intent: &str) -> String {
+    let capability = if intent == INT_0017 {
+        "invoicing"
+    } else {
+        "settlement"
+    };
+    format!("telos/contexts/billing/capabilities/{capability}/intents/{intent}.tel")
+}
+
 fn assert_initial_plan(plan: &Value) {
     let steps = plan["steps"].as_array().expect("plan steps");
     assert_eq!(steps.len(), 2);
@@ -643,15 +649,17 @@ fn assert_initial_plan(plan: &Value) {
         "change",
         "constraints",
         "id",
+        "mappings",
         "neighbors",
         "notions",
+        "owner",
         "scenarios",
     ]);
     for step in steps {
         assert_eq!(
-            step["context"]
+            step["pack"]
                 .as_object()
-                .expect("full context pack")
+                .expect("full work pack")
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
@@ -659,16 +667,20 @@ fn assert_initial_plan(plan: &Value) {
         );
     }
 
-    assert_eq!(steps[0]["context"]["id"], json!(INT_0017));
-    assert_eq!(steps[0]["context"]["change"], Value::Null);
+    assert_eq!(steps[0]["pack"]["id"], json!(INT_0017));
+    assert_eq!(
+        steps[0]["pack"]["owner"],
+        json!({"context": "billing", "capability": "invoicing"})
+    );
+    assert_eq!(steps[0]["pack"]["change"], Value::Null);
     assert!(
-        steps[0]["context"]["canonical"]
+        steps[0]["pack"]["canonical"]
             .as_str()
             .expect("canonical first intent")
             .contains("  status draft\n")
     );
     assert_eq!(
-        steps[0]["context"]["scenarios"],
+        steps[0]["pack"]["scenarios"],
         json!([{
             "id": SCN_0091,
             "title": "a newly issued invoice is open",
@@ -676,34 +688,35 @@ fn assert_initial_plan(plan: &Value) {
         }])
     );
     assert_eq!(
-        steps[0]["context"]["notions"]
+        steps[0]["pack"]["notions"]
             .as_array()
             .unwrap()
             .iter()
             .map(|notion| notion["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["Customer", "Invoice", "InvoiceIssued"]
+        [
+            "billing/Customer",
+            "billing/Invoice",
+            "billing/InvoiceIssued"
+        ]
     );
     assert_eq!(
-        steps[0]["context"]["bindings"],
+        steps[0]["pack"]["bindings"],
         json!({"implements": [], "proves": []})
     );
+    assert_eq!(steps[0]["pack"]["constraints"][0]["id"], json!("CON-0003"));
     assert_eq!(
-        steps[0]["context"]["constraints"][0]["id"],
-        json!("CON-0003")
-    );
-    assert_eq!(
-        steps[0]["context"]["constraints"][0]["scope"],
-        json!("global")
+        steps[0]["pack"]["constraints"][0]["scope"],
+        json!("context")
     );
     assert!(
-        steps[0]["context"]["canonical"]
+        steps[0]["pack"]["canonical"]
             .as_str()
             .unwrap()
             .contains("system shall set Invoice.state = open")
     );
     assert_eq!(
-        steps[0]["context"]["neighbors"],
+        steps[0]["pack"]["neighbors"],
         json!([{
             "id": INT_0042,
             "title": "Invoice payment marks it settled",
@@ -712,16 +725,20 @@ fn assert_initial_plan(plan: &Value) {
         }])
     );
 
-    assert_eq!(steps[1]["context"]["id"], json!(INT_0042));
-    assert_eq!(steps[1]["context"]["change"], Value::Null);
+    assert_eq!(steps[1]["pack"]["id"], json!(INT_0042));
+    assert_eq!(
+        steps[1]["pack"]["owner"],
+        json!({"context": "billing", "capability": "settlement"})
+    );
+    assert_eq!(steps[1]["pack"]["change"], Value::Null);
     assert!(
-        steps[1]["context"]["canonical"]
+        steps[1]["pack"]["canonical"]
             .as_str()
             .expect("canonical second intent")
             .contains("  status draft\n")
     );
     assert_eq!(
-        steps[1]["context"]["scenarios"],
+        steps[1]["pack"]["scenarios"],
         json!([{
             "id": SCN_0107,
             "title": "full payment settles the invoice",
@@ -729,34 +746,31 @@ fn assert_initial_plan(plan: &Value) {
         }])
     );
     assert_eq!(
-        steps[1]["context"]["notions"]
+        steps[1]["pack"]["notions"]
             .as_array()
             .unwrap()
             .iter()
             .map(|notion| notion["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["Invoice", "PaymentReceived"]
+        ["billing/Invoice", "billing/PaymentReceived"]
     );
     assert_eq!(
-        steps[1]["context"]["bindings"],
+        steps[1]["pack"]["bindings"],
         json!({"implements": [], "proves": []})
     );
+    assert_eq!(steps[1]["pack"]["constraints"][0]["id"], json!("CON-0003"));
     assert_eq!(
-        steps[1]["context"]["constraints"][0]["id"],
-        json!("CON-0003")
-    );
-    assert_eq!(
-        steps[1]["context"]["constraints"][0]["scope"],
-        json!("global")
+        steps[1]["pack"]["constraints"][0]["scope"],
+        json!("context")
     );
     assert!(
-        steps[1]["context"]["canonical"]
+        steps[1]["pack"]["canonical"]
             .as_str()
             .unwrap()
             .contains("system shall set Invoice.state = settled")
     );
     assert_eq!(
-        steps[1]["context"]["neighbors"],
+        steps[1]["pack"]["neighbors"],
         json!([{
             "id": INT_0017,
             "title": "Issuing an invoice opens it",
@@ -795,14 +809,18 @@ fn relative_files(root: &Path) -> BTreeSet<String> {
 fn assert_public_demo_is_solution_free(root: &Path) {
     let expected = BTreeSet::from([
         "README.md".to_owned(),
-        "telos/bindings.tel".to_owned(),
-        "telos/constraints/CON-0003.tel".to_owned(),
-        "telos/intents/INT-0017.tel".to_owned(),
-        "telos/intents/INT-0042.tel".to_owned(),
-        "telos/notions/Customer.tel".to_owned(),
-        "telos/notions/Invoice.tel".to_owned(),
-        "telos/notions/InvoiceIssued.tel".to_owned(),
-        "telos/notions/PaymentReceived.tel".to_owned(),
+        "telos/context-map.tel".to_owned(),
+        "telos/contexts/billing/context.tel".to_owned(),
+        "telos/contexts/billing/bindings.tel".to_owned(),
+        "telos/contexts/billing/constraints/CON-0003.tel".to_owned(),
+        "telos/contexts/billing/capabilities/invoicing/capability.tel".to_owned(),
+        "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel".to_owned(),
+        "telos/contexts/billing/capabilities/settlement/capability.tel".to_owned(),
+        "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel".to_owned(),
+        "telos/contexts/billing/notions/Customer.tel".to_owned(),
+        "telos/contexts/billing/notions/Invoice.tel".to_owned(),
+        "telos/contexts/billing/capabilities/invoicing/notions/InvoiceIssued.tel".to_owned(),
+        "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel".to_owned(),
         "telos/telos.toml".to_owned(),
     ]);
     assert_eq!(
@@ -842,7 +860,7 @@ fn reconstruct(target_dir: &Path) -> Observations {
     assert!(!root.join("architecture").exists());
     assert!(!root.join("telos/telos.lock").exists());
     assert_eq!(
-        fs::read_to_string(root.join("telos/bindings.tel")).unwrap(),
+        fs::read_to_string(root.join("telos/contexts/billing/bindings.tel")).unwrap(),
         ""
     );
 
@@ -918,17 +936,19 @@ fn reconstruct(target_dir: &Path) -> Observations {
             .all(|row| row["green"] == json!(true))
     );
     assert_eq!(
-        fs::read_to_string(root.join(format!("telos/constraints/{CONSTRAINT}.tel"))).unwrap(),
+        fs::read_to_string(root.join(format!(
+            "telos/contexts/billing/constraints/{CONSTRAINT}.tel"
+        )))
+        .unwrap(),
         format!(
-            "constraint {CONSTRAINT} architecture \"Hexagonal boundaries\" {{\n  \
+            "constraint {CONSTRAINT} in context billing architecture \"Hexagonal boundaries\" {{\n  \
              rule  \"Domain code must not import adapter modules.\"\n  \
-             scope global\n  \
              check \"{CONSTRAINT_CHECK}\"\n\
              }}\n"
         )
     );
 
-    let bindings = fs::read_to_string(root.join("telos/bindings.tel")).unwrap();
+    let bindings = fs::read_to_string(root.join("telos/contexts/billing/bindings.tel")).unwrap();
     assert_eq!(
         bindings,
         "implements \"Cargo.lock\" -> INT-0017\n\
@@ -945,7 +965,9 @@ fn reconstruct(target_dir: &Path) -> Observations {
         CODE,
         ISSUED_TEST,
         PAYMENT_TEST,
-        "telos/constraints/CON-0003.tel",
+        "telos/contexts/billing/constraints/CON-0003.tel",
+        "telos/contexts/billing/context.tel",
+        "telos/context-map.tel",
         "telos/telos.toml",
     ] {
         assert!(lock.contains(path), "`{path}` is not sealed:\n{lock}");
@@ -963,15 +985,19 @@ fn reconstruct(target_dir: &Path) -> Observations {
         CODE.to_owned(),
         ISSUED_TEST.to_owned(),
         PAYMENT_TEST.to_owned(),
-        "telos/bindings.tel".to_owned(),
+        "telos/context-map.tel".to_owned(),
+        "telos/contexts/billing/context.tel".to_owned(),
+        "telos/contexts/billing/bindings.tel".to_owned(),
         "telos/changes/counters.toml".to_owned(),
-        "telos/constraints/CON-0003.tel".to_owned(),
-        "telos/intents/INT-0017.tel".to_owned(),
-        "telos/intents/INT-0042.tel".to_owned(),
-        "telos/notions/Customer.tel".to_owned(),
-        "telos/notions/Invoice.tel".to_owned(),
-        "telos/notions/InvoiceIssued.tel".to_owned(),
-        "telos/notions/PaymentReceived.tel".to_owned(),
+        "telos/contexts/billing/constraints/CON-0003.tel".to_owned(),
+        "telos/contexts/billing/capabilities/invoicing/capability.tel".to_owned(),
+        "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel".to_owned(),
+        "telos/contexts/billing/capabilities/settlement/capability.tel".to_owned(),
+        "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel".to_owned(),
+        "telos/contexts/billing/notions/Customer.tel".to_owned(),
+        "telos/contexts/billing/notions/Invoice.tel".to_owned(),
+        "telos/contexts/billing/capabilities/invoicing/notions/InvoiceIssued.tel".to_owned(),
+        "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel".to_owned(),
         "telos/telos.lock".to_owned(),
         "telos/telos.toml".to_owned(),
     ]);

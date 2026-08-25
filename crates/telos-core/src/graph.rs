@@ -19,7 +19,9 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::ids::{ConstraintId, IntentId, NotionName, RepoPath, ScenarioId};
+use crate::ids::{
+    CapabilityRef, ConstraintId, ContextId, IntentId, NotionName, NotionRef, RepoPath, ScenarioId,
+};
 
 /// A node of the relation graph.
 ///
@@ -30,6 +32,9 @@ use crate::ids::{ConstraintId, IntentId, NotionName, RepoPath, ScenarioId};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(untagged)]
 pub enum NodeRef {
+    Context(ContextId),
+    Capability(CapabilityRef),
+    QualifiedNotion(NotionRef),
     Notion(NotionName),
     Intent(IntentId),
     Scenario(ScenarioId),
@@ -44,6 +49,9 @@ pub enum NodeRef {
 impl fmt::Display for NodeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            NodeRef::Context(id) => write!(f, "CTX:{id}"),
+            NodeRef::Capability(id) => write!(f, "CAP:{id}"),
+            NodeRef::QualifiedNotion(id) => write!(f, "NOT:{id}"),
             NodeRef::Notion(n) => n.fmt(f),
             NodeRef::Intent(i) => i.fmt(f),
             NodeRef::Scenario(s) => s.fmt(f),
@@ -58,6 +66,9 @@ impl fmt::Display for NodeRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Relation {
+    BelongsTo,
+    DependsOn,
+    MapsTo,
     Refines,
     Requires,
     Excludes,
@@ -73,6 +84,9 @@ impl Relation {
     /// The relation's spelling in `.tel` sources and in diagnostics.
     pub fn as_str(self) -> &'static str {
         match self {
+            Relation::BelongsTo => "belongs-to",
+            Relation::DependsOn => "depends-on",
+            Relation::MapsTo => "maps-to",
             Relation::Refines => "refines",
             Relation::Requires => "requires",
             Relation::Excludes => "excludes",
@@ -196,8 +210,12 @@ impl Graph {
         None
     }
 
-    /// Every entity reachable *backwards* from `from` over any relation --
-    /// what a change to `from` can impact.
+    /// Every entity reachable backwards from `from`, plus the consumer side
+    /// of an outgoing context-map mapping -- what a change to `from` can
+    /// impact. `MapsTo` is the deliberate exception to the reverse walk:
+    /// its written direction is supplier notion to consumer projection, and
+    /// a supplier change must therefore enter that projection before walking
+    /// backwards into its users.
     ///
     /// Breadth-first over `in_edges`, so `distance` is the shortest-path
     /// length in edges and `via` is the relation of the edge that reached the
@@ -218,14 +236,23 @@ impl Graph {
             // which edge reaches a node "first" -- and therefore its `via` --
             // is a function of the graph alone.
             for node in &frontier {
-                for (rel, source) in self.in_edges(node) {
+                let mut adjacent: Vec<(Relation, NodeRef)> = self.in_edges(node).to_vec();
+                adjacent.extend(
+                    self.out_edges(node)
+                        .iter()
+                        .filter(|(relation, _)| *relation == Relation::MapsTo)
+                        .cloned(),
+                );
+                adjacent.sort();
+                adjacent.dedup();
+                for (rel, source) in adjacent {
                     if seen.insert(source.clone()) {
                         entries.push(ImpactEntry {
                             node: source.clone(),
-                            via: *rel,
+                            via: rel,
                             distance,
                         });
-                        next.push(source.clone());
+                        next.push(source);
                     }
                 }
             }
@@ -252,6 +279,24 @@ mod tests {
 
     fn scenario(n: u32) -> NodeRef {
         NodeRef::Scenario(ScenarioId(n))
+    }
+
+    #[test]
+    fn supplier_notion_impact_enters_its_mapped_consumer_projection() {
+        let supplier = NodeRef::QualifiedNotion("pet/Pet".parse().unwrap());
+        let projection = NodeRef::QualifiedNotion("terminal/PetView".parse().unwrap());
+        let consumer = intent(12);
+        let mut graph = Graph::default();
+        graph.add_edge(supplier.clone(), Relation::MapsTo, projection.clone());
+        graph.add_edge(consumer.clone(), Relation::Uses, projection.clone());
+
+        let impacted = graph.reverse_closure(&supplier);
+        assert!(impacted.iter().any(|entry| {
+            entry.node == projection && entry.via == Relation::MapsTo && entry.distance == 1
+        }));
+        assert!(impacted.iter().any(|entry| {
+            entry.node == consumer && entry.via == Relation::Uses && entry.distance == 2
+        }));
     }
 
     // --- NodeRef / Relation --------------------------------------------

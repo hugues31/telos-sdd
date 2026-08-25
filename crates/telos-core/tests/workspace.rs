@@ -42,15 +42,59 @@ fn copied_corpus() -> TempDir {
     tmp
 }
 
-const EXPECTED_SPEC_FILES: [&str; 9] = [
-    "telos/bindings.tel",
-    "telos/constraints/CON-0003.tel",
-    "telos/intents/INT-0017.tel",
-    "telos/intents/INT-0042.tel",
-    "telos/notions/Customer.tel",
-    "telos/notions/Invoice.tel",
-    "telos/notions/InvoiceIssued.tel",
-    "telos/notions/PaymentReceived.tel",
+fn strategic_workspace() -> TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("telos");
+    fs::create_dir_all(root.join("contexts/pet/capabilities/care/intents")).unwrap();
+    fs::create_dir_all(root.join("contexts/pet/notions")).unwrap();
+    fs::create_dir_all(root.join("constraints")).unwrap();
+    fs::write(root.join("telos.toml"), "").unwrap();
+    fs::write(
+        root.join("contexts/pet/context.tel"),
+        "context pet core \"Pet\" {\n  def \"Virtual pet rules.\"\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("contexts/pet/capabilities/care/capability.tel"),
+        "capability pet/care \"Care\" {\n  def \"Care for a pet.\"\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("contexts/pet/notions/Pet.tel"),
+        "notion pet/Pet entity {\n  def \"A virtual pet.\"\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("contexts/pet/capabilities/care/intents/INT-0001.tel"),
+        concat!(
+            "intent INT-0001 in pet/care \"Care for a pet\" {\n",
+            "  status draft\n",
+            "  telos  \"The pet remains healthy.\"\n",
+            "  statement ubiquitous {\n",
+            "    system shall \"record care\"\n",
+            "  }\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    fs::write(root.join("contexts/pet/bindings.tel"), "").unwrap();
+    fs::write(root.join("context-map.tel"), "context-map {\n}\n").unwrap();
+    tmp
+}
+
+const EXPECTED_SPEC_FILES: [&str; 13] = [
+    "telos/context-map.tel",
+    "telos/contexts/billing/bindings.tel",
+    "telos/contexts/billing/capabilities/invoicing/capability.tel",
+    "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
+    "telos/contexts/billing/capabilities/invoicing/notions/InvoiceIssued.tel",
+    "telos/contexts/billing/capabilities/settlement/capability.tel",
+    "telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+    "telos/contexts/billing/capabilities/settlement/notions/PaymentReceived.tel",
+    "telos/contexts/billing/constraints/CON-0003.tel",
+    "telos/contexts/billing/context.tel",
+    "telos/contexts/billing/notions/Customer.tel",
+    "telos/contexts/billing/notions/Invoice.tel",
     "telos/telos.toml",
 ];
 
@@ -125,6 +169,59 @@ fn discover_defaults_an_empty_telos_toml() {
 // --- spec_files --------------------------------------------------------------
 
 #[test]
+fn spec_files_recurses_through_contexts_and_capabilities() {
+    let tmp = strategic_workspace();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+    let files: Vec<_> = ws
+        .spec_files()
+        .unwrap()
+        .into_iter()
+        .map(|path| path.to_string())
+        .collect();
+
+    assert_eq!(
+        files,
+        vec![
+            "telos/context-map.tel",
+            "telos/contexts/pet/bindings.tel",
+            "telos/contexts/pet/capabilities/care/capability.tel",
+            "telos/contexts/pet/capabilities/care/intents/INT-0001.tel",
+            "telos/contexts/pet/context.tel",
+            "telos/contexts/pet/notions/Pet.tel",
+            "telos/telos.toml",
+        ]
+    );
+}
+
+#[test]
+fn spec_files_rejects_the_legacy_flat_layout() {
+    let tmp = strategic_workspace();
+    fs::create_dir_all(tmp.path().join("telos/intents")).unwrap();
+    fs::write(tmp.path().join("telos/intents/INT-0009.tel"), "legacy").unwrap();
+    let ws = Workspace::discover(tmp.path()).unwrap();
+
+    let error = ws.spec_files().unwrap_err();
+    assert_eq!(error.code, ErrorCode::TelosLayoutViolation);
+    assert!(error.message.contains("telos/intents"));
+}
+
+#[test]
+fn load_model_rejects_an_owner_that_disagrees_with_its_path() {
+    let tmp = strategic_workspace();
+    fs::write(
+        tmp.path().join("telos/contexts/pet/notions/Pet.tel"),
+        "notion billing/Pet entity {\n  def \"Wrong owner.\"\n}\n",
+    )
+    .unwrap();
+
+    let diagnostics = ws_load_model_err(tmp.path());
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == ErrorCode::TelosLayoutViolation
+            && diagnostic.message.contains("expected owner `pet`")
+    }));
+}
+
+#[test]
 fn spec_files_matches_the_exact_sorted_corpus_list() {
     let tmp = copied_corpus();
     let ws = Workspace::discover(tmp.path()).unwrap();
@@ -164,7 +261,11 @@ fn spec_files_excludes_the_lock_file_and_the_changes_directory() {
 #[test]
 fn spec_files_ignores_stray_non_tel_files() {
     let tmp = copied_corpus();
-    fs::write(tmp.path().join("telos/notions/README.md"), "not a spec").unwrap();
+    fs::write(
+        tmp.path().join("telos/contexts/billing/notions/README.md"),
+        "not a spec",
+    )
+    .unwrap();
 
     let ws = Workspace::discover(tmp.path()).unwrap();
     let files: Vec<String> = ws
@@ -189,6 +290,9 @@ fn load_model_succeeds_on_the_corpus() {
         .unwrap_or_else(|diags| panic!("expected the corpus to load cleanly, got {diags:?}"));
 
     assert_eq!(model.notions.len(), 4);
+    assert_eq!(model.domain_notions.len(), 4);
+    assert_eq!(model.contexts.len(), 1);
+    assert_eq!(model.capabilities.len(), 2);
     assert_eq!(model.intents.len(), 2);
     assert_eq!(model.constraints.len(), 1);
     assert_eq!(model.bindings.len(), 2);
@@ -200,7 +304,7 @@ fn load_model_reports_a_diagnostic_naming_an_intent_source_stray_in_notions() {
     // Well-formed intent content, just filed under `notions/` -- location
     // contradicts content, so `parse_notion_file` must reject it on its
     // own terms (it never sees a `notion` keyword).
-    let stray = tmp.path().join("telos/notions/Stray.tel");
+    let stray = tmp.path().join("telos/contexts/billing/notions/Stray.tel");
     fs::write(
         &stray,
         r#"intent INT-0099 "misplaced intent" {
@@ -217,10 +321,9 @@ fn load_model_reports_a_diagnostic_naming_an_intent_source_stray_in_notions() {
     let diags = ws_load_model_err(tmp.path());
 
     assert!(
-        diags
-            .iter()
-            .any(|d| d.file.as_ref().map(|f| f.as_str()) == Some("telos/notions/Stray.tel")),
-        "expected a diagnostic naming telos/notions/Stray.tel, got {diags:?}"
+        diags.iter().any(|d| d.file.as_ref().map(|f| f.as_str())
+            == Some("telos/contexts/billing/notions/Stray.tel")),
+        "expected a diagnostic naming the misplaced Stray.tel, got {diags:?}"
     );
 }
 

@@ -20,6 +20,8 @@ const props = withDefaults(
 );
 
 const defaultLabels: Record<PillKind, string> = {
+  context: 'Context',
+  capability: 'Capability',
   notion: 'Notion',
   intent: 'Intent',
   scenario: 'Scenario',
@@ -67,6 +69,14 @@ const displayLabel = computed(() => props.label ?? defaultLabels[props.kind]);
 
 .kind-pill--notion .kind-pill__dot {
   background: var(--k-notion);
+}
+
+.kind-pill--context .kind-pill__dot {
+  background: var(--k-context);
+}
+
+.kind-pill--capability .kind-pill__dot {
+  background: var(--k-capability);
 }
 
 .kind-pill--intent .kind-pill__dot {

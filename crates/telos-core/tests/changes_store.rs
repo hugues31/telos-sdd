@@ -12,7 +12,7 @@ use telos_core::changes::{
     delete_change, list_change_ids, open_change_infos, read_change, scan_changes, write_change,
 };
 use telos_core::error::ErrorCode;
-use telos_core::ids::{ChangeId, NotionName};
+use telos_core::ids::{ChangeId, ContextId, NotionName, Owner};
 use telos_core::model::{Change, ChangeStatus, Notion, NotionKind, StagedOp};
 use telos_core::workspace::Workspace;
 
@@ -47,7 +47,7 @@ fn copied_corpus() -> TempDir {
 }
 
 /// A minimal valid notion, distinct from anything the corpus already
-/// declares -- just enough for a `StagedOp::AddNotion` to hang off.
+/// declares -- just enough for a `StagedOp::AddOwnedNotion` to hang off.
 fn ledger_notion() -> Notion {
     Notion {
         name: NotionName::new("Ledger").unwrap(),
@@ -65,7 +65,10 @@ fn sample_change(id: u32) -> Change {
         motivation: "Introduce the ledger".to_string(),
         status: ChangeStatus::Drafted,
         approved_digest: None,
-        ops: vec![StagedOp::AddNotion(ledger_notion())],
+        ops: vec![StagedOp::AddOwnedNotion {
+            owner: Owner::context(ContextId::new("billing").unwrap()),
+            notion: ledger_notion(),
+        }],
         journal: vec![],
     }
 }

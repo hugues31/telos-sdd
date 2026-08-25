@@ -696,7 +696,9 @@ mod tests {
         ));
 
         for _ in 0..10_000 {
-            notifier.record(Ok(event("/repo/telos/intents/INT-0042.tel")));
+            notifier.record(Ok(event(
+                "/repo/telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+            )));
         }
         assert_eq!(queue.receiver.try_recv(), Ok(()));
         assert!(matches!(
@@ -737,7 +739,9 @@ mod tests {
     #[test]
     fn watcher_ignores_non_mutating_access_without_hiding_mutations() {
         let root = PathBuf::from("/repo");
-        let path = PathBuf::from("/repo/telos/intents/INT-0042.tel");
+        let path = PathBuf::from(
+            "/repo/telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+        );
 
         for kind in [
             AccessKind::Any,
@@ -777,7 +781,9 @@ mod tests {
     #[test]
     fn an_event_arriving_during_rebuild_schedules_another_rebuild() {
         let (notifier, queue) = WatchNotifier::channel(PathBuf::from("/repo"));
-        notifier.record(Ok(event("/repo/telos/intents/INT-0042.tel")));
+        notifier.record(Ok(event(
+            "/repo/telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel",
+        )));
         let during_rebuild = notifier.clone();
         drop(notifier);
 
@@ -788,7 +794,7 @@ mod tests {
             let event_recorded = Arc::clone(&event_recorded);
             thread::spawn(move || {
                 entered_rebuild.wait();
-                during_rebuild.record(Ok(event("/repo/telos/bindings.tel")));
+                during_rebuild.record(Ok(event("/repo/telos/contexts/billing/bindings.tel")));
                 drop(during_rebuild);
                 event_recorded.wait();
             })

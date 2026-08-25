@@ -10,7 +10,34 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::Value;
 use tempfile::TempDir;
+
+/// Supplies the canonical owner for shared test payload builders that focus
+/// on another part of the mutation contract.
+pub fn canonical_payload(args: &[&str], payload: &str) -> String {
+    let Some(entity) = args
+        .first()
+        .zip(args.get(1))
+        .and_then(|(verb, entity)| (*verb == "add").then_some(*entity))
+    else {
+        return payload.to_string();
+    };
+    let owner = match entity {
+        "notion" | "constraint" => "billing",
+        "intent" => "billing/settlement",
+        _ => return payload.to_string(),
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(payload) else {
+        return payload.to_string();
+    };
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("owner".to_string())
+            .or_insert_with(|| Value::String(owner.to_string()));
+    }
+    value.to_string()
+}
 
 /// A fresh, empty git repository in a throwaway directory, with the `user.*`
 /// config a real checkout would have.
@@ -35,6 +62,37 @@ pub fn repo() -> TempDir {
 /// end-to-end tests that drive it through the public CLI.
 pub fn with_fixture() -> TempDir {
     with_fixture_mut(|_| {})
+}
+
+/// An initialized and sealed project with a minimal Billing strategic model
+/// but no tactical entities.
+pub fn with_empty_billing_domain() -> TempDir {
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+
+    for (relative, bytes) in [
+        (
+            "telos/contexts/billing/context.tel",
+            "context billing core \"Billing\" {\n  def \"Owns invoice rules.\"\n}\n",
+        ),
+        (
+            "telos/contexts/billing/capabilities/invoicing/capability.tel",
+            "capability billing/invoicing \"Invoicing\" {\n  def \"Issues invoices.\"\n}\n",
+        ),
+        (
+            "telos/contexts/billing/capabilities/settlement/capability.tel",
+            "capability billing/settlement \"Settlement\" {\n  def \"Settles invoices.\"\n}\n",
+        ),
+    ] {
+        let target = tmp.path().join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, bytes).unwrap();
+    }
+
+    telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
+        .assert()
+        .success();
+    tmp
 }
 
 /// [`with_fixture`], with `mutate` given the copied tree *before* it is
@@ -78,9 +136,12 @@ pub fn with_fixture_mut(mutate: impl FnOnce(&Path)) -> TempDir {
 /// that ask for `with_fixture*`, however, ask for a coherent sealed project,
 /// so every active scenario needs a proof and the project needs a runner.
 fn complete_fixture_for_sealing(root: &Path) {
-    let bindings_path = root.join("telos/bindings.tel");
+    let bindings_path = root.join("telos/contexts/billing/bindings.tel");
     let bindings = fs::read_to_string(&bindings_path).unwrap();
-    let invoice_intent = fs::read_to_string(root.join("telos/intents/INT-0017.tel")).unwrap();
+    let invoice_intent = fs::read_to_string(
+        root.join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel"),
+    )
+    .unwrap();
     if invoice_intent.contains("status active") && !bindings.contains("-> SCN-0091") {
         let (implements, rest) = bindings
             .split_once('\n')
@@ -114,7 +175,7 @@ pub fn unsealed_fixture() -> TempDir {
     tmp
 }
 
-/// Breaks `telos/intents/INT-0042.tel` in two independent, unrelated ways:
+/// Breaks the settlement-owned `INT-0042.tel` in two independent ways:
 /// its `on Invoice` clause becomes an unresolvable `on Invoce`, and its
 /// `requires INT-0017` becomes an unresolvable `requires INT-9999`.
 ///
@@ -127,7 +188,7 @@ pub fn unsealed_fixture() -> TempDir {
 /// `check` handles more than one diagnostic correctly, not just the
 /// single-diagnostic case a single edit produces.
 pub fn break_int_0042_in_two_ways(root: &Path) {
-    let path = root.join("telos/intents/INT-0042.tel");
+    let path = root.join("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel");
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert!(

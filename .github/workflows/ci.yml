@@ -69,8 +69,17 @@ jobs:
           if ($testExit -ne 0) {
             $tail = (Get-Content cargo-test.log -Tail 160) -join "`n"
             "## Windows cargo test failure`n`n``````text`n$tail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-            $annotation = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-            Write-Output "::error title=Windows cargo test output::$annotation"
+            $matches = Select-String -Path cargo-test.log -Pattern @(
+              '^---- .* stdout ----$',
+              'panicked at',
+              '^failures:$',
+              '^test result: FAILED'
+            ) -Context 1,3
+            foreach ($match in $matches) {
+              $block = (@($match.Context.PreContext) + $match.Line + @($match.Context.PostContext)) -join "`n"
+              $annotation = $block.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Windows cargo test failure at log line $($match.LineNumber)::$annotation"
+            }
             exit $testExit
           }
       - run: cargo clippy --workspace --all-targets -- -D warnings

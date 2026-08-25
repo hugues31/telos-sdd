@@ -57,7 +57,22 @@ jobs:
       - name: Prove spec-only Billing reconstruction
         if: runner.os == 'Linux'
         run: cargo test -p telos --test rebuild_demo
-      - run: cargo test --workspace
+      - name: Run cargo test --workspace
+        if: runner.os != 'Windows'
+        run: cargo test --workspace
+      - name: Run cargo test --workspace
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo test --workspace 2>&1 | Tee-Object -FilePath cargo-test.log
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) {
+            $tail = (Get-Content cargo-test.log -Tail 160) -join "`n"
+            "## Windows cargo test failure`n`n``````text`n$tail`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            $annotation = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows cargo test output::$annotation"
+            exit $testExit
+          }
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo fmt
         if: runner.os == 'Linux'

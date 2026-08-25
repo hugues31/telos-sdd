@@ -103,6 +103,25 @@ fn approve(dir: &Path) {
         .success();
 }
 
+/// `approve`/`reconcile_ok` for a change other than the first, which the
+/// multi-transaction tests need.
+fn approve_change(dir: &Path, id: &str) {
+    telos(dir, &["change", "approve", id]).assert().success();
+}
+
+fn reconcile_change_ok(dir: &Path, id: &str) -> Value {
+    let out = telos(dir, &["change", "reconcile", id, "--json"])
+        .output()
+        .unwrap();
+    let envelope = json_stdout(&out);
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "expected the reconcile of {id} to succeed, got {envelope}"
+    );
+    envelope["result"].clone()
+}
+
 /// Runs `telos change reconcile CHG-0001 --json` and returns the envelope.
 fn reconcile(dir: &Path) -> Value {
     let out = telos(dir, &["change", "reconcile", "CHG-0001", "--json"])
@@ -2241,4 +2260,168 @@ fn rebinding_a_pair_the_sealed_file_already_holds_leaves_it_unchanged() {
         json!([])
     );
     assert_eq!(read(tmp.path(), BINDINGS), sealed);
+}
+
+// --- generated features --------------------------------------------------
+
+/// An approved change that turns Gherkin generation on *and* adds the intent
+/// to render, so a single reconcile both enables generation and exercises it.
+///
+/// The config op carries the whole document, as `telos config --change`
+/// requires, and `fresh()` seals an empty billing domain with empty globs and
+/// no runner -- so those are the base values reproduced here.
+fn approved_change_enabling_gherkin() -> tempfile::TempDir {
+    let tmp = fresh();
+    open_change(tmp.path());
+    stage(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &invoice_payload(),
+    );
+    stage(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &payment_received_payload(),
+    );
+    stage(
+        tmp.path(),
+        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &settle_intent_payload(),
+    );
+    stage(
+        tmp.path(),
+        &["config", "--change", "CHG-0001", "--json"],
+        &json!({
+            "code": {"globs": []},
+            "tests": {"globs": []},
+            "test": {"cmd": ""},
+            "policy": {"tdd": "strict"},
+            "gherkin": {"enabled": true},
+            "agents": {"hosts": []}
+        })
+        .to_string(),
+    );
+    approve(tmp.path());
+    tmp
+}
+
+const GENERATED_FEATURE: &str = "telos/features/billing/settlement/INT-0001.feature";
+
+#[test]
+fn reconcile_writes_and_seals_generated_features() {
+    let tmp = approved_change_enabling_gherkin();
+    reconcile_ok(tmp.path());
+
+    let content = read(tmp.path(), GENERATED_FEATURE);
+    assert!(content.starts_with("@INT-0001\n"), "{content}");
+    assert!(
+        content.contains("    Given the invoice with state open\n"),
+        "{content}"
+    );
+
+    let lock = read(tmp.path(), "telos/telos.lock");
+    assert!(
+        lock.contains(GENERATED_FEATURE),
+        "the feature must be sealed under [spec]: {lock}"
+    );
+}
+
+#[test]
+fn a_hand_edited_feature_is_drift() {
+    let tmp = approved_change_enabling_gherkin();
+    reconcile_ok(tmp.path());
+
+    fs::write(
+        tmp.path().join(GENERATED_FEATURE),
+        "@INT-0001\nFeature: hand written\n",
+    )
+    .unwrap();
+
+    let out = telos(tmp.path(), &["status", "--json"]).output().unwrap();
+    let status = json_stdout(&out)["result"].clone();
+    assert_eq!(status["state"], "drifted");
+    let paths: Vec<&str> = status["drift"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(
+        paths.contains(&GENERATED_FEATURE),
+        "a generated feature is sealed, so editing it is drift: {paths:?}"
+    );
+}
+
+#[test]
+fn generation_stays_off_unless_enabled() {
+    let tmp = approved_three_op_change();
+    reconcile_ok(tmp.path());
+    assert!(
+        !tmp.path().join("telos/features").exists(),
+        "a project that never enabled gherkin gets no features"
+    );
+}
+
+#[test]
+fn removing_an_intent_deletes_its_feature_in_the_same_reconcile() {
+    let tmp = approved_change_enabling_gherkin();
+    reconcile_ok(tmp.path());
+    assert!(tmp.path().join(GENERATED_FEATURE).exists());
+
+    open_change(tmp.path());
+    let removed = telos(
+        tmp.path(),
+        &[
+            "remove", "intent", "INT-0001", "--change", "CHG-0002", "--json",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert!(removed.status.success(), "remove failed: {removed:?}");
+    approve_change(tmp.path(), "CHG-0002");
+    reconcile_change_ok(tmp.path(), "CHG-0002");
+
+    assert!(
+        !tmp.path().join(GENERATED_FEATURE).exists(),
+        "a feature whose intent is gone must be pruned, not left to be sealed"
+    );
+    let lock = read(tmp.path(), "telos/telos.lock");
+    assert!(
+        !lock.contains(GENERATED_FEATURE),
+        "the pruned feature must leave the seal too: {lock}"
+    );
+}
+
+#[test]
+fn disabling_generation_removes_the_whole_tree() {
+    let tmp = approved_change_enabling_gherkin();
+    reconcile_ok(tmp.path());
+    assert!(tmp.path().join(GENERATED_FEATURE).exists());
+
+    open_change(tmp.path());
+    stage(
+        tmp.path(),
+        &["config", "--change", "CHG-0002", "--json"],
+        &json!({
+            "code": {"globs": []},
+            "tests": {"globs": []},
+            "test": {"cmd": ""},
+            "policy": {"tdd": "strict"},
+            "gherkin": {"enabled": false},
+            "agents": {"hosts": []}
+        })
+        .to_string(),
+    );
+    approve_change(tmp.path(), "CHG-0002");
+    reconcile_change_ok(tmp.path(), "CHG-0002");
+
+    assert!(
+        !tmp.path().join(GENERATED_FEATURE).exists(),
+        "turning generation off removes the tree in the same transaction"
+    );
+    let lock = read(tmp.path(), "telos/telos.lock");
+    assert!(
+        !lock.contains("telos/features/"),
+        "no feature may remain sealed after disabling: {lock}"
+    );
 }

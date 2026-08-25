@@ -136,6 +136,7 @@ use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
 use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
+use crate::gherkin::render_features;
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::NodeRef;
@@ -151,7 +152,7 @@ use crate::repo_fs::RepoFs;
 use crate::semantic::build_model;
 use crate::state::{DRIFT_HINT, compute_state};
 use crate::witness::{WitnessVerdict, required_witnesses, witness_verdict};
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, collect_files_recursive};
 
 /// What one reconcile did.
 #[derive(Debug)]
@@ -234,6 +235,12 @@ pub fn reconcile_change(
         apply_op(ws, op)?;
     }
     write_bindings(ws, &model)?;
+    // `effective_ws`, not `ws`: it carries this change's config ops, so a
+    // change that stages `[gherkin] enabled = true` generates features in the
+    // reconcile that approves it rather than in some later one. The two share
+    // `repo_root` and `telos_dir`, and `telos/features/` is a fixed path, so
+    // nothing else about the choice can differ.
+    write_features(&effective_ws, &model)?;
     let spec_paths = ws.spec_files()?;
     let spec = git.blob_oids(&spec_paths)?;
     require_complete_map("specification", &spec_paths, &spec)?;
@@ -1378,6 +1385,49 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
 /// there would add a spec file -- and a lock entry -- that nothing asked
 /// for. (`telos init` creates the file empty, so this only ever spares a
 /// tree that was assembled by hand.)
+/// Writes the generated `.feature` tree, and prunes whatever is no longer
+/// part of it.
+///
+/// The sibling of [`write_bindings`]: a derived spec file, produced from the
+/// model at a path no staged op names, written in the write phase and sealed
+/// like any other spec file.
+///
+/// Pruning is not tidiness. Removing or moving an intent changes which paths
+/// belong, and a `.feature` left behind would be picked up by the
+/// `spec_files()` re-scan that follows -- sealing a file that describes an
+/// intent no longer in the model. Disabling `[gherkin]` is the same operation
+/// with an empty rendered set, which is why turning generation off cannot
+/// orphan anything.
+///
+/// Empty directories are left behind. They contribute nothing to
+/// `spec_files()`, so they cannot be sealed and cannot drift.
+fn write_features(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
+    let repo_fs = RepoFs::open(&ws.repo_root)?;
+    let rendered = if ws.config.gherkin.enabled {
+        render_features(model)
+    } else {
+        BTreeMap::new()
+    };
+
+    let mut existing = Vec::new();
+    collect_files_recursive(
+        &ws.telos_dir.join("features"),
+        "telos/features",
+        ".feature",
+        &mut existing,
+    )?;
+    for path in existing {
+        if !rendered.contains_key(&path) {
+            repo_fs.remove_file(&path)?;
+        }
+    }
+
+    for (path, content) in &rendered {
+        repo_fs.write(path, content.as_bytes())?;
+    }
+    Ok(())
+}
+
 fn write_bindings(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
     let repo_fs = RepoFs::open(&ws.repo_root)?;
     if model.bindings.len() != model.binding_contexts.len() {

@@ -155,6 +155,7 @@ fn invoice_notion_is_byte_exact_down_to_its_padding() {
         concat!(
             "notion billing/Invoice entity {\n",
             "  def    \"A bill issued to a Customer for delivered work.\"\n",
+            "  phrase \"invoice\"\n",
             "  attr   state   enum(open, settled, cancelled)\n",
             "  attr   balance money\n",
             "  rel    issued-to -> Customer\n",
@@ -666,7 +667,7 @@ fn shapes_the_corpus_does_not_cover_round_trip_through_the_parser() {
         // and rel-name paddings are independent.
         concat!(
             "notion Ledger value {\n",
-            "  def    \"Everything an attribute can be.\"\n",
+            "  def    \"Everything an attribute can be.\"\n  phrase \"ledger\"\n",
             "  attr   a         string\n",
             "  attr   bb        int\n",
             "  attr   ccc       decimal\n",
@@ -683,13 +684,13 @@ fn shapes_the_corpus_does_not_cover_round_trip_through_the_parser() {
         // A notion with only a `def`: no padding group to compute.
         concat!(
             "notion Bare state {\n",
-            "  def    \"Nothing but a definition.\"\n",
+            "  def    \"Nothing but a definition.\"\n  phrase \"bare\"\n",
             "}\n",
         ),
         // Escapes inside the `def` string.
         concat!(
             "notion Quoted actor {\n",
-            "  def    \"She said \\\"yes\\\", with a \\\\ in it.\"\n",
+            "  def    \"She said \\\"yes\\\", with a \\\\ in it.\"\n  phrase \"quoted\"\n",
             "}\n",
         ),
     ];
@@ -768,4 +769,36 @@ fn shapes_the_corpus_does_not_cover_round_trip_through_the_parser() {
             .unwrap_or_else(|d| panic!("must parse:\n{src}\n({} diagnostics)", d.len()));
         assert_eq!(emit_file(&TelFile::Intent(parsed)), src);
     }
+}
+
+// --- phrase --------------------------------------------------------------
+
+#[test]
+fn notion_phrase_round_trips_between_def_and_attrs() {
+    let source = concat!(
+        "notion billing/Invoice entity {\n",
+        "  def    \"A bill issued to a Customer for delivered work.\"\n",
+        "  phrase \"invoice\"\n",
+        "  attr   state enum(open, settled)\n",
+        "}\n",
+    );
+    let path = RepoPath::new("telos/contexts/billing/notions/Invoice.tel");
+    let parsed = parse_spec_file(&path, source).expect("the fixture parses");
+    assert_eq!(emit_file(&parsed), source);
+}
+
+#[test]
+fn a_notion_without_a_phrase_is_a_parse_error() {
+    let source = concat!(
+        "notion billing/Invoice entity {\n",
+        "  def    \"A bill issued to a Customer for delivered work.\"\n",
+        "  attr   state enum(open, settled)\n",
+        "}\n",
+    );
+    let path = RepoPath::new("telos/contexts/billing/notions/Invoice.tel");
+    let diagnostics = parse_spec_file(&path, source).expect_err("phrase is mandatory");
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("phrase")),
+        "no diagnostic mentioned phrase: {diagnostics:?}"
+    );
 }

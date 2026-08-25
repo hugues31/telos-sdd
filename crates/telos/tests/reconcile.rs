@@ -171,6 +171,7 @@ fn invoice_payload() -> String {
 fn payment_received_payload() -> String {
     json!({
         "owner": "billing/settlement", "name": "PaymentReceived", "kind": "event",
+        "phrase": "payment is received",
         "def": "A payment arrived for an invoice.",
         "attrs": [ {"name": "amount", "type": "money"} ]
     })
@@ -312,6 +313,7 @@ fn reconcile_writes_the_canonical_spec_files_byte_for_byte() {
         read(tmp.path(), "telos/contexts/billing/notions/Invoice.tel"),
         "notion billing/Invoice entity {\n  \
            def    \"A bill issued to a Customer for delivered work.\"\n  \
+           phrase \"invoice\"\n  \
            attr   state enum(open, settled)\n\
          }\n"
     );
@@ -322,6 +324,7 @@ fn reconcile_writes_the_canonical_spec_files_byte_for_byte() {
         ),
         "notion billing/settlement/PaymentReceived event {\n  \
            def    \"A payment arrived for an invoice.\"\n  \
+           phrase \"payment is received\"\n  \
            attr   amount money\n\
          }\n"
     );

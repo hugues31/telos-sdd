@@ -149,6 +149,7 @@ fn settlement_owner() -> Owner {
 fn refund_notion() -> Notion {
     notion_from_json(&json!({
         "name": "Refund", "kind": "event", "def": "Money went back to a Customer.",
+        "phrase": "refund is issued",
         "attrs": [{"name": "amount", "type": "money"}]
     }))
     .unwrap()

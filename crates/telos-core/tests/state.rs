@@ -236,7 +236,7 @@ fn compute_state_reports_untracked_for_a_spec_file_created_outside_the_protocol(
 
     fs::write(
         tmp.path().join("telos/contexts/billing/notions/Rogue.tel"),
-        "notion Rogue value {\n  def \"unsanctioned\"\n}\n",
+        "notion Rogue value {\n  def \"unsanctioned\"\n  phrase \"rogue\"\n}\n",
     )
     .unwrap();
 
@@ -324,6 +324,7 @@ fn ledger_notion() -> Notion {
         name: NotionName::new("Ledger").unwrap(),
         kind: NotionKind::Entity,
         def: "A record of postings.".to_string(),
+        phrase: "ledger".to_string(),
         attrs: vec![],
         rels: vec![],
     }
@@ -337,6 +338,7 @@ fn invoice_notion() -> Notion {
         name: NotionName::new("Invoice").unwrap(),
         kind: NotionKind::Entity,
         def: "A bill.".to_string(),
+        phrase: "invoice".to_string(),
         attrs: vec![],
         rels: vec![],
     }
@@ -614,7 +616,7 @@ fn coverage_counts_same_named_notions_in_distinct_contexts() {
     .unwrap();
     fs::write(
         terminal.join("notions/Invoice.tel"),
-        "notion terminal/Invoice entity {\n  def    \"The terminal's local invoice projection.\"\n}\n",
+        "notion terminal/Invoice entity {\n  def    \"The terminal's local invoice projection.\"\n  phrase \"invoice\"\n}\n",
     )
     .unwrap();
 

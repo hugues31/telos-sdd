@@ -87,12 +87,12 @@ fn pack_includes_only_required_mappings_without_supplier_internals() {
         .unwrap();
         fs::write(
             root.join("telos/contexts/terminal/notions/PetView.tel"),
-            "notion terminal/PetView entity {\n  def \"A local projection of an invoice.\"\n}\n",
+            "notion terminal/PetView entity {\n  def \"A local projection of an invoice.\"\n  phrase \"pet view\"\n}\n",
         )
         .unwrap();
         fs::write(
             capability.join("notions/RenderRequested.tel"),
-            "notion terminal/portrait/RenderRequested event {\n  def \"A render request.\"\n}\n",
+            "notion terminal/portrait/RenderRequested event {\n  def \"A render request.\"\n  phrase \"render requested\"\n}\n",
         )
         .unwrap();
         fs::write(
@@ -181,11 +181,11 @@ fn expected_int_0042_pack() -> serde_json::Value {
         "notions": [
             {
                 "name": "billing/Invoice",
-                "canonical": "notion billing/Invoice entity {\n  def    \"A bill issued to a Customer for delivered work.\"\n  attr   state   enum(open, settled, cancelled)\n  attr   balance money\n  rel    issued-to -> Customer\n}\n",
+                "canonical": "notion billing/Invoice entity {\n  def    \"A bill issued to a Customer for delivered work.\"\n  phrase \"invoice\"\n  attr   state   enum(open, settled, cancelled)\n  attr   balance money\n  rel    issued-to -> Customer\n}\n",
             },
             {
                 "name": "billing/PaymentReceived",
-                "canonical": "notion billing/settlement/PaymentReceived event {\n  def    \"A payment arrived for an invoice.\"\n  attr   amount money\n}\n",
+                "canonical": "notion billing/settlement/PaymentReceived event {\n  def    \"A payment arrived for an invoice.\"\n  phrase \"payment is received\"\n  attr   amount money\n}\n",
             },
         ],
         "constraints": [

@@ -658,8 +658,7 @@ fn vendor_payload() -> String {
 /// The canonical block `add notion` with [`vendor_payload`] produces --
 /// `emit_notion`'s own output, unindented, the exact bytes `change diff`
 /// must report as the op's `after`.
-const VENDOR_CANONICAL: &str =
-    "notion billing/Vendor actor {\n  def    \"A party the business pays.\"\n}\n";
+const VENDOR_CANONICAL: &str = "notion billing/Vendor actor {\n  def    \"A party the business pays.\"\n  phrase \"vendor\"\n}\n";
 
 /// Whether `digest` is `sha256:` followed by exactly 64 lowercase hex
 /// digits -- the shape `change diff`/`change approve` must report,
@@ -847,7 +846,8 @@ fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
            digest \"{digest}\"\n\
          \n  \
            op add notion billing/Vendor actor {{\n    \
-             def    \"A party the business pays.\"\n  \
+             def    \"A party the business pays.\"\n    \
+             phrase \"vendor\"\n  \
            }}\n\
          }}\n"
     );
@@ -970,7 +970,7 @@ fn staging_after_approve_goes_stale_and_re_approve_clears_it() {
         tmp.path(),
         &["add", "notion", "--change", "CHG-0001", "--json"],
         &json!({
-            "name": "InvoiceCancelled", "kind": "event",
+            "name": "InvoiceCancelled", "kind": "event", "phrase": "invoice is cancelled",
             "def": "An invoice was cancelled before settlement."
         })
         .to_string(),

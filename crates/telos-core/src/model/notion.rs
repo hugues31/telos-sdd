@@ -48,6 +48,9 @@ pub struct Notion {
     pub name: NotionName,
     pub kind: NotionKind,
     pub def: String,
+    /// The term's surface form, used mid-sentence: `"invoice"`, `"payment is
+    /// received"`. Carries no article -- consumers prepend `the `.
+    pub phrase: String,
     /// Insertion order is the canonical order.
     pub attrs: Vec<Attr>,
     pub rels: Vec<Rel>,
@@ -99,6 +102,7 @@ mod tests {
             name: name("Invoice"),
             kind: NotionKind::Entity,
             def: "A billing document.".to_string(),
+            phrase: "invoice".to_string(),
             attrs: vec![
                 Attr {
                     name: field("state"),

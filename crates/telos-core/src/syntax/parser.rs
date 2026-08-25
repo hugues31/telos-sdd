@@ -876,6 +876,9 @@ impl<'a> P<'a> {
         self.skip_newlines();
 
         let def = self.recovered(home, |p| p.def_field()).unwrap_or_default();
+        let phrase = self
+            .recovered(home, |p| p.phrase_field())
+            .unwrap_or_default();
 
         let mut attrs = Vec::new();
         let mut rels = Vec::new();
@@ -919,6 +922,7 @@ impl<'a> P<'a> {
             name,
             kind,
             def,
+            phrase,
             attrs,
             rels,
         })
@@ -931,6 +935,13 @@ impl<'a> P<'a> {
     fn def_field(&mut self) -> Result<String, Diagnostic> {
         self.expect_lower_kw("def")?;
         let text = self.expect_str("a definition string")?;
+        self.end_of_field()?;
+        Ok(text.node)
+    }
+
+    fn phrase_field(&mut self) -> Result<String, Diagnostic> {
+        self.expect_lower_kw("phrase")?;
+        let text = self.expect_str("a notion phrase")?;
         self.end_of_field()?;
         Ok(text.node)
     }
@@ -2194,7 +2205,7 @@ mod tests {
 
         let (owner, notion) = parse_owned_notion_file(
             &RepoPath::new("telos/contexts/pet/notions/Pet.tel"),
-            "notion pet/Pet entity {\n  def \"A virtual pet.\"\n}\n",
+            "notion pet/Pet entity {\n  def \"A virtual pet.\"\n  phrase \"pet\"\n}\n",
         )
         .unwrap();
         assert_eq!(owner, Owner::context(ContextId::new("pet").unwrap()));
@@ -2265,6 +2276,7 @@ mod tests {
             "\n",
             "  op add notion billing/Invoice value {\n",
             "    def \"Invoice identity.\"\n",
+            "    phrase \"invoice\"\n",
             "  }\n",
             "\n",
             "  op move from billing/invoicing to billing/settlement intent INT-0017 in billing/settlement \"Issue invoice\" {\n",
@@ -2294,6 +2306,7 @@ mod tests {
     const INVOICE_TEL: &str = concat!(
         "notion Invoice entity {\n",
         "  def    \"A bill issued to a Customer for delivered work.\"\n",
+        "  phrase \"invoice\"\n",
         "  attr   state   enum(open, settled, cancelled)\n",
         "  attr   balance money\n",
         "  rel    issued-to -> Customer\n",
@@ -2500,6 +2513,7 @@ mod tests {
         let src = concat!(
             "notion Thing value {\n",
             "  def    \"d\"\n",
+            "  phrase \"thing\"\n",
             "  attr   a string\n",
             "  attr   b int\n",
             "  attr   c decimal\n",
@@ -2539,7 +2553,7 @@ mod tests {
             ("state", NotionKind::State),
         ];
         for (word, expected) in cases {
-            let src = format!("notion Thing {word} {{\n  def    \"d\"\n}}\n");
+            let src = format!("notion Thing {word} {{\n  def    \"d\"\n  phrase \"thing\"\n}}\n");
             let notion = parse_notion_file(&path(), &src).unwrap();
             assert_eq!(notion.kind, expected, "kind `{word}`");
         }
@@ -2547,15 +2561,18 @@ mod tests {
 
     #[test]
     fn a_notion_without_attrs_or_rels_parses() {
-        let notion =
-            parse_notion_file(&path(), "notion Thing value {\n  def    \"d\"\n}\n").unwrap();
+        let notion = parse_notion_file(
+            &path(),
+            "notion Thing value {\n  def    \"d\"\n  phrase \"thing\"\n}\n",
+        )
+        .unwrap();
         assert!(notion.attrs.is_empty());
         assert!(notion.rels.is_empty());
     }
 
     #[test]
     fn unknown_notion_kind_suggests_the_closest_one() {
-        let src = "notion Invoice entty {\n  def    \"d\"\n}\n";
+        let src = "notion Invoice entty {\n  def    \"d\"\n  phrase \"invoice\"\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, ErrorCode::TelosParseError);
@@ -2568,7 +2585,7 @@ mod tests {
 
     #[test]
     fn unknown_notion_kind_without_a_close_match_is_reported_plainly() {
-        let src = "notion Invoice zzzzzz {\n  def    \"d\"\n}\n";
+        let src = "notion Invoice zzzzzz {\n  def    \"d\"\n  phrase \"invoice\"\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags[0].message, "unknown notion kind `zzzzzz`");
     }
@@ -2581,6 +2598,7 @@ mod tests {
         let src = concat!(
             "notion Invoice entity {\n",
             "  def    \"A bill.\"\n",
+            "  phrase \"invoice\"\n",
             "  attr   state enum(open settled)\n",
             "}\n",
         );
@@ -2591,13 +2609,13 @@ mod tests {
             diags[0].message,
             "expected `,` or `)` in enum symbol list, found `settled`"
         );
-        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(26)));
+        assert_eq!((diags[0].line, diags[0].col), (Some(4), Some(26)));
         assert_eq!(diags[0].file.as_ref(), Some(&path()));
     }
 
     #[test]
     fn an_empty_enum_symbol_list_is_a_syntax_error() {
-        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   state enum()\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  phrase \"invoice\"\n  attr   state enum()\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected an enum symbol, found `)`");
@@ -2608,6 +2626,7 @@ mod tests {
         let src = concat!(
             "notion Invoice entity {\n",
             "  def    \"A bill.\"\n",
+            "  phrase \"invoice\"\n",
             "  attr   state enum(open settled)\n",
             "  attr   balance\n",
             "  rel    issued-to -> Customer\n",
@@ -2619,12 +2638,12 @@ mod tests {
             diags[0].message,
             "expected `,` or `)` in enum symbol list, found `settled`"
         );
-        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(26)));
+        assert_eq!((diags[0].line, diags[0].col), (Some(4), Some(26)));
         assert_eq!(
             diags[1].message,
             "expected an attribute type, found end of line"
         );
-        assert_eq!((diags[1].line, diags[1].col), (Some(4), Some(17)));
+        assert_eq!((diags[1].line, diags[1].col), (Some(5), Some(17)));
     }
 
     #[test]
@@ -2632,6 +2651,7 @@ mod tests {
         let src = concat!(
             "notion Invoice entity {\n",
             "  def    \"d\"\n",
+            "  phrase \"invoice\"\n",
             "  rel    issued-to -> Customer\n",
             "  attr   state money\n",
             "}\n",
@@ -2639,21 +2659,33 @@ mod tests {
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected `rel` or `}`, found `attr`");
-        assert_eq!((diags[0].line, diags[0].col), (Some(4), Some(3)));
+        assert_eq!((diags[0].line, diags[0].col), (Some(5), Some(3)));
     }
 
     #[test]
     fn a_missing_def_field_is_a_syntax_error() {
-        let src = "notion Invoice entity {\n  attr   state money\n}\n";
+        let src = "notion Invoice entity {\n  phrase \"invoice\"\n  attr   state money\n}\n";
+        let diags = parse_notion_file(&path(), src).unwrap_err();
+        // Recovering from the missing `def` consumes the rest of that line --
+        // which is the `phrase` line -- so `phrase` is reported missing too.
+        assert_eq!(diags.len(), 2, "diagnostics: {diags:#?}");
+        assert_eq!(diags[0].message, "expected `def`, found `phrase`");
+        assert_eq!((diags[0].line, diags[0].col), (Some(2), Some(3)));
+        assert_eq!(diags[1].message, "expected `phrase`, found `attr`");
+    }
+
+    #[test]
+    fn a_missing_phrase_field_is_a_syntax_error() {
+        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   state money\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].message, "expected `def`, found `attr`");
-        assert_eq!((diags[0].line, diags[0].col), (Some(2), Some(3)));
+        assert_eq!(diags[0].message, "expected `phrase`, found `attr`");
+        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(3)));
     }
 
     #[test]
     fn an_unknown_attr_type_suggests_the_closest_one() {
-        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   balance mony\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  phrase \"invoice\"\n  attr   balance mony\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected an attribute type, found `mony`");
@@ -2662,14 +2694,14 @@ mod tests {
 
     #[test]
     fn a_ref_attr_type_requires_a_notion_name() {
-        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   owner ref(customer)\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  phrase \"invoice\"\n  attr   owner ref(customer)\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags[0].message, "expected a notion name, found `customer`");
     }
 
     #[test]
     fn a_rel_field_requires_an_arrow() {
-        let src = "notion Invoice entity {\n  def    \"d\"\n  rel    issued-to Customer\n}\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  phrase \"invoice\"\n  rel    issued-to Customer\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags[0].message, "expected `->`, found `Customer`");
     }
@@ -2683,6 +2715,7 @@ mod tests {
             "notion Invoice entity {\n",
             "\n",
             "  def    \"A bill.\"\n",
+            "  phrase \"invoice\"\n",
             "\n",
             "  attr   balance money\n",
             "\n",
@@ -2697,13 +2730,19 @@ mod tests {
 
     #[test]
     fn a_file_without_a_trailing_newline_parses() {
-        let notion = parse_notion_file(&path(), "notion Thing value {\n  def    \"d\"\n}").unwrap();
+        let notion = parse_notion_file(
+            &path(),
+            "notion Thing value {\n  def    \"d\"\n  phrase \"thing\"\n}",
+        )
+        .unwrap();
         assert_eq!(notion.name, nname("Thing"));
     }
 
     #[test]
     fn content_after_the_closing_brace_is_a_syntax_error() {
-        let src = format!("{INVOICE_TEL}notion Other entity {{\n  def    \"d\"\n}}\n");
+        let src = format!(
+            "{INVOICE_TEL}notion Other entity {{\n  def    \"d\"\n  phrase \"other\"\n}}\n"
+        );
         let diags = parse_notion_file(&path(), &src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "expected end of input, found `notion`");
@@ -2711,7 +2750,7 @@ mod tests {
 
     #[test]
     fn a_truncated_file_reports_the_unexpected_end_of_input() {
-        let src = "notion Invoice entity {\n  def    \"d\"\n";
+        let src = "notion Invoice entity {\n  def    \"d\"\n  phrase \"invoice\"\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(
@@ -2722,13 +2761,14 @@ mod tests {
 
     #[test]
     fn a_lexer_error_is_reported_against_the_file() {
-        let src = "notion Invoice entity {\n  def    \"d\"\n  attr   state @\n}\n";
+        let src =
+            "notion Invoice entity {\n  def    \"d\"\n  phrase \"invoice\"\n  attr   state @\n}\n";
         let diags = parse_notion_file(&path(), src).unwrap_err();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, ErrorCode::TelosParseError);
         assert_eq!(diags[0].message, "unexpected character `@`");
         assert_eq!(diags[0].file.as_ref(), Some(&path()));
-        assert_eq!((diags[0].line, diags[0].col), (Some(3), Some(16)));
+        assert_eq!((diags[0].line, diags[0].col), (Some(4), Some(16)));
     }
 
     // --- expressions ------------------------------------------------------
@@ -3892,11 +3932,11 @@ mod tests {
                 "  status drafted\n",
                 "\n",
                 "  op add notion billing/A entity {\n",
-                "    def    \"a\"\n",
+                "    def    \"a\"\n    phrase \"a\"\n",
                 "  }\n",
                 "\n",
                 "  op edit notion billing/B value {\n",
-                "    def    \"b\"\n",
+                "    def    \"b\"\n    phrase \"b\"\n",
                 "  }\n",
                 "\n",
                 "  op remove notion billing/C\n",

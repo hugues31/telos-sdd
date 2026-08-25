@@ -77,7 +77,7 @@ const DRAFTED_ONE_ADD: &str = concat!(
     "  status drafted\n",
     "\n",
     "  op add notion billing/Ledger entity {\n",
-    "    def    \"A record of every posting.\"\n",
+    "    def    \"A record of every posting.\"\n    phrase \"ledger\"\n",
     "    attr   balance money\n",
     "  }\n",
     "}\n",
@@ -92,7 +92,7 @@ const APPROVED_MULTI: &str = concat!(
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
     "  op edit notion billing/Invoice entity {\n",
-    "    def    \"A bill issued to a Customer.\"\n",
+    "    def    \"A bill issued to a Customer.\"\n    phrase \"invoice\"\n",
     "    attr   state enum(open, settled)\n",
     "    rel    issued-to -> Customer\n",
     "  }\n",
@@ -562,7 +562,7 @@ fn a_broken_nested_block_does_not_swallow_the_ops_that_follow() {
         "  status drafted\n",
         "\n",
         "  op add notion billing/Ledger entity {\n",
-        "    def    \"A record.\"\n",
+        "    def    \"A record.\"\n    phrase \"ledger\"\n",
         "    attr   balance wobbly\n",
         "  }\n",
         "\n",
@@ -578,7 +578,7 @@ fn a_broken_nested_block_does_not_swallow_the_ops_that_follow() {
 #[test]
 fn a_change_rejects_legacy_entity_declarations_without_an_owner() {
     for declaration in [
-        "notion Ledger entity {\n    def    \"A record.\"\n  }",
+        "notion Ledger entity {\n    def    \"A record.\"\n    phrase \"ledger\"\n  }",
         "intent INT-0042 \"Legacy intent\" {\n    status draft\n    telos  \"No owner.\"\n    statement ubiquitous {\n      system shall \"record it\"\n    }\n  }",
         "constraint CON-0009 quality \"Legacy constraint\" {\n    rule  \"No owner.\"\n    scope global\n  }",
     ] {

@@ -174,6 +174,9 @@ pub fn emit_notion(n: &Notion) -> String {
     keyword(&mut out, 1, "def", width::NOTION);
     w!(out, "{}\n", quote(&n.def));
 
+    keyword(&mut out, 1, "phrase", width::NOTION);
+    w!(out, "{}\n", quote(&n.phrase));
+
     let attr_width = longest(n.attrs.iter().map(|a| a.name.as_str()));
     for Attr { name, ty } in &n.attrs {
         keyword(&mut out, 1, "attr", width::NOTION);
@@ -928,6 +931,7 @@ mod tests {
             name: NotionName::new("Invoice").unwrap(),
             kind: NotionKind::Entity,
             def: "A bill.".to_string(),
+            phrase: "invoice".to_string(),
             attrs: vec![],
             rels: vec![],
         }

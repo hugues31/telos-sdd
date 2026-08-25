@@ -61,7 +61,7 @@ fn strategic_workspace() -> TempDir {
     .unwrap();
     fs::write(
         root.join("contexts/pet/notions/Pet.tel"),
-        "notion pet/Pet entity {\n  def \"A virtual pet.\"\n}\n",
+        "notion pet/Pet entity {\n  def \"A virtual pet.\"\n  phrase \"pet\"\n}\n",
     )
     .unwrap();
     fs::write(
@@ -210,7 +210,7 @@ fn load_model_rejects_an_owner_that_disagrees_with_its_path() {
     let tmp = strategic_workspace();
     fs::write(
         tmp.path().join("telos/contexts/pet/notions/Pet.tel"),
-        "notion billing/Pet entity {\n  def \"Wrong owner.\"\n}\n",
+        "notion billing/Pet entity {\n  def \"Wrong owner.\"\n  phrase \"pet\"\n}\n",
     )
     .unwrap();
 

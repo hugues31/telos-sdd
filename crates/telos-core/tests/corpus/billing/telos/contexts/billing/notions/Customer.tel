@@ -1,4 +1,5 @@
 notion billing/Customer entity {
   def    "A person or company that receives invoices."
+  phrase "customer"
   attr   name string
 }

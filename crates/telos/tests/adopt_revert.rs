@@ -86,6 +86,7 @@ const LOCK: &str = "telos/telos.lock";
 /// `Untracked` half of drift.
 const ROGUE_TEL: &str = "notion billing/Rogue entity {\n  \
     def    \"A notion created outside the protocol.\"\n  \
+    phrase \"rogue\"\n  \
     attr   label string\n\
 }\n";
 
@@ -757,7 +758,7 @@ const REFUND: &str = "telos/contexts/billing/notions/Refund.tel";
 fn refund_payload() -> String {
     json!({
         "owner": "billing",
-        "name": "Refund", "kind": "event",
+        "name": "Refund", "kind": "event", "phrase": "refund is issued",
         "def": "A refund was issued against an invoice.",
         "attrs": [ {"name": "amount", "type": "money"} ]
     })

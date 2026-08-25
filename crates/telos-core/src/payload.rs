@@ -55,7 +55,7 @@ use crate::syntax::parse_expr;
 
 // --- notion --------------------------------------------------------------
 
-const NOTION_KEYS: &[&str] = &["name", "kind", "def", "attrs", "rels"];
+const NOTION_KEYS: &[&str] = &["name", "kind", "def", "phrase", "attrs", "rels"];
 
 const NOTION_KIND_WORDS: [(&str, NotionKind); 5] = [
     ("actor", NotionKind::Actor),
@@ -104,6 +104,35 @@ fn notion_from_obj(obj: &Map<String, Value>, base: Option<&Notion>) -> Result<No
         None,
         |v| Ok(as_str(v, "def")?.to_string()),
     )?;
+    let phrase = match obj.get("phrase") {
+        Some(v) => {
+            let text = as_str(v, "phrase")?.to_string();
+            // A newline cannot be written in a `.tel` string -- the lexer
+            // accepts only `\"` and `\\` -- so emitting one would produce a
+            // file the parser rejects. This is the only door it can enter by.
+            if text.contains('\n') {
+                return Err(TelosError::new(
+                    ErrorCode::TelosParseError,
+                    format!("notion `{name}` phrase must be a single line"),
+                ));
+            }
+            text
+        }
+        None => match base.map(|b| b.phrase.clone()) {
+            Some(inherited) => inherited,
+            None if kind == NotionKind::Event => {
+                return Err(TelosError::new(
+                    ErrorCode::TelosParseError,
+                    format!(
+                        "notion `{name}` is an event and needs an explicit `phrase`: \
+                         a name cannot be turned into a clause with a verb"
+                    ),
+                )
+                .hint("e.g. \"payment is received\" for PaymentReceived"));
+            }
+            None => derive_phrase(&name),
+        },
+    };
     let attrs = resolve(
         obj,
         "attrs",
@@ -124,9 +153,36 @@ fn notion_from_obj(obj: &Map<String, Value>, base: Option<&Notion>) -> Result<No
         name,
         kind,
         def,
+        phrase,
         attrs,
         rels,
     })
+}
+
+/// Derives a default `phrase` from a PascalCase notion name: split on case
+/// boundaries, lowercase, join with spaces. `InvoiceLine` becomes
+/// `"invoice line"`; `HTTPRequest` becomes `"http request"`; `SLA` stays one
+/// word and becomes `"sla"`.
+///
+/// The result is written into the `.tel` file, never applied at read time, so
+/// a wrong guess -- `SLA` -- shows up in `telos change diff` and gets fixed
+/// before approval instead of surfacing in generated prose afterwards.
+pub fn derive_phrase(name: &NotionName) -> String {
+    let chars: Vec<char> = name.as_str().chars().collect();
+    let mut words = Vec::new();
+    let mut start = 0;
+
+    for i in 1..chars.len() {
+        let prev_is_lower = chars[i - 1].is_lowercase() || chars[i - 1].is_ascii_digit();
+        let next_is_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
+        if chars[i].is_uppercase() && (prev_is_lower || next_is_lower) {
+            words.push(chars[start..i].iter().collect::<String>());
+            start = i;
+        }
+    }
+    words.push(chars[start..].iter().collect::<String>());
+
+    words.join(" ").to_lowercase()
 }
 
 fn notion_kind_from_str(s: &str) -> Result<NotionKind, TelosError> {
@@ -969,6 +1025,7 @@ mod tests {
                 name: name("Invoice"),
                 kind: NotionKind::Entity,
                 def: "A bill.".to_string(),
+                phrase: "invoice".to_string(),
                 attrs: vec![
                     Attr {
                         name: field("state"),
@@ -988,6 +1045,7 @@ mod tests {
                 name: name("PaymentReceived"),
                 kind: NotionKind::Event,
                 def: "A payment arrived.".to_string(),
+                phrase: "payment received".to_string(),
                 attrs: vec![Attr {
                     name: field("amount"),
                     ty: AttrType::Money,
@@ -1038,6 +1096,7 @@ mod tests {
                 name: name("Invoice"),
                 kind: NotionKind::Entity,
                 def: "A bill issued to a Customer for delivered work.".to_string(),
+                phrase: "invoice".to_string(),
                 attrs: vec![
                     Attr {
                         name: field("state"),
@@ -1403,6 +1462,7 @@ mod tests {
                 name: name("Customer"),
                 kind: NotionKind::Entity,
                 def: "x".to_string(),
+                phrase: "customer".to_string(),
                 attrs: vec![Attr {
                     name: field("name"),
                     ty: AttrType::String,
@@ -1427,6 +1487,7 @@ mod tests {
                 name: name("Order"),
                 kind: NotionKind::Entity,
                 def: "x".to_string(),
+                phrase: "order".to_string(),
                 attrs: vec![Attr {
                     name: field("quantity"),
                     ty: AttrType::Int,
@@ -1448,6 +1509,7 @@ mod tests {
                 name: name("Order"),
                 kind: NotionKind::Entity,
                 def: "x".to_string(),
+                phrase: "order".to_string(),
                 attrs: vec![Attr {
                     name: field("quantity"),
                     ty: AttrType::Int,
@@ -1468,6 +1530,7 @@ mod tests {
                 name: name("Product"),
                 kind: NotionKind::Entity,
                 def: "x".to_string(),
+                phrase: "product".to_string(),
                 attrs: vec![Attr {
                     name: field("price"),
                     ty: AttrType::Decimal,
@@ -1493,6 +1556,7 @@ mod tests {
                 name: name("Product"),
                 kind: NotionKind::Entity,
                 def: "x".to_string(),
+                phrase: "product".to_string(),
                 attrs: vec![Attr {
                     name: field("price"),
                     ty: AttrType::Decimal,
@@ -1517,6 +1581,7 @@ mod tests {
                 name: name("Flag"),
                 kind: NotionKind::Value,
                 def: "x".to_string(),
+                phrase: "flag".to_string(),
                 attrs: vec![Attr {
                     name: field("enabled"),
                     ty: AttrType::Bool,
@@ -1541,6 +1606,7 @@ mod tests {
                 name: name("Invoice"),
                 kind: NotionKind::Entity,
                 def: "x".to_string(),
+                phrase: "invoice".to_string(),
                 attrs: vec![Attr {
                     name: field("customer"),
                     ty: AttrType::Ref(name("Customer")),
@@ -1788,5 +1854,78 @@ mod tests {
         let patched = patch_constraint(&base, &serde_json::json!({"title": "renamed"})).unwrap();
         assert_eq!(patched.check.as_deref(), Some("run.sh"));
         assert_eq!(patched.title, "renamed");
+    }
+
+    // --- phrase ----------------------------------------------------------
+
+    #[test]
+    fn derive_phrase_splits_pascal_case_and_lowercases() {
+        for (name, expected) in [
+            ("Invoice", "invoice"),
+            ("Customer", "customer"),
+            ("InvoiceLine", "invoice line"),
+            ("SLA", "sla"),
+            ("HTTPRequest", "http request"),
+            ("A", "a"),
+        ] {
+            let name = NotionName::new(name).unwrap();
+            assert_eq!(derive_phrase(&name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_noun_notion_payload_derives_its_phrase() {
+        let json = serde_json::json!({
+            "name": "InvoiceLine", "kind": "entity", "def": "One line of an invoice."
+        });
+        assert_eq!(notion_from_json(&json).unwrap().phrase, "invoice line");
+    }
+
+    #[test]
+    fn an_explicit_phrase_wins_over_the_derived_one() {
+        let json = serde_json::json!({
+            "name": "SLA", "kind": "entity", "def": "x", "phrase": "SLA"
+        });
+        assert_eq!(notion_from_json(&json).unwrap().phrase, "SLA");
+    }
+
+    #[test]
+    fn an_event_notion_payload_requires_an_explicit_phrase() {
+        let json = serde_json::json!({
+            "name": "PaymentReceived", "kind": "event", "def": "x"
+        });
+        let error = notion_from_json(&json).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TelosParseError);
+        assert!(
+            error.message.contains("phrase") && error.message.contains("event"),
+            "unhelpful message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn an_event_notion_payload_accepts_an_explicit_phrase() {
+        let json = serde_json::json!({
+            "name": "PaymentReceived", "kind": "event", "def": "x",
+            "phrase": "payment is received"
+        });
+        assert_eq!(
+            notion_from_json(&json).unwrap().phrase,
+            "payment is received"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_phrase_is_rejected() {
+        let json = serde_json::json!({
+            "name": "Invoice", "kind": "entity", "def": "x", "phrase": "invoice\nline"
+        });
+        let error = notion_from_json(&json).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TelosParseError);
+        assert!(
+            error.message.contains("single line"),
+            "unhelpful message: {}",
+            error.message
+        );
     }
 }

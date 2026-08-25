@@ -193,6 +193,7 @@ fn owned_notion(context: &str, name: &str) -> (RepoPath, TelFile) {
         name: NotionName::new(name).unwrap(),
         kind: NotionKind::Entity,
         def: "Context-local term.".to_string(),
+        phrase: name.to_lowercase(),
         attrs: vec![],
         rels: vec![],
     };
@@ -740,7 +741,7 @@ fn an_unknown_ref_attr_target_is_reported() {
         "telos/contexts/billing/notions/Ledger.tel",
         concat!(
             "notion billing/Ledger entity {\n",
-            "  def    \"A book of invoices.\"\n",
+            "  def    \"A book of invoices.\"\n  phrase \"ledger\"\n",
             "  attr   owner ref(Custome)\n",
             "}\n",
         ),
@@ -979,7 +980,7 @@ fn two_notions_with_the_same_name_are_a_violation() {
         "telos/contexts/billing/capabilities/invoicing/notions/Invoice.tel",
         concat!(
             "notion billing/invoicing/Invoice entity {\n",
-            "  def    \"A second, conflicting definition.\"\n",
+            "  def    \"A second, conflicting definition.\"\n  phrase \"invoice\"\n",
             "}\n",
         ),
     ));

@@ -234,6 +234,7 @@ mod tests {
             name: NotionName::new("Invoice").unwrap(),
             kind: NotionKind::Entity,
             def: "A bill.".to_string(),
+            phrase: "invoice".to_string(),
             attrs: vec![],
             rels: vec![],
         };
@@ -329,6 +330,7 @@ mod tests {
             name: NotionName::new("Invoice").unwrap(),
             kind: NotionKind::Entity,
             def: "A billing document.".to_string(),
+            phrase: "invoice".to_string(),
             attrs: vec![],
             rels: vec![],
         };

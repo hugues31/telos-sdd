@@ -395,7 +395,8 @@ fn loop_feature() {
             "owner": "billing/settlement",
             "name": "PaymentReceived",
             "kind": "event",
-            "def": "A payment arrived for an invoice."
+            "def": "A payment arrived for an invoice.",
+            "phrase": "payment is received"
         }"#,
     );
     let added_intent = run_ok_stdin(

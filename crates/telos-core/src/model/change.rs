@@ -706,6 +706,7 @@ pub(crate) mod fixtures {
             name: notion_name("Invoice"),
             kind: NotionKind::Entity,
             def: "A bill issued to a Customer for delivered work.".to_string(),
+            phrase: "invoice".to_string(),
             attrs: vec![Attr {
                 name: field("state"),
                 ty: AttrType::Enum(vec!["open".to_string(), "settled".to_string()]),
@@ -817,6 +818,7 @@ pub(crate) mod fixtures {
 
   op add notion billing/Invoice entity {
     def    "A bill issued to a Customer for delivered work."
+    phrase "invoice"
     attr   state enum(open, settled)
   }
 
@@ -917,6 +919,7 @@ pub(crate) mod fixtures {
 
   op add notion billing/Invoice entity {
     def    "A bill issued to a Customer for delivered work."
+    phrase "invoice"
     attr   state enum(open, settled)
   }
 
@@ -1140,7 +1143,7 @@ mod tests {
     fn ops_digest_is_pinned_to_the_bytes_of_the_canonical_ops() {
         assert_eq!(
             example_change().ops_digest(),
-            "sha256:548d9110787c4aa5f43d172361eb46d6d717b22d742c3c4cf9085b66747240d0"
+            "sha256:0ab8da4cce6bb2773e7af48d2cc540eec7da722ec0c04b0f6aa7228db4eb19b2"
         );
         // No op means no byte hashed: the SHA-256 of the empty input.
         assert_eq!(
@@ -1298,7 +1301,7 @@ mod tests {
 
         assert_eq!(
             implementing.ops_digest(),
-            "sha256:548d9110787c4aa5f43d172361eb46d6d717b22d742c3c4cf9085b66747240d0"
+            "sha256:0ab8da4cce6bb2773e7af48d2cc540eec7da722ec0c04b0f6aa7228db4eb19b2"
         );
         assert_eq!(implementing.ops_digest(), example_change().ops_digest());
     }

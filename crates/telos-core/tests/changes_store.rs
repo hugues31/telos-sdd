@@ -53,6 +53,7 @@ fn ledger_notion() -> Notion {
         name: NotionName::new("Ledger").unwrap(),
         kind: NotionKind::Entity,
         def: "A record of postings.".to_string(),
+        phrase: "ledger".to_string(),
         attrs: vec![],
         rels: vec![],
     }

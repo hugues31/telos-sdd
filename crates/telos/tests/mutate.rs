@@ -203,7 +203,7 @@ fn plain_invoice_payload() -> String {
 
 fn payment_received_payload() -> String {
     json!({
-        "owner": "billing/settlement", "name": "PaymentReceived", "kind": "event",
+        "owner": "billing/settlement", "name": "PaymentReceived", "kind": "event", "phrase": "payment is received",
         "def": "A payment arrived for an invoice.",
         "attrs": [ {"name": "amount", "type": "money"} ]
     })
@@ -304,7 +304,8 @@ fn add_notion_writes_the_canonical_change_file_byte_for_byte() {
            status drafted\n\
          \n  \
            op add notion billing/Customer actor {\n    \
-             def    \"A party that receives invoices.\"\n  \
+             def    \"A party that receives invoices.\"\n    \
+             phrase \"customer\"\n  \
            }\n\
          }\n"
     );
@@ -335,11 +336,13 @@ fn a_second_op_appends_a_block_and_resolves_against_the_first() {
            status drafted\n\
          \n  \
            op add notion billing/Customer actor {\n    \
-             def    \"A party that receives invoices.\"\n  \
+             def    \"A party that receives invoices.\"\n    \
+             phrase \"customer\"\n  \
            }\n\
          \n  \
            op add notion billing/Invoice entity {\n    \
              def    \"A bill issued to a Customer for delivered work.\"\n    \
+             phrase \"invoice\"\n    \
              attr   state    enum(open, settled)\n    \
              attr   balance  money\n    \
              attr   customer ref(Customer)\n    \
@@ -478,7 +481,7 @@ fn a_date_field_that_is_not_a_date_lexeme_is_refused() {
     stage_ok(
         tmp.path(),
         &["add", "notion", "--change", "CHG-0001", "--json"],
-        &json!({"owner": "billing/settlement", "name": "BookingMade", "kind": "event", "def": "A booking was made."}).to_string(),
+        &json!({"owner": "billing/settlement", "name": "BookingMade", "kind": "event", "def": "A booking was made.", "phrase": "booking is made"}).to_string(),
     );
 
     let error = stage_err(
@@ -632,6 +635,7 @@ fn edit_notion_stages_the_full_post_state() {
          \n  \
            op edit notion billing/Customer entity {\n    \
              def    \"Reworded.\"\n    \
+             phrase \"customer\"\n    \
              attr   name string\n  \
            }\n\
          }\n"

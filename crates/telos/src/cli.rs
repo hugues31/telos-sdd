@@ -117,6 +117,14 @@ enum Command {
         /// resolves to the intent that owns it.
         target: String,
     },
+    /// Print the Cucumber `.feature` projection of the spec: one feature per
+    /// intent, tagged with its id.
+    Gherkin {
+        /// Render what this change would produce instead of the sealed spec,
+        /// so its prose can be read before the change is approved.
+        #[arg(long, value_name = "CHG-NNNN")]
+        change: Option<String>,
+    },
     /// Plan a reconstruction or measure its real scenario progress.
     Rebuild {
         #[command(subcommand)]
@@ -224,6 +232,7 @@ impl Command {
             Command::Query { .. } => "query",
             Command::Impact { .. } => "impact",
             Command::Pack { .. } => "pack",
+            Command::Gherkin { .. } => "gherkin",
             Command::Rebuild { .. } => "rebuild",
             // One `command` for all three verbs: the envelope names the
             // command a caller invoked, and `telos change …` is one command
@@ -317,6 +326,7 @@ fn execute(command: &Command) -> CmdResult {
         Command::Query { query } => commands::query::run(&ctx()?, query),
         Command::Impact { target } => commands::impact::run(&ctx()?, target),
         Command::Pack { target } => commands::context::run(&ctx()?, target),
+        Command::Gherkin { change } => commands::gherkin::run(&ctx()?, change.as_deref()),
         Command::Rebuild { rebuild } => commands::rebuild::run(&ctx()?, rebuild),
         Command::Change { change } => commands::change::run(&ctx()?, change),
         Command::Add { kind, change } => {

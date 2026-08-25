@@ -11,6 +11,7 @@ pub mod change;
 pub mod check;
 pub mod config;
 pub mod context;
+pub mod gherkin;
 pub mod impact;
 pub mod init;
 pub mod list;

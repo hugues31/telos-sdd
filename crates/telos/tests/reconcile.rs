@@ -815,6 +815,99 @@ fn a_failing_constraint_check_refuses_the_reconcile_until_it_passes() {
 
 // --- gate 11: tests ---------------------------------------------------------
 
+const SHARED_INVOICE_CODE: &str = "src/billing/invoice.rs";
+const SETTLEMENT_PROOF_FILTER: &str = "scn_0107_full_payment_settles_the_invoice";
+
+/// The sealed billing project with one production file implementing both
+/// active intents. `complete_fixture_for_sealing` supplies SCN-0091's proof;
+/// the corpus already supplies SCN-0107's.
+fn shared_invoice_fixture() -> tempfile::TempDir {
+    with_fixture_mut(|root| {
+        set_test_cmd(root);
+        let path = root.join("telos/contexts/billing/bindings.tel");
+        let mut bindings = fs::read_to_string(&path).unwrap();
+        bindings.push_str("implements \"src/billing/invoice.rs\" -> INT-0017\n");
+        fs::write(path, bindings).unwrap();
+    })
+}
+
+fn touch_shared_invoice_code(root: &Path) {
+    let path = root.join(SHARED_INVOICE_CODE);
+    let mut source = fs::read_to_string(&path).unwrap();
+    source.push_str("// shared implementation changed\n");
+    fs::write(path, source).unwrap();
+}
+
+fn make_settlement_proof_pass(root: &Path) {
+    fs::write(root.join(SETTLEMENT_PROOF_FILTER), "").unwrap();
+}
+
+/// A bind journal line claims the modified implementation file for this
+/// change. Reconcile must cross that file's complete `implements` fan-out,
+/// not only test the intent whose spec op happens to own the bind.
+#[test]
+fn a_bound_shared_code_change_reproves_every_intent_the_file_implements() {
+    let tmp = approved_int_0042_edit(shared_invoice_fixture());
+    touch_shared_invoice_code(tmp.path());
+    telos(
+        tmp.path(),
+        &["bind", SHARED_INVOICE_CODE, "INT-0042", "--json"],
+    )
+    .assert()
+    .success();
+    make_settlement_proof_pass(tmp.path());
+
+    assert_eq!(reconcile_ok(tmp.path())["tests_run"], json!(2));
+}
+
+/// A journal run also claims its test path, but a claim is not by itself an
+/// implementation change. Even when one file is intentionally both code and
+/// a proof target, recording a run against it must not fan impact through its
+/// `implements` bindings; only an `Accept` or `Bind` may do that.
+#[test]
+fn a_test_run_on_a_code_bound_path_does_not_expand_code_impact() {
+    let tmp = approved_int_0042_edit(shared_invoice_fixture());
+    telos(
+        tmp.path(),
+        &["test", "SCN-0107", "--file", SHARED_INVOICE_CODE, "--json"],
+    )
+    .assert()
+    .success();
+    make_settlement_proof_pass(tmp.path());
+
+    assert_eq!(reconcile_ok(tmp.path())["tests_run"], json!(2));
+}
+
+/// `adopt` represents a code-only refactor as an `Accept` op. Even without
+/// an intent op to seed impact, every intent implemented by the accepted
+/// file must have its proof rerun before the new bytes are sealed.
+#[test]
+fn adopting_a_shared_code_change_reproves_every_intent_the_file_implements() {
+    let tmp = shared_invoice_fixture();
+    open_change(tmp.path());
+    touch_shared_invoice_code(tmp.path());
+    let status = run_json(tmp.path(), &["status", "--json"]);
+    let token = status["result"]["drift"]["token"]
+        .as_str()
+        .expect("drifted status carries an adoption token")
+        .to_string();
+    ok_result(
+        tmp.path(),
+        &[
+            "adopt",
+            "--into",
+            "CHG-0001",
+            "--expected-state",
+            &token,
+            "--json",
+        ],
+    );
+    approve(tmp.path());
+    make_settlement_proof_pass(tmp.path());
+
+    assert_eq!(reconcile_ok(tmp.path())["tests_run"], json!(2));
+}
+
 /// `{filter}` is substituted with the `proves` binding's test *name*, one
 /// invocation per distinct `TestRef` of the impacted scenarios. The corpus'
 /// edit reaches SCN-0107 through `verifies`, so exactly one test runs -- and

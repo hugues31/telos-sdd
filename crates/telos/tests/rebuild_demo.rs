@@ -613,7 +613,11 @@ fn implement_batch(
         reconciled["ops_applied"],
         json!(if batch.intent == INT_0017 { 2 } else { 1 })
     );
-    assert_eq!(reconciled["tests_run"], json!(1));
+    assert_eq!(
+        reconciled["tests_run"],
+        json!(batch.expected_green),
+        "the second batch rewrites code shared with the first intent, so both proofs rerun"
+    );
     assert_eq!(reconciled["checks_run"], json!(1));
     assert!(!root.join(format!("telos/changes/{change}.tel")).exists());
 

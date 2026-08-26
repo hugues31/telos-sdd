@@ -57,7 +57,10 @@
 //!     scope.
 //! 11. **Tests**, one run per distinct `proves` target of the impacted
 //!     scenarios -- the folded model's, so a scenario the journal just proved
-//!     is actually run and `tests_run` is honest.
+//!     is actually run and `tests_run` is honest. A production path this
+//!     change claims through `accept` or a journal `bind` impacts every intent
+//!     it implements, so shared code cannot enter the new seal while another
+//!     intent's proof still describes its previous bytes.
 //!
 //! [`reconcile_full`] is the same transaction with the delta taken out: no
 //! change, so no drift, status, digest or accept gate, no journal
@@ -138,7 +141,7 @@ use crate::error::{ErrorCode, TelosError};
 use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
-use crate::graph::NodeRef;
+use crate::graph::{NodeRef, Relation};
 use crate::ids::{ConstraintId, ContextId, IntentId, NotionRef, RepoPath, ScenarioId};
 use crate::lock::{LOCK_VERSION, Lock};
 use crate::model::change::context_bindings_path;
@@ -224,7 +227,7 @@ pub fn reconcile_change(
     require_sealable_structure(&effective_ws, &model)?;
 
     let proven = capture_seal_snapshot(ws, &model, git)?;
-    let impacted = impacted_nodes(ws, &model, &change.ops);
+    let impacted = impacted_nodes(ws, &model, change);
     let checks_run = run_constraint_checks(&effective_ws, &model, Some(&impacted))?;
     let tests_run = run_tests(&effective_ws, &model, &impacted)?;
     require_unchanged_snapshot(ws, git, &proven)?;
@@ -978,16 +981,20 @@ fn check_witnesses(
 /// enforced by different code, and the day one of them grows a legitimate
 /// exception, the impacted set must not silently miss it.
 ///
-/// An `accept` names a path, not an entity. When that path is bound by
-/// `implements`, it is a `Code` node like any other and its dependents
-/// re-verify; when it is not (a `telos.toml`, say), the graph knows no such
-/// node and it contributes nothing.
+/// An `accept` names a path, not an entity. A claimed path bound by
+/// `implements` bridges to every intent it implements, and those intents'
+/// dependents re-verify; when it is not (a `telos.toml`, say), the graph
+/// knows no such node and it contributes nothing. The same bridge applies
+/// to code paths claimed by journal `bind` lines: journal entries are not
+/// staged ops, but the implementation bytes they claim still enter the new
+/// seal.
 ///
 /// Best-effort on the pre model: a sealed base that does not build on its
 /// own -- the very hole this change may be closing -- contributes no
 /// closure rather than failing the reconcile. Gate 5 already proved what
 /// matters, that the *post* model is coherent.
-fn impacted_nodes(ws: &Workspace, model: &TelosModel, ops: &[StagedOp]) -> BTreeSet<NodeRef> {
+fn impacted_nodes(ws: &Workspace, model: &TelosModel, change: &Change) -> BTreeSet<NodeRef> {
+    let ops = &change.ops;
     // Configuration controls the runner, glob ownership, TDD policy, and the
     // execution environment of every constraint. It is therefore a global
     // mutation: every intent/scenario must be revalidated, not an entity-less
@@ -1068,6 +1075,48 @@ fn impacted_nodes(ws: &Workspace, model: &TelosModel, ops: &[StagedOp]) -> BTree
         // A removed entity is not itself impacted -- it is gone.
         if !is_remove(op) {
             nodes.insert(node);
+        }
+    }
+
+    // `implements` is written Code -> Intent, while the generic impact walk
+    // is deliberately reverse-only (apart from context-map `maps-to`). Code
+    // paths this change claims are the local exception: their current bytes
+    // will enter the seal, so every intent implemented by those bytes must
+    // contribute its scenarios and reverse dependents before gate 11 runs.
+    //
+    // Keep this narrower than `Change::claims()`: a journal Run claims its
+    // proof path for drift purposes, but merely executing a test is not an
+    // implementation change even when code/test globs intentionally overlap.
+    let implementation_paths: BTreeSet<RepoPath> = ops
+        .iter()
+        .filter_map(|op| match op {
+            StagedOp::Accept { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .chain(change.journal.iter().filter_map(|entry| match entry {
+            JournalEntry::Bind { path, .. } => Some(path.clone()),
+            JournalEntry::Run(_) => None,
+        }))
+        .collect();
+    for path in implementation_paths {
+        let code = NodeRef::Code(path);
+        let implemented: Vec<NodeRef> = model
+            .graph
+            .out_edges(&code)
+            .iter()
+            .filter(|(relation, _)| *relation == Relation::Implements)
+            .map(|(_, intent)| intent.clone())
+            .collect();
+        if implemented.is_empty() {
+            continue;
+        }
+
+        nodes.insert(code);
+        for intent in implemented {
+            for entry in model.graph.reverse_closure(&intent) {
+                nodes.insert(entry.node);
+            }
+            nodes.insert(intent);
         }
     }
     nodes

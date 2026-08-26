@@ -1345,6 +1345,13 @@ during ordinary reconcile when impacted and during full reconcile for every
 configured constraint. `tests_run` counts runner invocations, not scenario
 declarations.
 
+For an ordinary reconcile, a production path claimed by the current change
+through an `accept` op or a journal `bind` makes every intent it implements
+impacted. Gate 11 therefore reruns the distinct proof targets of every
+scenario on all those intents before the path's current bytes may enter the
+new seal. A path claimed only by another open change is still carried over at
+its previously sealed OID and does not enter this transaction's impacted set.
+
 ### Proof and constraint execution matrix
 
 | Surface | Scenario/test execution | Constraint check execution |

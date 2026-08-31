@@ -1,6 +1,7 @@
 //! Static export and the foreground live-view lifecycle.
 
-use std::io::Write;
+use std::io::{self, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 use serde_json::json;
@@ -18,8 +19,34 @@ use crate::view::export::export as export_snapshot;
 use crate::view::model::ViewSnapshot;
 use crate::view::server::LiveServer;
 
-pub fn export(ctx: &Ctx, destination: &str) -> CmdResult {
-    export_with_after_model(ctx, destination, || Ok(()))
+pub fn export(ctx: &Ctx, destination: &str, open: bool) -> CmdResult {
+    let outcome = export_with_after_model(ctx, destination, || Ok(()))?;
+    if open {
+        open_in_browser(&ctx.cwd.join(destination).join("index.html"))?;
+    }
+    Ok(outcome)
+}
+
+fn open_in_browser(target: &Path) -> Result<(), TelosError> {
+    let target = target.to_str().ok_or_else(|| {
+        browser_open_error(
+            &target.to_string_lossy(),
+            io::Error::new(io::ErrorKind::InvalidInput, "view path is not valid UTF-8"),
+        )
+    })?;
+    open_target_in_browser(target)
+}
+
+fn open_target_in_browser(target: &str) -> Result<(), TelosError> {
+    webbrowser::open(target).map_err(|error| browser_open_error(target, error))
+}
+
+fn browser_open_error(target: &str, error: io::Error) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosInternal,
+        format!("failed to open the Telos view in the default web browser: {error}"),
+    )
+    .hint(format!("open `{target}` manually"))
 }
 
 fn export_with_after_model<F>(ctx: &Ctx, destination: &str, after_model: F) -> CmdResult
@@ -66,7 +93,7 @@ where
 ///
 /// The listener and watcher are ready before the success answer is rendered
 /// and flushed, so a caller may connect as soon as it reads that first line.
-pub fn serve(ctx: &Ctx, port: u16, json: bool) -> ExitCode {
+pub fn serve(ctx: &Ctx, port: u16, open: bool, json: bool) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -88,6 +115,9 @@ pub fn serve(ctx: &Ctx, port: u16, json: bool) -> ExitCode {
         Err(error) => return render_startup_error(error, json),
     };
     let url = server.url();
+    if open && let Err(error) = open_target_in_browser(&url) {
+        return render_startup_error(error, json);
+    }
     let outcome = Outcome {
         result: json!({"mode": "server", "url": url}),
         human: url,

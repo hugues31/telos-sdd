@@ -74,6 +74,9 @@ enum Command {
         /// Write a self-contained static site to this new directory.
         #[arg(long, value_name = "DIR")]
         export: Option<PathBuf>,
+        /// Open the generated view in the default web browser.
+        #[arg(long)]
+        open: bool,
     },
     /// Parse the spec and check its integrity.
     Check {
@@ -257,12 +260,17 @@ pub fn run() -> ExitCode {
     if let Command::AgentGuard { host } = &cli.command {
         return commands::agents::guard::run(*host);
     }
-    if let Command::View { port, export: None } = &cli.command {
+    if let Command::View {
+        port,
+        export: None,
+        open,
+    } = &cli.command
+    {
         let context = match ctx() {
             Ok(context) => context,
             Err(error) => return commands::view::render_startup_error(error, cli.json),
         };
-        return commands::view::serve(&context, *port, cli.json);
+        return commands::view::serve(&context, *port, *open, cli.json);
     }
 
     let name = cli.command.name();
@@ -294,6 +302,7 @@ fn execute(command: &Command) -> CmdResult {
         Command::Status => commands::status::run(&ctx()?),
         Command::View {
             export: Some(destination),
+            open,
             ..
         } => {
             let destination = destination.to_str().ok_or_else(|| {
@@ -302,7 +311,7 @@ fn execute(command: &Command) -> CmdResult {
                     "export destination must be valid UTF-8",
                 )
             })?;
-            commands::view::export(&ctx()?, destination)
+            commands::view::export(&ctx()?, destination, *open)
         }
         Command::View { export: None, .. } => {
             unreachable!("live view returned before ordinary dispatch")

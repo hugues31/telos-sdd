@@ -13,6 +13,38 @@ use std::process::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+pub fn fake_browser() -> (TempDir, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("failed to create a fake-browser directory");
+    let browser = tmp.path().join("browser");
+    let target_log = tmp.path().join("target");
+    fs::write(
+        &browser,
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$TELOS_TEST_BROWSER_TARGET\"\n",
+    )
+    .expect("failed to write the fake browser");
+    let mut permissions = fs::metadata(&browser).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&browser, permissions).unwrap();
+    (tmp, browser, target_log)
+}
+
+#[cfg(unix)]
+pub fn wait_for_browser_target(target_log: &Path) -> String {
+    for _ in 0..500 {
+        if let Ok(target) = fs::read_to_string(target_log) {
+            return target.trim_end().to_string();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!(
+        "fake browser did not record a target at {}",
+        target_log.display()
+    );
+}
+
 /// Supplies the canonical owner for shared test payload builders that focus
 /// on another part of the mutation contract.
 pub fn canonical_payload(args: &[&str], payload: &str) -> String {

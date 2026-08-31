@@ -69,7 +69,7 @@ envelope surface.
 | `config` | `telos config [--change CHG-NNNN]` |
 | `map` | `telos map [--change CHG-NNNN]` |
 | `status` | `telos status` |
-| `view` | `telos view [--port N] [--export DIR]` |
+| `view` | `telos view [--port N] [--export DIR] [--open]` |
 | `check` | `telos check [--sealed]` |
 | `show` | `telos show` |
 | `list` | `telos list` |
@@ -1085,12 +1085,18 @@ constraint checks and every distinct `proves` target run once before the
 configuration is written. A configuration edit cannot narrow its own proof
 or constraint gate.
 
-### `view [--port N] [--export DIR]`
+### `view [--port N] [--export DIR] [--open]`
 
 Live and export consume the same immutable `ViewSnapshot`. The binary embeds
 one SPA application shell and all of its assets; live serves that shell with a
 generated `/data.js`, while export writes the same shell and assets with the
 same deterministic snapshot payload in `data.js`.
+
+`--open` launches the generated view in the operating system's default web
+browser: the advertised loopback URL for live mode, or the exported
+`index.html` for `--export`. A browser-launch failure returns `TELOS_INTERNAL`
+with a hint containing the target to open manually. It does not alter either
+mode's success envelope.
 
 The SPA owns navigation. Its six frontend routes are:
 

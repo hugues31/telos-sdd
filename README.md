@@ -71,11 +71,11 @@ cd my-project
 telos init --agents claude,codex --ci github
 telos status
 telos check --sealed
-telos view --port 3000
+telos view --port 3000 --open
 ```
 
-Omit either initialization flag if you do not need it. After `telos view`, open
-`http://localhost:3000`; the server is loopback-only.
+Omit either initialization flag if you do not need it. `telos view --open`
+launches the loopback-only view in your default web browser.
 
 ## See it in action
 
@@ -140,8 +140,10 @@ production-file boundaries deterministically.
 
 ## Explore and reconstruct
 
-- `telos view --port 3000` browses the current model locally.
-- `telos view --export site` creates a self-contained static site.
+- `telos view --port 3000 --open` browses the current model locally and opens it
+  in the default web browser.
+- `telos view --export site --open` creates a self-contained static site and
+  opens its index page.
 - `telos rebuild plan` and `telos rebuild status` show implementation order and
   scenario progress. They do not write code.
 

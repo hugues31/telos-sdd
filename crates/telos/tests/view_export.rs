@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+use common::{fake_browser, wait_for_browser_target};
 use common::{telos, with_fixture};
 
 const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
@@ -352,6 +354,31 @@ fn two_exports_have_identical_sorted_paths_and_bytes() {
             fs::read(right.join(path)).unwrap()
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn open_launches_the_default_browser_with_the_exported_index() {
+    let tmp = with_fixture();
+    let (_browser_tmp, browser, target_log) = fake_browser();
+    let output = telos(
+        tmp.path(),
+        &["view", "--export", "site", "--open", "--json"],
+    )
+    .env("BROWSER", browser)
+    .env("TELOS_TEST_BROWSER_TARGET", &target_log)
+    .output()
+    .expect("run telos view --export --open");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        wait_for_browser_target(&target_log),
+        format!("file://{}", tmp.path().join("site/index.html").display())
+    );
 }
 
 #[cfg(unix)]

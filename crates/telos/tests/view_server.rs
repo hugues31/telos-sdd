@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+use common::{fake_browser, wait_for_browser_target};
 use common::{telos, with_fixture};
 
 struct ServerChild(Option<Child>);
@@ -45,10 +47,14 @@ fn start_server(root: &Path) -> (ServerChild, String, Value) {
 }
 
 fn spawn_and_read_startup(root: &Path, args: &[&str]) -> (ServerChild, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_telos"));
+    command.args(args).current_dir(root);
+    spawn_and_read_startup_command(command)
+}
+
+fn spawn_and_read_startup_command(mut command: Command) -> (ServerChild, String) {
     let mut child = ServerChild(Some(
-        Command::new(env!("CARGO_BIN_EXE_telos"))
-            .args(args)
-            .current_dir(root)
+        command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -694,5 +700,26 @@ fn human_startup_line_is_the_loopback_url() {
 
     assert!(line.starts_with("http://127.0.0.1:"), "line: {line:?}");
     assert!(line.ends_with("/\n"), "line: {line:?}");
+    server.stop();
+}
+
+#[cfg(unix)]
+#[test]
+fn open_launches_the_default_browser_with_the_live_url() {
+    let tmp = with_fixture();
+    let (_browser_tmp, browser, target_log) = fake_browser();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_telos"));
+    command
+        .args(["view", "--port", "0", "--open", "--json"])
+        .current_dir(tmp.path())
+        .env("BROWSER", browser)
+        .env("TELOS_TEST_BROWSER_TARGET", &target_log);
+
+    let (mut server, line) = spawn_and_read_startup_command(command);
+    let envelope: Value = serde_json::from_str(line.trim_end()).unwrap();
+    let url = envelope["result"]["url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("live view failed to start: {envelope}"));
+    assert_eq!(wait_for_browser_target(&target_log), url);
     server.stop();
 }

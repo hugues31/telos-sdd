@@ -815,10 +815,16 @@ Statement templates: `{"template":"ubiquitous","action":…}` ·
 (`while` must parse to exactly `Ref == literal`) ·
 `{"template":"unwanted","if":"Invoice.balance < 0","action":…}` ·
 `{"template":"optional","where":"dark-mode","action":…}`. `while`/`if`/
-`then` expressions are strings of the mini-language, parsed the same way
-`.tel` source is. `action` is a string: if it starts with `set ` it must
-parse to exactly `set <Notion.attr> = <literal>` (a dedicated parse error
-otherwise); any other string is a free clause.
+`then` (and a constraint's `rule.expr`) are strings of the mini-language,
+parsed the same way `.tel` source is — comparisons `Notion.attr <op>
+literal`, membership `Notion.attr in (a, b)`, combined with `and`/`or`/
+`not`, on ASCII identifiers. They are a grammar, never prose: a string of
+natural language is a `TELOS_PARSE_ERROR` whose message names the exact
+field that failed (`` payload.scenarios[0].then[1]: unexpected character
+`é` ``) and whose `hint` names the grammar. `action` is a string: if it
+starts with `set ` it must parse to exactly `set <Notion.attr> =
+<literal>` (a dedicated parse error otherwise); any other string is a free
+clause.
 
 Typing a `fields` value against its attribute's declared type: `string` →
 JSON string → `Str`; `int` → JSON integer → `Int`; `decimal` → JSON

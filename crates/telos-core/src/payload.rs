@@ -388,7 +388,7 @@ fn statement_from_json(v: &Value) -> Result<Statement, TelosError> {
         "state-driven" => {
             check_unknown_keys(obj, &["template", "while", "action"], "statement")?;
             let text = as_str(required(obj, "while", "statement")?, "while")?;
-            let expr = parse_expr(text).map_err(TelosError::from)?;
+            let expr = parse_expr_field(text, "statement.while")?;
             let (subject, value) = state_driven_shape(expr)?;
             Ok(Statement::StateDriven {
                 subject,
@@ -399,7 +399,7 @@ fn statement_from_json(v: &Value) -> Result<Statement, TelosError> {
         "unwanted" => {
             check_unknown_keys(obj, &["template", "if", "action"], "statement")?;
             let text = as_str(required(obj, "if", "statement")?, "if")?;
-            let condition = parse_expr(text).map_err(TelosError::from)?;
+            let condition = parse_expr_field(text, "statement.if")?;
             Ok(Statement::Unwanted {
                 condition,
                 action: action_from_json(obj)?,
@@ -548,7 +548,7 @@ fn scenarios_from_json(
 
     let mut scenarios = Vec::new();
     let mut allocated = Vec::new();
-    for item in arr {
+    for (index, item) in arr.iter().enumerate() {
         let obj = as_object(item, "a scenario")?;
         check_unknown_keys(obj, allowed_keys, "scenario")?;
 
@@ -560,7 +560,7 @@ fn scenarios_from_json(
                 id
             }
         };
-        scenarios.push(scenario_fields_from_json(obj, notions, id)?);
+        scenarios.push(scenario_fields_from_json(obj, notions, id, index)?);
     }
     Ok((scenarios, allocated))
 }
@@ -569,6 +569,7 @@ fn scenario_fields_from_json(
     obj: &Map<String, Value>,
     notions: &BTreeMap<NotionName, Notion>,
     id: ScenarioId,
+    index: usize,
 ) -> Result<Scenario, TelosError> {
     let title = as_str(required(obj, "title", "scenario")?, "title")?.to_string();
     let given: Vec<InstanceStep> = as_array(required(obj, "given", "scenario")?, "given")?
@@ -583,7 +584,10 @@ fn scenario_fields_from_json(
     let when = instance_step_from_json(required(obj, "when", "scenario")?, notions)?;
     let then: Vec<Expr> = as_array(required(obj, "then", "scenario")?, "then")?
         .iter()
-        .map(|t| parse_expr(as_str(t, "then")?).map_err(TelosError::from))
+        .enumerate()
+        .map(|(i, t)| {
+            parse_expr_field(as_str(t, "then")?, &format!("scenarios[{index}].then[{i}]"))
+        })
         .collect::<Result<_, _>>()?;
     if then.is_empty() {
         return Err(shape_err(format!(
@@ -800,9 +804,10 @@ fn rule_from_json(v: &Value) -> Result<Rule, TelosError> {
     check_unknown_keys(obj, &["text", "expr"], "rule")?;
     match (obj.get("text"), obj.get("expr")) {
         (Some(t), None) => Ok(Rule::Text(as_str(t, "text")?.to_string())),
-        (None, Some(e)) => Ok(Rule::Machine(
-            parse_expr(as_str(e, "expr")?).map_err(TelosError::from)?,
-        )),
+        (None, Some(e)) => Ok(Rule::Machine(parse_expr_field(
+            as_str(e, "expr")?,
+            "rule.expr",
+        )?)),
         (Some(_), Some(_)) => Err(shape_err(
             "`rule` must have exactly one of `text` or `expr`, not both",
         )),
@@ -839,6 +844,27 @@ fn shape_err(msg: impl Into<String>) -> TelosError {
         ErrorCode::TelosParseError,
         format!("payload: {}", msg.into()),
     )
+}
+
+/// The hint every payload expression field carries when it fails to parse.
+/// A caller that only ever sees JSON gets nothing actionable from a bare
+/// lexer or parser message (`` unexpected character `é` ``): it has to be
+/// told the field is a grammar, not free text. Set unconditionally because
+/// neither the lexer nor the parser ever produces a hint of its own.
+const EXPR_HINT: &str = "this field holds an expression of the `.tel` \
+mini-language, not prose: `Notion.attr == literal` or `Notion.attr in \
+(a, b)`, combined with `and`/`or`/`not`; identifiers are ASCII";
+
+/// Parses one payload field holding a mini-language expression, tagging the
+/// diagnostic with that field's path in the payload (`scenarios[0].then[1]`,
+/// `statement.while`...) and [`EXPR_HINT`]. The diagnostic itself carries no
+/// file, so without the path the caller cannot tell which of a payload's
+/// several expression fields it came from.
+fn parse_expr_field(text: &str, field: &str) -> Result<Expr, TelosError> {
+    parse_expr(text).map_err(|diag| {
+        let err = TelosError::from(diag);
+        TelosError::new(err.code, format!("payload.{field}: {}", err.message)).hint(EXPR_HINT)
+    })
 }
 
 fn missing_field_err(key: &str, kind: &str) -> TelosError {
@@ -1333,6 +1359,106 @@ mod tests {
             "expected the parse_expr diagnostic to surface, got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn scenario_then_expr_error_names_its_field_path_and_hints_the_grammar() {
+        let notions = invoice_and_payment_notions();
+        let mut alloc = Alloc::new(Counters::default(), Counters::default());
+        let json = serde_json::json!({
+            "title": "t", "status": "active", "telos": "t",
+            "statement": {"template": "ubiquitous", "action": "do it"},
+            "scenarios": [
+                { "title": "s",
+                  "given": [{"notion":"Invoice","fields":{}}],
+                  "when": {"notion":"PaymentReceived","fields":{}},
+                  "then": ["Invoice.state == open", "la facture est réglée"] }
+            ]
+        });
+        let err = intent_from_json(&json, &notions, &mut alloc).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TelosParseError);
+        assert!(
+            err.message.starts_with("payload.scenarios[0].then[1]: "),
+            "expected the failing field's path, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("unexpected character `é`"),
+            "expected the lexer diagnostic to survive the prefix, got: {}",
+            err.message
+        );
+        assert!(
+            err.hint
+                .as_deref()
+                .is_some_and(|h| h.contains("mini-language") && h.contains("not prose")),
+            "expected the mini-language hint, got: {:?}",
+            err.hint
+        );
+    }
+
+    #[test]
+    fn statement_while_expr_error_names_its_field_path() {
+        let notions = invoice_and_payment_notions();
+        let mut alloc = Alloc::new(Counters::default(), Counters::default());
+        let json = serde_json::json!({
+            "title": "t", "status": "active", "telos": "t",
+            "statement": {"template": "state-driven", "while": "la facture est ouverte",
+                          "action": "notify"},
+            "scenarios": [
+                { "title": "s",
+                  "given": [{"notion":"Invoice","fields":{}}],
+                  "when": {"notion":"PaymentReceived","fields":{}},
+                  "then": ["Invoice.state == open"] }
+            ]
+        });
+        let err = intent_from_json(&json, &notions, &mut alloc).unwrap_err();
+        assert!(
+            err.message.starts_with("payload.statement.while: "),
+            "expected the failing field's path, got: {}",
+            err.message
+        );
+        assert!(err.hint.is_some(), "expected the mini-language hint");
+    }
+
+    #[test]
+    fn statement_if_expr_error_names_its_field_path() {
+        let notions = invoice_and_payment_notions();
+        let mut alloc = Alloc::new(Counters::default(), Counters::default());
+        let json = serde_json::json!({
+            "title": "t", "status": "active", "telos": "t",
+            "statement": {"template": "unwanted", "if": "le solde est négatif",
+                          "action": "refuse"},
+            "scenarios": [
+                { "title": "s",
+                  "given": [{"notion":"Invoice","fields":{}}],
+                  "when": {"notion":"PaymentReceived","fields":{}},
+                  "then": ["Invoice.state == open"] }
+            ]
+        });
+        let err = intent_from_json(&json, &notions, &mut alloc).unwrap_err();
+        assert!(
+            err.message.starts_with("payload.statement.if: "),
+            "expected the failing field's path, got: {}",
+            err.message
+        );
+        assert!(err.hint.is_some(), "expected the mini-language hint");
+    }
+
+    #[test]
+    fn constraint_rule_expr_error_names_its_field_path() {
+        let mut alloc = Alloc::new(Counters::default(), Counters::default());
+        let json = serde_json::json!({
+            "kind": "architecture", "title": "t",
+            "rule": {"expr": "le solde reste positif"},
+            "scope": "global"
+        });
+        let err = constraint_from_json(&json, &mut alloc).unwrap_err();
+        assert!(
+            err.message.starts_with("payload.rule.expr: "),
+            "expected the failing field's path, got: {}",
+            err.message
+        );
+        assert!(err.hint.is_some(), "expected the mini-language hint");
     }
 
     #[test]

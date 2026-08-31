@@ -248,6 +248,10 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
     assert!(challenger.contains("ends only after triggering the native approval prompt"));
     assert!(challenger.contains("opens the prompt; it does not grant approval"));
     assert!(challenger.contains("Do not continue until the human answers"));
+    assert!(challenger.contains("Expression fields are a grammar, not prose"));
+    assert!(challenger.contains("`Notion.attr == literal`"));
+    assert!(challenger.contains("Identifiers are ASCII"));
+    assert!(challenger.contains("payload.scenarios[0].then[1]"));
 
     let implementer = read(tmp.path(), ".agents/skills/telos-implementer/SKILL.md");
     ordered(

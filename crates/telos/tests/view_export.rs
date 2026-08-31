@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use common::{fake_browser, wait_for_browser_target};
 use common::{telos, with_fixture};
 
@@ -356,7 +356,7 @@ fn two_exports_have_identical_sorted_paths_and_bytes() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn open_launches_the_default_browser_with_the_exported_index() {
     let tmp = with_fixture();

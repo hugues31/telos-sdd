@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use common::{fake_browser, wait_for_browser_target};
 use common::{telos, with_fixture};
 
@@ -703,7 +703,7 @@ fn human_startup_line_is_the_loopback_url() {
     server.stop();
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn open_launches_the_default_browser_with_the_live_url() {
     let tmp = with_fixture();

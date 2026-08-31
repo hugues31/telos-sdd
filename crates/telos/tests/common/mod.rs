@@ -13,7 +13,9 @@ use std::process::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[cfg(unix)]
+// `webbrowser` honors BROWSER on Unix desktops other than macOS. macOS uses
+// Launch Services directly, so this process-level fake is not observable there.
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn fake_browser() -> (TempDir, PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
@@ -31,7 +33,7 @@ pub fn fake_browser() -> (TempDir, PathBuf, PathBuf) {
     (tmp, browser, target_log)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn wait_for_browser_target(target_log: &Path) -> String {
     for _ in 0..500 {
         if let Ok(target) = fs::read_to_string(target_log) {

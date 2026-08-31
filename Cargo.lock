@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "telos"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "assert_cmd",
  "axum",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "telos-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",

@@ -1,7 +1,7 @@
 # telos CLI contracts
 
 This document is the frozen reference for everything an agent or other tool
-routes on without interpretation: the `--json` envelope shape, the 17 error
+routes on without interpretation: the `--json` envelope shape, the 18 error
 codes and their canonical hints, the `status --json` schema, `check`'s
 semantics, and the whole change/transaction surface (`show`,
 `change open|list|abandon|diff|approve|reconcile`,
@@ -111,7 +111,7 @@ envelope surface.
 
 ## Error codes
 
-The seventeen codes below are stable. Strict TDD reconciliation uses
+The eighteen codes below are stable. Strict TDD reconciliation uses
 `TELOS_SCENARIO_RED_EXPECTED` and `TELOS_TEST_SEALED`; test discovery uses
 `TELOS_TEST_NOT_FOUND`. Variants are never renamed or removed, only added —
 this is the whole contract agent tooling routes on.
@@ -137,6 +137,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_GIT_ERROR` |
 | `TELOS_INTERNAL` |
 | `TELOS_TEST_NOT_FOUND` |
+| `TELOS_TEST_NOT_EXECUTED` |
 
 ### Detailed emission cases
 

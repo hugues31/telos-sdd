@@ -53,6 +53,14 @@ pub fn scenario_pattern(id: ScenarioId) -> String {
     format!("scn_{:04}", id.0)
 }
 
+/// Whether `name` -- a test function, a JUnit `testcase` name -- is named
+/// after `scenario`: the `scn_NNNN` pattern occurs in it at an identifier
+/// boundary, the same predicate discovery applies to test files. One rule
+/// for what discovery selects and what a report proves.
+pub fn names_scenario(name: &str, scenario: ScenarioId) -> bool {
+    identifier_at(name.as_bytes(), scenario_pattern(scenario).as_bytes()).is_some()
+}
+
 /// Discovers the test file (and, when found by scanning, the test function)
 /// for one scenario.
 ///

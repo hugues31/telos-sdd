@@ -18,6 +18,7 @@ pub mod payload;
 pub mod rebuild;
 pub mod reconcile;
 pub(crate) mod repo_fs;
+pub mod report;
 pub mod semantic;
 pub mod span;
 pub mod state;

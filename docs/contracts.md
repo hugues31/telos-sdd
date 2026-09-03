@@ -1437,10 +1437,15 @@ with the target substituted for `{filter}`. One target shared by multiple
 scenarios is still invoked once globally; the identical cached outcome and
 display command are projected into every owning row. A scenario is green iff
 it has at least one proof and **all** proof targets are safe, present,
-resolvable, and exit zero. No proof, a missing/unsafe file, a stale named test,
-or any non-zero runner exit produces an explanatory red row, not a command
-failure. A missing or blank runner is `TELOS_TEST_NOT_FOUND` because progress
-cannot be measured. Each test row has exactly `test`, `green`, and the literal
+resolvable, and exit zero. With `[test] report` configured, "exit zero"
+becomes "the run's report gives the row's scenario a green verdict" (the
+`test` section's rule); a target shared by several scenarios is still run
+once, and its cached report is judged once per scenario, so two rows on one
+target may differ. A run that proves nothing is a red row, not a command
+failure. No proof, a missing/unsafe file, a stale named test, or any
+non-zero runner exit produces an explanatory red row, not a command failure.
+A missing or blank runner is `TELOS_TEST_NOT_FOUND` because progress cannot
+be measured. Each test row has exactly `test`, `green`, and the literal
 substituted `command`; each scenario row has `id`, aggregate `green`, and
 `tests`.
 
@@ -1477,6 +1482,9 @@ new seal. A path claimed only by another open change is still carried over at
 its previously sealed OID and does not enter this transaction's impacted set.
 
 ### Proof and constraint execution matrix
+
+Every scenario/test execution above is judged by the exit status without
+`[test] report` and by the report with it (`test` section).
 
 | Surface | Scenario/test execution | Constraint check execution |
 |---|---|---|

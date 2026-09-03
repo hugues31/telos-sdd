@@ -1,4 +1,7 @@
 //! Read-only reconstruction planning and executable scenario progress.
+//!
+//! Under `[test] report` a target is still run once, and its report is
+//! judged once per scenario the target proves.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -6,8 +9,9 @@ use std::fs;
 use clap::Subcommand;
 use serde_json::{Value, json};
 
+use telos_core::config::TestCfg;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::exec::{run_shell_with_filter, substitute_placeholders};
+use telos_core::exec::{ProofRun, ProofVerdict, run_proof, substitute_placeholders};
 use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, Change, TelosModel, TestRef};
 use telos_core::overlay::{apply_ops_idempotent, fold_journal_bindings, parse_base};
@@ -215,19 +219,16 @@ fn status(input: &RebuildInput) -> CmdResult {
             first_scenario_by_proof.entry(proof).or_insert(*scenario);
         }
     }
-    let mut outcomes = BTreeMap::<TestRef, (bool, String)>::new();
+    let mut outcomes = BTreeMap::<TestRef, (Option<ProofRun>, String)>::new();
     for (test, scenario) in first_scenario_by_proof {
         let filter = test.name.as_deref().unwrap_or_else(|| test.path.as_str());
-        let command = substitute_placeholders(&runner, filter, &input.ws.config.test.report);
-        let green = if proof_resolves(&input.ws, scenario, &test)? {
-            run_shell_with_filter(&runner, filter, &input.ws.repo_root)?
-                .result
-                .status
-                == 0
+        let command = substitute_placeholders(&runner.cmd, filter, &runner.report);
+        let run = if proof_resolves(&input.ws, scenario, &test)? {
+            Some(run_proof(&runner, filter, &input.ws.repo_root)?)
         } else {
-            false
+            None
         };
-        outcomes.insert(test, (green, command));
+        outcomes.insert(test, (run, command));
     }
 
     let mut green_count = 0usize;
@@ -239,9 +240,12 @@ fn status(input: &RebuildInput) -> CmdResult {
         let mut green = !proofs.is_empty();
 
         for test in &proofs {
-            let (target_green, command) = outcomes
+            let (run, command) = outcomes
                 .get(test)
                 .expect("every scenario proof was executed in the global pass");
+            let target_green = run
+                .as_ref()
+                .is_some_and(|run| matches!(run.verdict(*scenario), ProofVerdict::Green { .. }));
             green &= target_green;
             tests.push(json!({
                 "test": test.to_string(),
@@ -316,7 +320,8 @@ fn is_safe_test_path(raw: &str) -> bool {
     RepoPath::parse_outside_telos(raw).is_ok()
 }
 
-fn require_runner(ws: &Workspace) -> Result<String, TelosError> {
+fn require_runner(ws: &Workspace) -> Result<TestCfg, TelosError> {
+    ws.config.validate_self()?;
     if ws.config.test.cmd.trim().is_empty() {
         return Err(TelosError::new(
             ErrorCode::TelosTestNotFound,
@@ -324,5 +329,5 @@ fn require_runner(ws: &Workspace) -> Result<String, TelosError> {
         )
         .hint("set [test] cmd, e.g. `cargo test {filter}`"));
     }
-    Ok(ws.config.test.cmd.clone())
+    Ok(ws.config.test.clone())
 }

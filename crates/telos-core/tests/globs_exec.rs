@@ -5,9 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use telos_core::config::{Config, Globs};
+use telos_core::config::{Config, Globs, TestCfg};
 use telos_core::error::ErrorCode;
-use telos_core::exec::{run_shell, run_shell_with_filter, substitute_placeholders};
+use telos_core::exec::{run_proof, run_shell, substitute_placeholders};
 use telos_core::globs::{glob_matches, orphan_code};
 use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, TelosModel, TestRef};
@@ -66,6 +66,15 @@ fn proves(path: &str, scenario: u32) -> Binding {
 
 fn repo_paths(paths: &[&str]) -> Vec<RepoPath> {
     paths.iter().map(|p| RepoPath::new(*p)).collect()
+}
+
+/// A report-less `[test]` runner template, for exercising `run_proof`'s argv
+/// safety without a report in play.
+fn runner(cmd: &str) -> TestCfg {
+    TestCfg {
+        cmd: cmd.to_string(),
+        report: String::new(),
+    }
 }
 
 // --- glob_matches ----------------------------------------------------------
@@ -321,62 +330,62 @@ fn run_shell_runs_with_the_given_cwd() {
 }
 
 #[test]
-fn filtered_shell_run_preserves_display_but_passes_metacharacters_as_one_argument() {
+fn run_proof_preserves_display_but_passes_metacharacters_as_one_argument() {
     let tmp = tempfile::tempdir().unwrap();
     let filter = "proof&mkdir injected";
     let template = "git hash-object {filter}";
     let displayed = "git hash-object proof&mkdir injected";
     fs::write(tmp.path().join(filter), "proof\n").unwrap();
 
-    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+    let run = run_proof(&runner(template), filter, tmp.path()).unwrap();
 
     assert_eq!(run.command, displayed);
-    assert_eq!(run.result.status, 0);
+    assert_eq!(run.status, 0);
     assert!(!tmp.path().join("injected").exists());
 }
 
 #[test]
-fn filtered_shell_run_keeps_leading_display_whitespace() {
+fn run_proof_keeps_leading_display_whitespace() {
     let tmp = tempfile::tempdir().unwrap();
 
-    let run = run_shell_with_filter("  git --version {filter}  ", "", tmp.path()).unwrap();
+    let run = run_proof(&runner("  git --version {filter}  "), "", tmp.path()).unwrap();
 
     assert_eq!(run.command, "  git --version");
 }
 
 #[test]
-fn filtered_shell_run_supports_a_placeholder_already_quoted_as_one_argument() {
+fn run_proof_supports_a_placeholder_already_quoted_as_one_argument() {
     let tmp = tempfile::tempdir().unwrap();
     let filter = "proof&mkdir injected";
     let template = "git hash-object \"{filter}\"";
     let displayed = "git hash-object \"proof&mkdir injected\"";
     fs::write(tmp.path().join(filter), "proof\n").unwrap();
 
-    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+    let run = run_proof(&runner(template), filter, tmp.path()).unwrap();
 
     assert_eq!(run.command, displayed);
-    assert_eq!(run.result.status, 0);
+    assert_eq!(run.status, 0);
     assert!(!tmp.path().join("injected").exists());
 }
 
 #[test]
-fn filtered_shell_run_supports_a_placeholder_embedded_in_double_quotes() {
+fn run_proof_supports_a_placeholder_embedded_in_double_quotes() {
     let tmp = tempfile::tempdir().unwrap();
     let filter = "proof&mkdir injected";
     let template = "git hash-object \"prefix-{filter}-suffix\"";
     let file = "prefix-proof&mkdir injected-suffix";
     fs::write(tmp.path().join(file), "proof\n").unwrap();
 
-    let run = run_shell_with_filter(template, filter, tmp.path()).unwrap();
+    let run = run_proof(&runner(template), filter, tmp.path()).unwrap();
 
     assert_eq!(run.command, template.replace("{filter}", filter).trim_end());
-    assert_eq!(run.result.status, 0);
+    assert_eq!(run.status, 0);
     assert!(!tmp.path().join("injected-suffix").exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn filtered_shell_run_supports_a_placeholder_embedded_in_single_quotes() {
+fn run_proof_supports_a_placeholder_embedded_in_single_quotes() {
     let tmp = tempfile::tempdir().unwrap();
     let filter = "proof;mkdir injected";
     fs::write(
@@ -385,16 +394,20 @@ fn filtered_shell_run_supports_a_placeholder_embedded_in_single_quotes() {
     )
     .unwrap();
 
-    let run =
-        run_shell_with_filter("test -f 'prefix-{filter}-suffix'", filter, tmp.path()).unwrap();
+    let run = run_proof(
+        &runner("test -f 'prefix-{filter}-suffix'"),
+        filter,
+        tmp.path(),
+    )
+    .unwrap();
 
     assert_eq!(run.command, "test -f 'prefix-proof;mkdir injected-suffix'");
-    assert_eq!(run.result.status, 0);
+    assert_eq!(run.status, 0);
     assert!(!tmp.path().join("injected-suffix").exists());
 }
 
 #[test]
-fn filtered_runner_rejects_shell_control_even_with_safe_placeholder_words() {
+fn run_proof_rejects_shell_control_even_with_safe_placeholder_words() {
     let tmp = tempfile::tempdir().unwrap();
     let filter = "proof&mkdir injected";
     let template =
@@ -402,7 +415,7 @@ fn filtered_runner_rejects_shell_control_even_with_safe_placeholder_words() {
     let file = "prefix-proof&mkdir injected-suffix";
     fs::write(tmp.path().join(file), "proof\n").unwrap();
 
-    let error = run_shell_with_filter(template, filter, tmp.path()).unwrap_err();
+    let error = run_proof(&runner(template), filter, tmp.path()).unwrap_err();
 
     assert_eq!(error.code, ErrorCode::TelosParseError);
     assert!(!tmp.path().join("injected-suffix").exists());
@@ -413,9 +426,9 @@ fn arithmetic_and_quote_payloads_remain_data_in_a_real_process() {
     let tmp = tempfile::tempdir().unwrap();
     let filter = "x[$(touch injected)]\"'&call bad";
 
-    let run = run_shell_with_filter("git hash-object {filter}", filter, tmp.path()).unwrap();
+    let run = run_proof(&runner("git hash-object {filter}"), filter, tmp.path()).unwrap();
 
-    assert_ne!(run.result.status, 0);
+    assert_ne!(run.status, 0);
     assert!(!tmp.path().join("injected").exists());
     assert!(!tmp.path().join("bad").exists());
     assert_eq!(run.command, format!("git hash-object {filter}"));
@@ -426,8 +439,7 @@ fn control_byte_filters_fail_closed_before_spawn() {
     let tmp = tempfile::tempdir().unwrap();
 
     for filter in ["proof\rpayload", "proof\npayload", "proof\0payload"] {
-        let err =
-            run_shell_with_filter("git hash-object {filter}", filter, tmp.path()).unwrap_err();
+        let err = run_proof(&runner("git hash-object {filter}"), filter, tmp.path()).unwrap_err();
         assert_eq!(err.code, ErrorCode::TelosParseError);
     }
 }
@@ -444,7 +456,7 @@ fn nested_shell_and_eval_templates_fail_before_real_injection() {
         "git hash-object $(touch injected)",
         "git hash-object `touch injected`",
     ] {
-        let err = run_shell_with_filter(template, "1", tmp.path()).unwrap_err();
+        let err = run_proof(&runner(template), "1", tmp.path()).unwrap_err();
         assert_eq!(err.code, ErrorCode::TelosParseError, "accepted {template}");
     }
     assert!(!tmp.path().join("injected").exists());
@@ -460,7 +472,7 @@ fn nested_cmd_and_call_templates_fail_before_real_injection() {
         "call git hash-object {filter}",
         "powershell -Command git hash-object {filter}",
     ] {
-        let err = run_shell_with_filter(template, "proof", tmp.path()).unwrap_err();
+        let err = run_proof(&runner(template), "proof", tmp.path()).unwrap_err();
         assert_eq!(err.code, ErrorCode::TelosParseError, "accepted {template}");
     }
     assert!(!tmp.path().join("injected").exists());

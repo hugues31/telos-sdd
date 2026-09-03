@@ -623,3 +623,71 @@ fn full_reconcile_judges_every_active_scenario_against_one_report() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(json_stdout(&out)["result"]["tests_run"], json!(1));
 }
+
+// --- rebuild status -------------------------------------------------------
+
+#[test]
+fn rebuild_status_judges_each_scenario_by_the_report() {
+    let tmp = with_report_fixture("strict");
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[(SCN_0091, "passed"), (SCN_0107, "skipped")]),
+    );
+
+    let out = telos(tmp.path(), &["rebuild", "status", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        json_stdout(&out)["result"],
+        json!({
+            "scenarios_green": 1,
+            "scenarios_total": 2,
+            "scenarios": [
+                {"id": "SCN-0091", "green": true, "tests": [{
+                    "test": "tests/billing.rs",
+                    "green": true,
+                    "command": display("tests/billing.rs"),
+                }]},
+                {"id": "SCN-0107", "green": false, "tests": [{
+                    "test": format!("tests/billing.rs::{SCN_0107}"),
+                    "green": false,
+                    "command": display(SCN_0107),
+                }]}
+            ]
+        })
+    );
+}
+
+#[test]
+fn rebuild_status_runs_a_shared_target_once_and_judges_it_per_scenario() {
+    let tmp = common::with_fixture_mut(|root| {
+        common::configure_report(root, "strict");
+        fs::write(
+            root.join("telos/contexts/billing/bindings.tel"),
+            "implements \"src/billing/invoice.rs\" -> INT-0042\n\
+             proves     \"tests/billing.rs\" -> SCN-0091\n\
+             proves     \"tests/billing.rs\" -> SCN-0107\n",
+        )
+        .unwrap();
+    });
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[(SCN_0091, "passed"), (SCN_0107, "skipped")]),
+    );
+
+    let out = telos(tmp.path(), &["rebuild", "status", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let result = json_stdout(&out)["result"].clone();
+    assert_eq!(result["scenarios_green"], json!(1));
+    assert_eq!(result["scenarios"][0]["green"], json!(true));
+    assert_eq!(result["scenarios"][1]["green"], json!(false));
+    assert_eq!(
+        result["scenarios"][1]["tests"][0]["command"],
+        json!(display("tests/billing.rs"))
+    );
+}

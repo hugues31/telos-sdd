@@ -26,14 +26,6 @@ pub struct RunResult {
     pub stderr: String,
 }
 
-/// A filtered shell run: the frozen literal-substitution command exposed to
-/// callers, and the outcome of executing the filter as one data argument.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FilteredRun {
-    pub command: String,
-    pub result: RunResult,
-}
-
 /// Runs `cmd` through the platform shell, with `cwd` as the working
 /// directory: `sh -c "<cmd>"` on Unix, `cmd /C "<cmd>"` on Windows. The
 /// spec calls `check`/`[test] cmd` a shell command, so this is the one
@@ -56,34 +48,6 @@ pub fn run_shell(cmd: &str, cwd: &Path) -> Result<RunResult, TelosError> {
     })?;
 
     Ok(run_result(output))
-}
-
-/// Displays the runner template's exact literal substitution while executing a deliberately
-/// restricted runner template as a direct process argv. No shell sees the
-/// filter; it remains data even in embedded words such as `module::{filter}`.
-pub fn run_shell_with_filter(
-    template: &str,
-    filter: &str,
-    cwd: &Path,
-) -> Result<FilteredRun, TelosError> {
-    let command = substitute_placeholders(template, filter, "");
-    validate_filter_data(filter)?;
-    let argv = parse_runner_template(template, filter, "")?;
-    let output = Command::new(&argv[0])
-        .args(&argv[1..])
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| {
-            TelosError::new(
-                ErrorCode::TelosInternal,
-                format!("failed to spawn the test runner displayed as `{command}`: {e}"),
-            )
-        })?;
-
-    Ok(FilteredRun {
-        command,
-        result: run_result(output),
-    })
 }
 
 fn validate_filter_data(filter: &str) -> Result<(), TelosError> {

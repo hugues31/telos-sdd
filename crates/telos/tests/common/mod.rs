@@ -380,32 +380,37 @@ pub fn sealed_scenarios_passed() -> String {
     ])
 }
 
+/// Installs the fake runner and points `[test]` at it and at [`REPORT`],
+/// with `[policy] tdd = <policy>`; the report proving both sealed scenarios
+/// is written too. Call before the fixture seals.
+pub fn configure_report(root: &Path, policy: &str) {
+    install_fake_runner(root);
+    write_report_fixture(root, &sealed_scenarios_passed());
+    // The corpus test file is a placeholder; give the sealed SCN-0107
+    // target a real function so `rebuild status` can resolve it.
+    fs::write(
+        root.join("tests/billing.rs"),
+        "fn scn_0107_full_payment_settles_the_invoice() {}\n",
+    )
+    .unwrap();
+    let config = root.join("telos/telos.toml");
+    let src = fs::read_to_string(&config).unwrap();
+    assert!(
+        src.contains("cmd = \"\""),
+        "the corpus no longer ships an empty `[test] cmd`: {src}"
+    );
+    let src = src
+        .replace(
+            "cmd = \"\"",
+            &format!("cmd = \"{FAKE_RUNNER_TEMPLATE}\"\nreport = \"{REPORT}\""),
+        )
+        .replace("tdd = \"strict\"", &format!("tdd = \"{policy}\""));
+    fs::write(&config, src).unwrap();
+}
+
 /// [`with_fixture`] with the fake runner installed, `[test] report` set to
 /// [`REPORT`], `[policy] tdd` set to `policy`, and a report proving both
 /// sealed scenarios in place before the seal.
 pub fn with_report_fixture(policy: &str) -> TempDir {
-    with_fixture_mut(|root| {
-        install_fake_runner(root);
-        write_report_fixture(root, &sealed_scenarios_passed());
-        // The corpus test file is a placeholder; give the sealed SCN-0107
-        // target a real function so `rebuild status` can resolve it.
-        fs::write(
-            root.join("tests/billing.rs"),
-            "fn scn_0107_full_payment_settles_the_invoice() {}\n",
-        )
-        .unwrap();
-        let config = root.join("telos/telos.toml");
-        let src = fs::read_to_string(&config).unwrap();
-        assert!(
-            src.contains("cmd = \"\""),
-            "the corpus no longer ships an empty `[test] cmd`: {src}"
-        );
-        let src = src
-            .replace(
-                "cmd = \"\"",
-                &format!("cmd = \"{FAKE_RUNNER_TEMPLATE}\"\nreport = \"{REPORT}\""),
-            )
-            .replace("tdd = \"strict\"", &format!("tdd = \"{policy}\""));
-        fs::write(&config, src).unwrap();
-    })
+    with_fixture_mut(|root| configure_report(root, policy))
 }

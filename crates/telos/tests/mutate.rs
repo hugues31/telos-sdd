@@ -461,6 +461,57 @@ fn an_unknown_reference_writes_neither_the_change_nor_the_counters() {
     assert_eq!(read(tmp.path(), COUNTERS), counters_before);
 }
 
+/// A `decimal` field is staged as a JSON string whose lexeme lands verbatim
+/// in the change file, where the lexer reads it back: `"2"` would come back
+/// as an `int` and fail typing at reconcile, long after staging accepted
+/// it. The payload boundary refuses it instead, naming the attribute and the
+/// fix, and touches neither the change file nor `counters.toml`.
+#[test]
+fn a_decimal_field_that_would_read_back_as_an_int_is_refused_at_staging() {
+    let tmp = project_with_two_notions();
+    stage_ok(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &json!({
+            "owner": "billing", "name": "Product", "kind": "entity",
+            "def": "A thing for sale.",
+            "attrs": [ {"name": "price", "type": "decimal"} ]
+        })
+        .to_string(),
+    );
+    let change_before = read(tmp.path(), CHG_0001);
+    let counters_before = read(tmp.path(), COUNTERS);
+
+    let error = stage_err(
+        tmp.path(),
+        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &json!({
+            "owner": "billing/settlement", "title": "Products carry a price", "status": "active",
+            "telos": "Nobody buys what has no price.",
+            "statement": {"template": "event-driven", "when": "PaymentReceived",
+                          "on": "Product", "action": "record the price"},
+            "refines": [], "requires": [], "excludes": [],
+            "scenarios": [
+              { "title": "a whole-number price is kept",
+                "given": [ {"notion": "Product", "fields": {"price": "2"}} ],
+                "when":  {"notion": "PaymentReceived", "fields": {"amount": "1.00 EUR"}},
+                "then":  ["Product.price == 2.0"] } ]
+        })
+        .to_string(),
+    );
+
+    assert_eq!(error["code"], json!("TELOS_PARSE_ERROR"));
+    assert_eq!(
+        error["message"],
+        json!(
+            "payload: field `Product.price` has type `decimal`, but `2` is not a decimal \
+             of the form `120.50`; a whole number is written `2.0`"
+        )
+    );
+    assert_eq!(read(tmp.path(), CHG_0001), change_before);
+    assert_eq!(read(tmp.path(), COUNTERS), counters_before);
+}
+
 /// End-to-end lexeme validation: a JSON payload is
 /// the one way a malformed `date` can reach the model, and the semantic
 /// pass is where it is caught.

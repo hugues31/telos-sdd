@@ -924,7 +924,11 @@ clause.
 Typing a `fields` value against its attribute's declared type: `string` →
 JSON string → `Str`; `int` → JSON integer → `Int`; `decimal` → JSON
 **string** lexeme (`"120.50"` — a JSON number is refused, to avoid float
-hazard); `money` → JSON string `"120.00 EUR"`; `bool` → JSON bool; `date`/
+hazard; so is a string that is not a `decimal-lit` of the form `-?\d+\.\d+`,
+because the lexeme is written verbatim to the change file and `"2"` would
+read back as an `int`: `` payload: field `Product.price` has type `decimal`,
+but `2` is not a decimal of the form `120.50`; a whole number is written
+`2.0` ``); `money` → JSON string `"120.00 EUR"`; `bool` → JSON bool; `date`/
 `datetime` → JSON string lexeme; `enum` → JSON string, the symbol itself, →
 `Symbol`; `ref` → refused. An unknown attribute is
 `TELOS_REFERENCE_UNKNOWN` with a suggestion.

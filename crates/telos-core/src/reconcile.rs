@@ -146,8 +146,8 @@ use crate::ids::{ConstraintId, ContextId, IntentId, NotionRef, RepoPath, Scenari
 use crate::lock::{LOCK_VERSION, Lock};
 use crate::model::change::context_bindings_path;
 use crate::model::{
-    Binding, Change, ChangeStatus, Constraint, IntentStatus, JournalEntry, Scope, StagedOp,
-    TelFile, TelosModel, TestRef,
+    Binding, Change, ChangeStatus, Constraint, Evidence, IntentStatus, JournalEntry, Scope,
+    StagedOp, TelFile, TelosModel, TestRef,
 };
 use crate::overlay::{apply_config_ops, apply_ops_idempotent, fold_journal_bindings, parse_base};
 use crate::repo_fs::RepoFs;
@@ -242,7 +242,12 @@ pub fn reconcile_change(
     require_complete_map("specification", &spec_paths, &spec)?;
     require_code_snapshot(git, &proven.code)?;
     let publication_spec = spec.clone();
-    let mut fresh = lock_from_maps(spec, proven.code.clone(), Some(change.id));
+    let mut fresh = lock_from_maps(
+        spec,
+        proven.code.clone(),
+        Some(change.id),
+        effective_ws.config.test.evidence(),
+    );
     carry_over(&mut fresh, lock, &carried);
     store_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
     fresh.write_to_workspace(ws)?;
@@ -335,7 +340,12 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
     };
 
     require_unchanged_snapshot(ws, git, &proven)?;
-    let lock = lock_from_maps(proven.spec.clone(), proven.code.clone(), None);
+    let lock = lock_from_maps(
+        proven.spec.clone(),
+        proven.code.clone(),
+        None,
+        ws.config.test.evidence(),
+    );
     store_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
     lock.write_to_workspace(ws)?;
     require_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
@@ -501,12 +511,14 @@ fn lock_from_maps(
     spec: BTreeMap<RepoPath, Oid>,
     code: BTreeMap<RepoPath, Oid>,
     sealed_by: Option<crate::ids::ChangeId>,
+    proof_evidence: Evidence,
 ) -> Lock {
     Lock {
         version: LOCK_VERSION,
         tool: format!("telos {}", crate::VERSION),
         sealed_by,
         spec_digest: Lock::compute_digest(&spec),
+        proof_evidence,
         spec,
         code,
     }
@@ -1592,6 +1604,7 @@ mod tests {
             tool: "telos test".to_string(),
             sealed_by: None,
             spec_digest: Lock::compute_digest(&spec),
+            proof_evidence: Evidence::ExitStatus,
             spec,
             code: code
                 .iter()

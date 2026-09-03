@@ -215,6 +215,16 @@ as all zeros rather than blocking the command. (This is a deliberate choice
 where the spec left the case ambiguous — "coverage computed over what
 parses" doesn't have an obvious meaning when *nothing* parses.)
 
+### `telos.lock`
+
+Format version `3`: `version`, `tool`, optional `sealed_by`, `spec_digest`,
+`proof_evidence` (`"exit-status"` | `"report"`, required), then the `[spec]`
+and `[code]` tables. A lock of any other version is `TELOS_PARSE_ERROR` with
+hint `` run `telos reconcile --full` to regenerate telos.lock `` — `--full`
+never reads the lock, so the hint is always actionable. `init`, a per-change
+reconcile (from the effective configuration), and `--full` all write
+`proof_evidence`.
+
 ### `result` schema
 
 ```json
@@ -222,6 +232,7 @@ parses" doesn't have an obvious meaning when *nothing* parses.)
   "state": "coherent",
   "changes": [],
   "drift": null,
+  "proof_evidence": "exit-status",
   "coverage": {
     "notions": 4,
     "constraints": 1,
@@ -255,6 +266,14 @@ parses" doesn't have an obvious meaning when *nothing* parses.)
   spec/code OID tables, the exact sorted `(path, drift kind)` scope, and the live blob
   OID of every present drift entry, so a path whose bytes or kind changes
   receives another token even when the displayed path list is unchanged.
+- `proof_evidence` — `"exit-status"` or `"report"`, read from `telos.lock`:
+  how every proof the current seal rests on was judged. `"report"` means the
+  sealing configuration had a `[test] report`, so each sealed green is a
+  testcase named after its scenario that executed and passed; `"exit-status"`
+  means the runner's exit code alone was read, which cannot distinguish a
+  zero-test run from green. It reports what the seal proved, not what the
+  configuration says now: the two differ only between turning the report on
+  and the next reconcile.
 - `coverage` — exact counts off the loaded model, or all zeros if the spec
   didn't parse. `scenarios_proved` counts scenarios with ≥ 1 `proves`
   binding; `intents_implemented` counts intents with ≥ 1 `implements`

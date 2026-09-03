@@ -9,7 +9,7 @@ use std::fs;
 
 use serde_json::{Value, json};
 use telos_core::ids::RepoPath;
-use telos_core::lock::Lock;
+use telos_core::lock::{LOCK_VERSION, Lock};
 
 use common::{repo, telos, with_fixture};
 
@@ -74,7 +74,7 @@ fn init_seals_an_empty_repository() {
     let lock = Lock::read(&lock_path)
         .expect("the lock parses")
         .expect("the lock exists");
-    assert_eq!(lock.version, 2);
+    assert_eq!(lock.version, LOCK_VERSION);
     assert_eq!(lock.sealed_by, None);
     assert!(
         lock.spec

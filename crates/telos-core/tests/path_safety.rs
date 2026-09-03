@@ -6,7 +6,8 @@ use telos_core::adopt::revert;
 use telos_core::config::Config;
 use telos_core::git::{GitRepo, Oid};
 use telos_core::ids::RepoPath;
-use telos_core::lock::Lock;
+use telos_core::lock::{LOCK_VERSION, Lock};
+use telos_core::model::Evidence;
 use telos_core::state::{DriftEntry, DriftKind};
 use telos_core::workspace::Workspace;
 
@@ -62,10 +63,11 @@ fn revert_never_changes_an_outside_owner_through_a_parent_symlink() {
     let git = GitRepo::discover(repo.path()).unwrap();
     let path = RepoPath::parse("escape/owner.rs").unwrap();
     let lock = Lock {
-        version: 1,
+        version: LOCK_VERSION,
         tool: "test".into(),
         sealed_by: None,
         spec_digest: Lock::compute_digest(&BTreeMap::new()),
+        proof_evidence: Evidence::ExitStatus,
         spec: BTreeMap::new(),
         code: BTreeMap::from([(path.clone(), Oid("0".repeat(40)))]),
     };

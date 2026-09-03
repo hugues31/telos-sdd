@@ -39,6 +39,7 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         &project.lock,
         &project.state.drift,
     )?;
+    let evidence = project.lock.proof_evidence.as_str();
     let report = project.state;
 
     let cov = project
@@ -69,12 +70,13 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         "state": report.state,
         "changes": report.open_changes,
         "drift": drift_value,
+        "proof_evidence": evidence,
         "coverage": cov,
     });
 
     Ok(Outcome {
         result,
-        human: human_summary(&report, drifted, cov, &token),
+        human: human_summary(&report, drifted, cov, &token, evidence),
         next_actions,
     })
 }
@@ -82,7 +84,13 @@ pub fn run(ctx: &Ctx) -> CmdResult {
 /// A compact, terse human-readable summary: the state, the drifted paths
 /// (if any), one per line, then the coverage counters. Exact wording is
 /// free -- there is no golden test for it, only for `--json`.
-fn human_summary(report: &StateReport, drifted: bool, cov: Coverage, token: &str) -> String {
+fn human_summary(
+    report: &StateReport,
+    drifted: bool,
+    cov: Coverage,
+    token: &str,
+    evidence: &str,
+) -> String {
     let state_name = match report.state {
         ProjectStateKind::Coherent => "coherent",
         ProjectStateKind::Changing => "changing",
@@ -103,6 +111,7 @@ fn human_summary(report: &StateReport, drifted: bool, cov: Coverage, token: &str
             lines.push(format!("  {} {}", change.id, change.status));
         }
     }
+    lines.push(format!("proof evidence: {evidence}"));
     lines.push(format!(
         "coverage: {} notions, {} constraints, {}/{} intents active, {}/{} intents implemented, {}/{} scenarios proved",
         cov.notions,

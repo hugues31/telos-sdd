@@ -21,7 +21,7 @@ use telos_core::git::GitRepo;
 use telos_core::ids::{
     CapabilityId, CapabilityRef, ChangeId, ContextId, IntentId, NotionName, Owner, RepoPath,
 };
-use telos_core::lock::{Lock, seal};
+use telos_core::lock::{LOCK_VERSION, Lock, seal};
 use telos_core::model::{Change, ChangeStatus, Notion, NotionKind, StagedOp};
 use telos_core::state::{
     ChangeSummary, DriftEntry, DriftKind, ProjectStateKind, compute_state, coverage, drift_token,
@@ -91,7 +91,7 @@ fn seal_hashes_spec_files_and_every_bindings_code_path() {
     let tmp = corpus_repo();
     let (_ws, lock, _git) = discover_and_seal(tmp.path());
 
-    assert_eq!(lock.version, 2);
+    assert_eq!(lock.version, LOCK_VERSION);
     assert!(
         lock.tool.starts_with("telos "),
         "expected tool to start with `telos `, got: {}",

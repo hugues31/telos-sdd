@@ -190,6 +190,7 @@ fn status_json_with_an_open_change_reports_the_changing_state() {
                     "obligations": ["stage the delta", "approve", "reconcile"]
                 }],
                 "drift": null,
+                "proof_evidence": "exit-status",
                 "coverage": {
                     "notions": 4,
                     "constraints": 1,

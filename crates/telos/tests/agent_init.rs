@@ -266,6 +266,15 @@ fn skill_pressure_rules_pin_order_and_stop_conditions() {
     );
     assert!(implementer.contains("Never alter the approved delta"));
     assert!(implementer.contains("Do not edit the test after the sealed red"));
+    assert!(implementer.contains(
+        "A compile error, a missing dependency, or a runner that executed zero tests is not a red"
+    ));
+    assert!(
+        implementer.contains(
+            "`TELOS_TEST_NOT_EXECUTED`: stop; make the runner execute the scenario's test"
+        )
+    );
+    assert!(router.contains("`TELOS_TEST_NOT_EXECUTED`: route to the implementer"));
 }
 
 fn ordered(haystack: &str, needles: &[&str]) {

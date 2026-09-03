@@ -768,7 +768,7 @@ fn published_config_validation_matrix_is_exact() {
         rows[0],
         [
             "Boundary",
-            "Glob validation",
+            "Glob and `[test]` validation",
             "agents.hosts validation",
             "Refusal effect",
         ]

@@ -9,6 +9,7 @@ use crate::config::TestCfg;
 use crate::error::{ErrorCode, TelosError};
 use crate::ids::{RepoPath, ScenarioId};
 use crate::model::Evidence;
+use crate::repo_fs::RepoFs;
 use crate::report::{NotExecuted, Report, ReportVerdict};
 
 /// The result of running a shell command: its exit status and captured
@@ -324,8 +325,8 @@ pub fn run_proof(test: &TestCfg, filter: &str, repo_root: &Path) -> Result<Proof
     let argv = parse_runner_template(&test.cmd, filter, report_str)?;
 
     let report_file = report.as_ref().map(|path| absolute(repo_root, path));
-    if let Some(file) = &report_file {
-        remove_stale_report(file)?;
+    if let Some(path) = &report {
+        remove_stale_report(repo_root, path)?;
     }
 
     let output = Command::new(&argv[0])
@@ -364,15 +365,19 @@ fn absolute(repo_root: &Path, path: &RepoPath) -> std::path::PathBuf {
     absolute
 }
 
-fn remove_stale_report(file: &Path) -> Result<(), TelosError> {
-    match std::fs::remove_file(file) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(TelosError::new(
+/// Removes a stale report through [`RepoFs`], the same capability-anchored,
+/// NotFound-tolerant path every other repository write uses -- it refuses to
+/// walk through a symlinked parent. `RepoFs::remove_file` reports a refusal
+/// as `TELOS_INTEGRITY_VIOLATION`; here that refusal is folded into the
+/// spec's own `TELOS_INTERNAL` naming the report path, since a report the
+/// runner cannot write to is an environment problem, not an integrity one.
+fn remove_stale_report(repo_root: &Path, path: &RepoPath) -> Result<(), TelosError> {
+    RepoFs::open(repo_root)?.remove_file(path).map_err(|e| {
+        TelosError::new(
             ErrorCode::TelosInternal,
-            format!("failed to remove the stale report {}: {e}", file.display()),
-        )),
-    }
+            format!("failed to remove the stale report {path}: {}", e.message),
+        )
+    })
 }
 
 fn read_report(file: &Path) -> Result<Report, NotExecuted> {
@@ -488,9 +493,6 @@ mod filter_rewrite_tests {
 #[cfg(test)]
 mod run_proof_tests {
     use super::*;
-    use crate::config::TestCfg;
-    use crate::ids::ScenarioId;
-    use crate::report::{NotExecuted, Report};
 
     fn report_run(parsed: Result<Report, NotExecuted>, status: i32) -> ProofRun {
         ProofRun {

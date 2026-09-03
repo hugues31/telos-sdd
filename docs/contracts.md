@@ -171,7 +171,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_PARSE_ERROR` | An `add`/`edit` payload on stdin is not a JSON object, or its shape does not match the payload schemas section below (`message` prefixed `` payload: `` — e.g. `` payload: missing required field `title` in intent payload ``). A handful of exact wordings are frozen verbatim without that prefix: an unknown key (`` unknown key `titel` in notion payload ``), an unknown closed-set word (`` unknown attribute type `txt`; expected one of string, int, decimal, money, bool, date, datetime, enum, ref ``), a `decimal` value sent as a JSON number, and a malformed `set` action. | None today. |
 | `TELOS_INTEGRITY_VIOLATION` | An integrity violation with no dedicated hint: `seal` finding a binding to a code file that doesn't exist on disk, an entity declared twice, or `remove`/`adopt` leaving a still-referenced entity behind (`cannot remove <entity>: <referrer>`). | None today — `message` names the offending path or entity. |
 | `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s accept-OID gate: an `accept` op's path changed, or vanished, since `adopt` recorded its OID (message `` `<path>` changed since it was accepted `` or `` `<path>` was accepted but no longer exists ``). | `` re-run `telos adopt` to accept the current bytes of `<path>` `` |
-| `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once when at least one intent is active) exited non-zero or could not be spawned (message `` the test run for `<target>` failed: `<substituted cmd>` ``). A full reconcile with only draft/deprecated intents invokes no runner. The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the configured executable with the displayed arguments, then reconcile again` |
+| `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once when at least one intent is active) failed. Without `[test] report`, that run exited non-zero. With `[test] report` configured, a testcase named after the impacted (respectively active) scenario failed in that run's report (message `` the test run for `<target>` failed: `<substituted cmd>` ``). A runner that cannot be spawned, or a stale report that cannot be removed before the run, is `TELOS_INTERNAL` instead — `run_proof`'s own message — not this code. A full reconcile with only draft/deprecated intents invokes no runner. The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the configured executable with the displayed arguments, then reconcile again` |
 | `TELOS_CHANGE_STATE_INVALID` | `change approve <id> --expected-digest <digest>` reaches a mutation boundary whose live delta digest differs (message `` change CHG-0001 no longer matches the expected digest ``). The check is repeated after validation immediately before the write. | `` run `telos change diff` again and review the new digest `` |
 | `TELOS_CHANGE_STATE_INVALID` | `adopt` or `revert` reaches a mutation boundary whose exact sealed lock plus sorted drift paths/kinds differs from `--expected-state` (message `` project drift no longer matches the expected state token ``). | `` run `telos status` again and review the new drift scope `` |
 | `TELOS_INTEGRITY_VIOLATION` | An `edit notion` payload changes the notion's `name` — a staged op cannot rename an entity, since the op's target path is derived from the entity's identity (message `` cannot rename notion `<from>` to `<to>` ``). | `` stage `remove notion <from>` and an `add` of the new one instead `` |
@@ -507,7 +507,9 @@ The hint is always
 `` make the runner execute the test named after `scn_NNNN` and write the report, then run `telos test SCN-NNNN` again ``.
 A compile error, a missing dependency, or a runner that selected nothing all
 land here rather than as red or green. Under `--all` the first such verdict
-aborts the loop; runs already taken stay journalled.
+aborts the loop; runs already taken stay journalled. The parser refuses XML
+that carries a `<!DOCTYPE>` declaration — entity expansion is never
+processed — so such a report reads as `not valid JUnit XML`.
 
 Wiring a report: `cargo nextest run --profile <p> {filter}` with a junit
 profile, `pytest --junitxml={report} -k {filter}`, `gotestsum --junitfile
@@ -1181,7 +1183,7 @@ reconcile's globs, test runner, and TDD policy.
 The same canonical validators are authoritative at every trust boundary; a
 hand-edited change cannot bypass the CLI staging checks.
 
-| Boundary | Glob validation | agents.hosts validation | Refusal effect |
+| Boundary | Glob and `[test]` validation | agents.hosts validation | Refusal effect |
 |---|---|---|---|
 | `config --change` | compile with runtime walker semantics | normalized value must equal base | config/change/counters unchanged |
 | `change approve` | revalidate effective config | revalidate transition from base | change stays drafted and gains no digest |
@@ -1441,9 +1443,9 @@ resolvable, and exit zero. With `[test] report` configured, "exit zero"
 becomes "the run's report gives the row's scenario a green verdict" (the
 `test` section's rule); a target shared by several scenarios is still run
 once, and its cached report is judged once per scenario, so two rows on one
-target may differ. A run that proves nothing is a red row, not a command
-failure. No proof, a missing/unsafe file, a stale named test, or any
-non-zero runner exit produces an explanatory red row, not a command failure.
+target may differ. A run that proves nothing, no proof, a missing/unsafe file, a stale named
+test, or any non-zero runner exit all produce an explanatory red row, not a
+command failure.
 A missing or blank runner is `TELOS_TEST_NOT_FOUND` because progress cannot
 be measured. Each test row has exactly `test`, `green`, and the literal
 substituted `command`; each scenario row has `id`, aggregate `green`, and

@@ -143,7 +143,7 @@ use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
 use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
-use crate::exec::{ProofRun, ProofVerdict, run_proof, run_shell, substitute_placeholders};
+use crate::exec::{ProofRun, ProofVerdict, run_proof, run_shell};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::{NodeRef, Relation};
@@ -1348,9 +1348,9 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
 /// always had -- a scenario the spec claims is proved, whose proof does not
 /// currently pass; with `[test] report` configured, a run that does not
 /// prove one of its impacted scenarios is `TELOS_TEST_NOT_EXECUTED` instead,
-/// naming that scenario. A spawn or parse error stays the integrity refusal,
-/// carrying the substituted command so the caller can rerun exactly what
-/// ran.
+/// naming that scenario. A pre-run failure -- a stale report that cannot be
+/// removed, or a runner that cannot be spawned -- surfaces as `run_proof`'s
+/// own `TELOS_INTERNAL`, the same as `telos test` and `rebuild status`.
 fn run_tests(
     ws: &Workspace,
     model: &TelosModel,
@@ -1385,13 +1385,7 @@ fn run_tests(
             .name
             .clone()
             .unwrap_or_else(|| test.path.as_str().to_string());
-        let run = match run_proof(&ws.config.test, &filter, &ws.repo_root) {
-            Ok(run) => run,
-            Err(_) => {
-                let command = substitute_placeholders(cmd, &filter, &ws.config.test.report);
-                return Err(test_failed(&rendered, &command));
-            }
-        };
+        let run = run_proof(&ws.config.test, &filter, &ws.repo_root)?;
         tests_run += 1;
         require_proven(&run, &rendered, proved)?;
     }
@@ -1440,20 +1434,17 @@ fn test_not_executed(target: &str, scenario: ScenarioId, reason: &str) -> TelosE
 /// suite -- and, with a report configured, judges every active scenario that
 /// has a proof against that one report, ascending. Without a report the
 /// exit status decides as before. The caller skips this for a draft-only
-/// model; an empty `cmd` reports zero runs.
+/// model; an empty `cmd` reports zero runs. A pre-run failure -- a stale
+/// report that cannot be removed, or a runner that cannot be spawned --
+/// surfaces as `run_proof`'s own `TELOS_INTERNAL`, the same as `telos test`
+/// and `rebuild status`.
 fn run_full_tests(ws: &Workspace, model: &TelosModel) -> Result<u32, TelosError> {
     let cmd = &ws.config.test.cmd;
     if cmd.trim().is_empty() {
         return Ok(0);
     }
 
-    let run = match run_proof(&ws.config.test, "", &ws.repo_root) {
-        Ok(run) => run,
-        Err(_) => {
-            let command = substitute_placeholders(cmd, "", &ws.config.test.report);
-            return Err(test_failed("the whole suite", &command));
-        }
-    };
+    let run = run_proof(&ws.config.test, "", &ws.repo_root)?;
     match run.kind() {
         Evidence::ExitStatus if run.status == 0 => {}
         Evidence::ExitStatus => return Err(test_failed("the whole suite", &run.command)),

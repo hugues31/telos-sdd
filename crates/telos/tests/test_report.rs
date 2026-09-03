@@ -527,6 +527,32 @@ fn gate_11_keeps_the_integrity_violation_for_a_failed_impacted_test() {
     );
 }
 
+/// A pre-run failure -- here, a stale report that cannot be removed because
+/// something else occupies its path -- is `run_proof`'s own `TELOS_INTERNAL`,
+/// not the `TELOS_INTEGRITY_VIOLATION` gate 11 raises for a run that
+/// actually completed and failed.
+#[test]
+fn gate_11_surfaces_run_proofs_own_error_for_an_unremovable_stale_report() {
+    let tmp = approved_with_report();
+    witness_pair_through_the_report(&tmp);
+    write_report_fixture(tmp.path(), &impacted_all_passed());
+    fs::remove_file(tmp.path().join(REPORT)).unwrap();
+    fs::create_dir(tmp.path().join(REPORT)).unwrap();
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "{}", stderr(&out));
+    let error = json_stdout(&out)["error"].clone();
+    assert_eq!(error["code"], json!("TELOS_INTERNAL"));
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("failed to remove the stale report"),
+        "{message}"
+    );
+}
+
 /// Hand-writes an exit-status red/green pair into the change file, the way
 /// a journal taken before the report was configured would look.
 fn journal_exit_status_pair(dir: &Path) {
@@ -592,6 +618,91 @@ fn gate_8_warns_about_an_exit_status_witness_under_advisory_policy() {
     );
 }
 
+/// Appends one hand-written exit-status red run line after an already-intact
+/// report pair, the way a stray leftover from before the report was
+/// configured would look.
+fn append_exit_status_red_line(dir: &Path) {
+    let path = dir.join("telos/changes/CHG-0001.tel");
+    let oid = blob_oid(dir, BILLING_TEST);
+    let src = fs::read_to_string(&path).unwrap();
+    let (body, _) = src
+        .rsplit_once("}\n")
+        .expect("a change file ends its block");
+    fs::write(
+        &path,
+        format!(
+            "{body}\n  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status\n}}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// With a report configured, only `report` runs are judged: an intact
+/// report pair still seals even when the journal also carries a leftover
+/// exit-status red for the same scenario and bytes.
+#[test]
+fn gate_8_ignores_an_extra_exit_status_run_when_the_report_pair_is_intact() {
+    let tmp = approved_with_report();
+    witness_pair_through_the_report(&tmp);
+    append_exit_status_red_line(tmp.path());
+    write_report_fixture(tmp.path(), &impacted_all_passed());
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+/// Hand-writes a lone exit-status red witness -- no matching green -- the
+/// way a red taken before the report was configured would look.
+fn write_exit_status_red_line(dir: &Path) {
+    let path = dir.join("telos/changes/CHG-0001.tel");
+    let oid = blob_oid(dir, BILLING_TEST);
+    let src = fs::read_to_string(&path)
+        .unwrap()
+        .replace("status approved", "status implementing");
+    let (body, _) = src
+        .rsplit_once("}\n")
+        .expect("a change file ends its block");
+    fs::write(
+        &path,
+        format!(
+            "{body}\n  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status\n}}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// An exit-status red followed by a report-backed green, on the same bytes,
+/// still refuses: the filtered (report-only) verdict is `MissingRed`, and
+/// the unfiltered journal's exit-status run is what gate 8 names.
+#[test]
+fn gate_8_refuses_an_exit_status_red_followed_by_a_report_backed_green() {
+    let tmp = approved_with_report();
+    write_exit_status_red_line(tmp.path());
+    write_report_fixture(tmp.path(), &junit_report(&[(TEST_FN, "passed")]));
+    let out = telos(tmp.path(), &["test", SCN, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    write_report_fixture(tmp.path(), &impacted_all_passed());
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(
+        json_stdout(&out)["error"],
+        json!({
+            "code": "TELOS_TEST_NOT_EXECUTED",
+            "message": EXIT_STATUS_WITNESS,
+            "hint": "run `telos test SCN-0108` again to record a report-backed red and green",
+        })
+    );
+}
+
 #[test]
 fn full_reconcile_judges_every_active_scenario_against_one_report() {
     let tmp = with_report_fixture("strict");
@@ -622,6 +733,34 @@ fn full_reconcile_judges_every_active_scenario_against_one_report() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(json_stdout(&out)["result"]["tests_run"], json!(1));
+}
+
+/// A failed testcase for an active scenario keeps the `TELOS_INTEGRITY_
+/// VIOLATION` gate `--full` always had, unlike a `NotExecuted` verdict.
+#[test]
+fn full_reconcile_keeps_the_integrity_violation_for_a_failed_active_scenario() {
+    let tmp = with_report_fixture("strict");
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[(SCN_0091, "failed"), (SCN_0107, "passed")]),
+    );
+
+    let out = telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        json_stdout(&out)["error"],
+        json!({
+            "code": "TELOS_INTEGRITY_VIOLATION",
+            "message": format!(
+                "the test run for `the whole suite` failed: `{}`",
+                display("").trim_end()
+            ),
+            "hint": "run the configured executable with the displayed arguments, then reconcile again",
+        })
+    );
 }
 
 // --- rebuild status -------------------------------------------------------

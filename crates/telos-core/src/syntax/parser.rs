@@ -22,9 +22,9 @@ use crate::ids::{
 };
 use crate::model::{
     Action, Attr, AttrRef, AttrType, Binding, Capability, Change, ChangeStatus, CmpOp, Constraint,
-    ConstraintKind, Context, ContextDependency, ContextKind, ContextMap, Expr, InstanceStep,
-    Intent, IntentStatus, JournalEntry, Literal, Notion, NotionKind, NotionMapping, Operand, Rel,
-    Rule, Scenario, Scope, StagedOp, Statement, TestRef, TestRun, Witness,
+    ConstraintKind, Context, ContextDependency, ContextKind, ContextMap, Evidence, Expr,
+    InstanceStep, Intent, IntentStatus, JournalEntry, Literal, Notion, NotionKind, NotionMapping,
+    Operand, Rel, Rule, Scenario, Scope, StagedOp, Statement, TestRef, TestRun, Witness,
 };
 use crate::span::{Sp, Span, line_col};
 use crate::suggest::closest;
@@ -92,6 +92,16 @@ const WITNESSES: [(&str, Witness); 2] = [("red", Witness::Red), ("green", Witnes
 /// How an unknown verdict is named back -- the closed set in full, the way
 /// [`CHANGE_STATUS_WORDS`] names the statuses.
 const WITNESS_WORDS: &str = "`red` or `green`";
+
+/// The two kinds of evidence a `run` line may carry.
+const EVIDENCES: [(&str, Evidence); 2] = [
+    ("exit-status", Evidence::ExitStatus),
+    ("report", Evidence::Report),
+];
+
+/// How an unknown evidence word is named back -- the closed set in full,
+/// the way [`WITNESS_WORDS`] names the verdicts.
+const EVIDENCE_WORDS: &str = "`exit-status` or `report`";
 
 /// How an unknown change status is named back: the whole closed set, in the
 /// `expected ..., found ...` shape every other diagnostic uses.
@@ -1786,6 +1796,9 @@ impl<'a> P<'a> {
             } else if self.at_kw("test_cmd") {
                 self.advance();
                 config.test.cmd = self.expect_str("a test command")?.node;
+            } else if self.at_kw("test_report") {
+                self.advance();
+                config.test.report = self.expect_str("a test report path")?.node;
             } else if self.at_kw("tdd") {
                 self.advance();
                 config.policy.tdd = if self.at_kw("strict") {
@@ -1999,12 +2012,14 @@ impl<'a> P<'a> {
             // The oid is opaque: 40 hex in a sha1 repository, 64 in a
             // sha256 one, and never anything this parser should adjudicate.
             let oid = self.expect_str("the blob oid string after the test reference")?;
+            let evidence = self.evidence()?;
             self.end_of_field()?;
             return Ok(JournalEntry::Run(TestRun {
                 scenario,
                 witness,
                 test,
                 oid: Oid(oid.node),
+                evidence,
             }));
         }
         if self.at_kw("bind") {
@@ -2040,6 +2055,11 @@ impl<'a> P<'a> {
     /// The two verdicts a run may carry.
     fn witness(&mut self) -> Result<Witness, Diagnostic> {
         self.listed_word(WITNESS_WORDS, &WITNESSES)
+    }
+
+    /// The two kinds of evidence a run may carry.
+    fn evidence(&mut self) -> Result<Evidence, Diagnostic> {
+        self.listed_word(EVIDENCE_WORDS, &EVIDENCES)
     }
 
     /// `"accept" , string-lit , string-lit`: the path, then the blob oid it
@@ -3700,7 +3720,7 @@ mod tests {
         use crate::model::change::fixtures::{
             CHANGE_EXAMPLE, JOURNAL_EXAMPLE, example_change, example_ops, implementing_change,
         };
-        use crate::model::{JournalEntry, TestRun, Witness};
+        use crate::model::{Evidence, JournalEntry, TestRun, Witness};
 
         fn change_path() -> RepoPath {
             RepoPath::new("telos/changes/CHG-0007.tel")
@@ -4119,7 +4139,9 @@ mod tests {
 
         #[test]
         fn a_run_line_carries_the_scenario_the_verdict_the_test_and_the_oid() {
-            let src = journalled("  run  SCN-0107 red \"tests/billing.rs::scn_0107\" \"cafe\"\n");
+            let src = journalled(
+                "  run  SCN-0107 red \"tests/billing.rs::scn_0107\" \"cafe\" exit-status\n",
+            );
             let change = parse(&src);
             assert_eq!(
                 change.journal,
@@ -4128,13 +4150,26 @@ mod tests {
                     witness: Witness::Red,
                     test: "tests/billing.rs::scn_0107".parse().unwrap(),
                     oid: Oid("cafe".to_string()),
+                    evidence: Evidence::ExitStatus,
                 })]
             );
         }
 
         #[test]
+        fn a_run_line_carries_its_evidence_word() {
+            let src = journalled(
+                "  run  SCN-0107 green \"tests/billing.rs::scn_0107\" \"cafe\" report\n",
+            );
+            let JournalEntry::Run(run) = &parse(&src).journal[0] else {
+                panic!("a run line");
+            };
+            assert_eq!(run.evidence, Evidence::Report);
+        }
+
+        #[test]
         fn a_test_locator_may_be_a_bare_path() {
-            let src = journalled("  run  SCN-0107 green \"tests/billing.rs\" \"cafe\"\n");
+            let src =
+                journalled("  run  SCN-0107 green \"tests/billing.rs\" \"cafe\" exit-status\n");
             let JournalEntry::Run(run) = &parse(&src).journal[0] else {
                 panic!("a run line");
             };
@@ -4161,7 +4196,8 @@ mod tests {
         fn the_oid_of_a_run_is_opaque() {
             // Never parsed, only compared (`Oid`): a sha1 repo writes 40
             // hex, a sha256 one 64, and the parser has no business knowing.
-            let src = journalled("  run  SCN-0107 red \"tests/b.rs\" \"not-a-real-oid\"\n");
+            let src =
+                journalled("  run  SCN-0107 red \"tests/b.rs\" \"not-a-real-oid\" exit-status\n");
             let JournalEntry::Run(run) = &parse(&src).journal[0] else {
                 panic!("a run line");
             };
@@ -4225,7 +4261,7 @@ mod tests {
             // change whose writer skipped that transition.
             let src = format!(
                 "change CHG-0001 \"x\" {{\n  status approved\n  digest \"sha256:{}\"\n\n  \
-                 run  SCN-0107 red \"tests/b.rs\" \"cafe\"\n}}\n",
+                 run  SCN-0107 red \"tests/b.rs\" \"cafe\" exit-status\n}}\n",
                 "0".repeat(64)
             );
             let found = diags(&src);
@@ -4292,7 +4328,7 @@ mod tests {
                 "  bind \"a.rs\" -> INT-0001\n",
                 "\n",
                 "\n",
-                "  run  SCN-0001 red \"tests/b.rs\" \"cafe\"\n",
+                "  run  SCN-0001 red \"tests/b.rs\" \"cafe\" exit-status\n",
                 "}\n",
             );
             let canonical = concat!(
@@ -4301,7 +4337,7 @@ mod tests {
                 "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
                 "\n",
                 "  bind \"a.rs\" -> INT-0001\n",
-                "  run  SCN-0001 red \"tests/b.rs\" \"cafe\"\n",
+                "  run  SCN-0001 red \"tests/b.rs\" \"cafe\" exit-status\n",
                 "}\n",
             );
             assert_eq!(emit_change(&parse(dense)), canonical);
@@ -4328,7 +4364,7 @@ mod tests {
                     "expected the blob oid string after the test reference, found end of line",
                 ),
                 (
-                    "run  SCN-0001 red \"t.rs\" \"cafe\" \"extra\"",
+                    "run  SCN-0001 red \"t.rs\" \"cafe\" exit-status \"extra\"",
                     "expected end of line, found `\"extra\"`",
                 ),
                 ("bind \"a.rs\" INT-0001", "expected `->`, found `INT-0001`"),
@@ -4391,7 +4427,7 @@ mod tests {
             let src = journalled(concat!(
                 "  bind \"telosaurus.rs\" -> INT-0001\n",
                 "  bind \"src/telos/adapter.rs\" -> INT-0001\n",
-                "  run  SCN-0001 red \"tests/telos_cli.rs\" \"cafe\"\n",
+                "  run  SCN-0001 red \"tests/telos_cli.rs\" \"cafe\" exit-status\n",
             ));
             assert_eq!(parse(&src).journal.len(), 3);
         }

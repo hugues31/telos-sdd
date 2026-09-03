@@ -61,7 +61,7 @@ fn reads_the_complete_config() {
             "result": {
                 "code": {"globs": ["src/**/*.rs"]},
                 "tests": {"globs": ["tests/**/*.rs"]},
-                "test": {"cmd": "cargo test {filter}"},
+                "test": {"cmd": "cargo test {filter}", "report": ""},
                 "policy": {"tdd": "strict"},
                 "agents": {"hosts": ["claude", "codex"]}
             },
@@ -116,7 +116,7 @@ fn stages_config_without_touching_the_base() {
     );
     let change = fs::read_to_string(tmp.path().join("telos/changes/CHG-0001.tel")).unwrap();
     assert!(change.contains("op edit config"));
-    assert!(change.contains("tdd        advisory"));
+    assert!(change.contains("tdd         advisory"));
     telos(tmp.path(), &["change", "diff", "CHG-0001"])
         .assert()
         .success();
@@ -138,7 +138,7 @@ fn staged_config_has_a_typed_diff_digest_and_reconciles_only_after_approval() {
     );
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&staged.stdout).unwrap(),
-        json!({"ok":true,"command":"config","result":{"change":"CHG-0001","path":"telos/telos.toml","config":{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"advisory"},"agents":{"hosts":["claude","codex"]}}},"error":null,"next_actions":["telos change diff CHG-0001"]})
+        json!({"ok":true,"command":"config","result":{"change":"CHG-0001","path":"telos/telos.toml","config":{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}","report":""},"policy":{"tdd":"advisory"},"agents":{"hosts":["claude","codex"]}}},"error":null,"next_actions":["telos change diff CHG-0001"]})
     );
     assert_eq!(fs::read(tmp.path().join("telos/telos.toml")).unwrap(), base);
     let changing = telos(tmp.path(), &["status", "--json"]).output().unwrap();
@@ -147,7 +147,7 @@ fn staged_config_has_a_typed_diff_digest_and_reconciles_only_after_approval() {
     assert_eq!(changing["result"]["drift"], serde_json::Value::Null);
     let change_path = tmp.path().join("telos/changes/CHG-0001.tel");
     let change = fs::read_to_string(&change_path).unwrap();
-    assert!(change.contains("op edit config {\n    code_glob  \"src/**/*.rs\"\n    test_glob  \"tests/**/*.rs\"\n    test_cmd   \"cargo test {filter}\"\n    tdd        advisory\n    agent_host claude\n    agent_host codex\n  }"));
+    assert!(change.contains("op edit config {\n    code_glob   \"src/**/*.rs\"\n    test_glob   \"tests/**/*.rs\"\n    test_cmd    \"cargo test {filter}\"\n    test_report \"\"\n    tdd         advisory\n    agent_host  claude\n    agent_host  codex\n  }"));
 
     let diff = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
         .output()
@@ -157,11 +157,11 @@ fn staged_config_has_a_typed_diff_digest_and_reconciles_only_after_approval() {
     assert_eq!(diff["result"]["status"], "drafted");
     assert_eq!(
         diff["result"]["ops"][0]["before"],
-        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
+        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\nreport = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
     );
     assert_eq!(
         diff["result"]["ops"][0]["after"],
-        "[code]\nglobs = [\"src/**/*.rs\"]\n\n[tests]\nglobs = [\"tests/**/*.rs\"]\n\n[test]\ncmd = \"cargo test {filter}\"\n\n[policy]\ntdd = \"advisory\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
+        "[code]\nglobs = [\"src/**/*.rs\"]\n\n[tests]\nglobs = [\"tests/**/*.rs\"]\n\n[test]\ncmd = \"cargo test {filter}\"\nreport = \"\"\n\n[policy]\ntdd = \"advisory\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
     );
     let first_digest = diff["result"]["digest"].as_str().unwrap().to_string();
     let changed = PAYLOAD.replace("advisory", "strict");
@@ -183,7 +183,7 @@ fn staged_config_has_a_typed_diff_digest_and_reconciles_only_after_approval() {
         .success();
     assert_eq!(
         fs::read_to_string(tmp.path().join("telos/telos.toml")).unwrap(),
-        "[code]\nglobs = [\"src/**/*.rs\"]\n\n[tests]\nglobs = [\"tests/**/*.rs\"]\n\n[test]\ncmd = \"cargo test {filter}\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
+        "[code]\nglobs = [\"src/**/*.rs\"]\n\n[tests]\nglobs = [\"tests/**/*.rs\"]\n\n[test]\ncmd = \"cargo test {filter}\"\nreport = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
     );
     let status = telos(tmp.path(), &["status", "--json"]).output().unwrap();
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
@@ -271,7 +271,7 @@ fn approve_rejects_a_hand_edited_invalid_config_without_freezing_a_digest() {
     let source = fs::read_to_string(&change_path).unwrap();
     fs::write(
         &change_path,
-        source.replace("code_glob  \"src/**/*.rs\"", "code_glob  \"[\""),
+        source.replace("code_glob   \"src/**/*.rs\"", "code_glob   \"[\""),
     )
     .unwrap();
     let config_before = fs::read(tmp.path().join("telos/telos.toml")).unwrap();

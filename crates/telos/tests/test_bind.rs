@@ -328,6 +328,8 @@ fn test_records_a_green_witness_with_the_canonical_result() {
                 "test": format!("{BILLING_TEST}::{TEST_FN}"),
                 "change": "CHG-0001",
                 "command": RUNNER,
+                "evidence": "exit-status",
+                "executed": null,
             },
             "error": null,
             "next_actions": ["telos change reconcile CHG-0001"]
@@ -406,7 +408,7 @@ fn test_appends_the_exact_journal_line_to_the_owning_change() {
     let oid = blob_oid(tmp.path(), BILLING_TEST);
     assert!(
         change_file(tmp.path()).contains(&format!(
-            "  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\"\n"
+            "  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status\n"
         )),
         "{}",
         change_file(tmp.path())
@@ -436,8 +438,8 @@ fn a_second_run_appends_rather_than_replacing_the_first() {
     assert_eq!(
         runs,
         vec![
-            format!("  run  {SCN} green \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\""),
-            format!("  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\""),
+            format!("  run  {SCN} green \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status"),
+            format!("  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status"),
         ]
     );
 }
@@ -787,6 +789,8 @@ fn test_all_runs_every_scenario_that_owes_a_witness() {
                 "test": format!("{BILLING_TEST}::{TEST_FN}"),
                 "change": "CHG-0001",
                 "command": RUNNER,
+                "evidence": "exit-status",
+                "executed": null,
             }]},
             "error": null,
             "next_actions": []

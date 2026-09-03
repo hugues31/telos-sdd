@@ -29,26 +29,30 @@
 //!   it: `add`/`edit`'s one-file-one-change gate is about *staging spec*,
 //!   and reconcile's carry-over is what resolves an overlap. So nothing here
 //!   calls `require_unclaimed`.
-//! - **Nothing detects a run that executed zero tests.** The runner is an
-//!   arbitrary shell command whose output telos deliberately does not parse,
-//!   so a `{filter}` that matches nothing exits 0 and reads as green. The
-//!   exact `scn_NNNN` naming convention reduces accidental mismatches, but a
-//!   runner that exits 0 without executing tests remains a documented
-//!   limitation.
+//! - **A run that executed no test records nothing.** With `[test] report`
+//!   configured the verdict is the report's ([`run_proof`]): a testcase
+//!   named after the scenario passed or failed, and anything else --
+//!   report missing, invalid, no such testcase, only skipped ones -- is
+//!   `TELOS_TEST_NOT_EXECUTED` with no journal line. Without a report the
+//!   exit status alone decides, which cannot tell a zero-test run from
+//!   green; the run line says so (`exit-status`) and so does the seal.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
 use telos_core::changes::write_change;
+use telos_core::config::TestCfg;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::exec::run_shell_with_filter;
+use telos_core::exec::{ProofVerdict, run_proof};
 use telos_core::ids::{ChangeId, RepoPath, ScenarioId};
 use telos_core::model::{
-    Change, ChangeStatus, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun, Witness,
+    Change, ChangeStatus, Evidence, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun,
+    Witness,
 };
 use telos_core::overlay::parse_base;
-use telos_core::witness::{find_test_for, required_witnesses};
+use telos_core::report::NotExecuted;
+use telos_core::witness::{find_test_for, required_witnesses, scenario_pattern};
 
 use crate::commands::{
     Ctx, Project, approved_config_workspace, diagnostics_to_error, is_approved, nearest_id,
@@ -80,12 +84,12 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
     let owner = owner_of(project, scenario).ok_or_else(|| no_owner(scenario))?;
     require_approved(owner)?;
     let effective_ws = approved_config_workspace(project)?;
-    let cmd = require_runner(&effective_ws)?;
+    let runner = require_runner(&effective_ws)?;
     let test = find_test_for(&effective_ws, scenario, file)?;
     require_no_foreign_drift(project, std::slice::from_ref(&test.path))?;
 
     let mut change = owner.clone();
-    let run = journal_run(project, &mut change, scenario, &test, &cmd)?;
+    let run = journal_run(project, &mut change, scenario, &test, &runner)?;
 
     Ok(Outcome {
         result: run_result(&run),
@@ -112,7 +116,9 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
 /// target does. A target whose test cannot be *discovered* is a different
 /// matter and does abort, before anything has run: it says the loop is not
 /// at the stage `--all` is for, and running the other scenarios first would
-/// bury that under a batch of verdicts.
+/// bury that under a batch of verdicts. A `TELOS_TEST_NOT_EXECUTED` verdict
+/// aborts the loop like a discovery error would, after the runs already
+/// taken were journalled.
 ///
 /// `--file` applies to every target when given, which only makes sense for
 /// a batch that really does live in one file; it exists here because the
@@ -128,7 +134,7 @@ fn every(project: &Project, file: Option<&RepoPath>) -> CmdResult {
     }
 
     let effective_ws = approved_config_workspace(project)?;
-    let cmd = require_runner(&effective_ws)?;
+    let runner = require_runner(&effective_ws)?;
 
     let mut resolved = Vec::with_capacity(targets.len());
     for (scenario, owner) in targets {
@@ -157,7 +163,7 @@ fn every(project: &Project, file: Option<&RepoPath>) -> CmdResult {
         let change = owners
             .get_mut(&owner)
             .expect("every target's owner came from the same scan");
-        runs.push(journal_run(project, change, scenario, &test, &cmd)?);
+        runs.push(journal_run(project, change, scenario, &test, &runner)?);
     }
 
     let human: Vec<String> = runs.iter().map(human_line).collect();
@@ -306,12 +312,14 @@ fn no_owner(scenario: ScenarioId) -> TelosError {
     .hint("stage it into a change and approve it first")
 }
 
-/// `[test] cmd`, or the frozen `TELOS_TEST_NOT_FOUND` for a project that
-/// never wired a runner up.
+/// `[test]`, validated, with the runner trimmed -- or the frozen
+/// `TELOS_TEST_NOT_FOUND` for a project that never wired a runner up.
 ///
-/// Trimmed, so that a `cmd = "   "` is the same "no runner" as `cmd = ""`:
-/// both would run the shell on nothing and report a meaningless verdict.
-fn require_runner(ws: &telos_core::workspace::Workspace) -> Result<String, TelosError> {
+/// Trimmed, so that a `cmd = "   "` is the same "no runner" as `cmd = ""`.
+/// `validate_self` runs first: a `{report}` without a report, or a report
+/// under `telos/`, is refused before anything could execute.
+fn require_runner(ws: &telos_core::workspace::Workspace) -> Result<TestCfg, TelosError> {
+    ws.config.validate_self()?;
     let cmd = ws.config.test.cmd.trim();
     if cmd.is_empty() {
         return Err(TelosError::new(
@@ -320,7 +328,10 @@ fn require_runner(ws: &telos_core::workspace::Workspace) -> Result<String, Telos
         )
         .hint("set [test] cmd, e.g. `cargo test {filter}`"));
     }
-    Ok(cmd.to_string())
+    Ok(TestCfg {
+        cmd: cmd.to_string(),
+        report: ws.config.test.report.clone(),
+    })
 }
 
 // --- running and journalling --------------------------------------------------
@@ -335,6 +346,9 @@ struct RunReport {
     /// uses the validated direct-process argv; this display is not a shell
     /// replay contract.
     command: String,
+    evidence: Evidence,
+    /// Testcases that ran, under report evidence.
+    executed: Option<u32>,
 }
 
 /// Runs the scenario's test and writes the verdict into its owning change.
@@ -356,12 +370,15 @@ struct RunReport {
 /// the line and the status can never be written apart. Idempotent -- a
 /// change already `implementing` stays so, and its frozen digest is left
 /// untouched because journal entries are digest-inert.
+///
+/// The verdict is judged only after the post-run hash check: a runner that
+/// rewrote its proof is refused before the report is even read.
 fn journal_run(
     project: &Project,
     change: &mut Change,
     scenario: ScenarioId,
     test: &TestRef,
-    cmd: &str,
+    runner: &TestCfg,
 ) -> Result<RunReport, TelosError> {
     let filter = test
         .name
@@ -374,13 +391,8 @@ fn journal_run(
             format!("the test file {} disappeared before the run", test.path),
         )
     })?;
-    let execution = run_shell_with_filter(cmd, &filter, &project.ws.repo_root)?;
-    let witness = if execution.result.status == 0 {
-        Witness::Green
-    } else {
-        Witness::Red
-    };
-    let command = execution.command;
+    let execution = run_proof(runner, &filter, &project.ws.repo_root)?;
+    let command = execution.command.clone();
 
     let after = project.git.blob_oids(std::slice::from_ref(&test.path))?;
     if after.get(&test.path) != Some(&oid) {
@@ -394,11 +406,24 @@ fn journal_run(
         .hint("restore the intended test bytes and run `telos test` again"));
     }
 
+    let (witness, executed) = match execution.verdict(scenario) {
+        ProofVerdict::Green { executed } => (Witness::Green, executed),
+        ProofVerdict::Red { executed } => (Witness::Red, executed),
+        ProofVerdict::NotExecuted(reason) => {
+            let report = execution
+                .report_path()
+                .expect("a not-executed verdict comes from a configured report");
+            return Err(not_executed(scenario, report, &reason));
+        }
+    };
+    let evidence = execution.kind();
+
     change.journal.push(JournalEntry::Run(TestRun {
         scenario,
         witness,
         test: test.clone(),
         oid,
+        evidence,
     }));
     if change.status == ChangeStatus::Approved {
         change.status = ChangeStatus::Implementing;
@@ -411,7 +436,22 @@ fn journal_run(
         test: test.clone(),
         change: change.id,
         command,
+        evidence,
+        executed,
     })
+}
+
+/// The frozen `TELOS_TEST_NOT_EXECUTED` for a run that proved nothing: the
+/// reason's own sentence, and a hint naming the scenario's pattern.
+fn not_executed(scenario: ScenarioId, report: &RepoPath, reason: &NotExecuted) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosTestNotExecuted,
+        reason.message(report, scenario),
+    )
+    .hint(format!(
+        "make the runner execute the test named after `{}` and write the report, then run `telos test {scenario}` again",
+        scenario_pattern(scenario)
+    ))
 }
 
 /// One run's result object, shared by both shapes: `test SCN-…`
@@ -423,12 +463,19 @@ fn run_result(run: &RunReport) -> Value {
         "test": run.test.to_string(),
         "change": run.change,
         "command": run.command,
+        "evidence": run.evidence.as_str(),
+        "executed": run.executed,
     })
 }
 
 fn human_line(run: &RunReport) -> String {
+    let evidence = match run.executed {
+        Some(1) => "1 test executed".to_string(),
+        Some(n) => format!("{n} tests executed"),
+        None => "exit status only".to_string(),
+    };
     format!(
-        "{} {}: {} (recorded in {})",
+        "{} {}: {} (recorded in {}, {evidence})",
         run.scenario,
         run.witness.as_str(),
         run.test,

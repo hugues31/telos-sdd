@@ -44,6 +44,7 @@ fn apply_config_ops_uses_the_last_typed_edit_and_normalizes_sets() {
         tests: Globs::default(),
         test: TestCfg {
             cmd: "first".into(),
+            report: String::new(),
         },
         policy: Policy {
             tdd: TddPolicy::Advisory,
@@ -59,6 +60,7 @@ fn apply_config_ops_uses_the_last_typed_edit_and_normalizes_sets() {
         },
         test: TestCfg {
             cmd: "second".into(),
+            report: String::new(),
         },
         policy: Policy {
             tdd: TddPolicy::Strict,

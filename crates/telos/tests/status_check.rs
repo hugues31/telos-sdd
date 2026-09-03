@@ -70,6 +70,7 @@ fn status_json_on_the_sealed_fixture_matches_the_golden_envelope() {
                 "state": "coherent",
                 "changes": [],
                 "drift": null,
+                "proof_evidence": "exit-status",
                 "coverage": {
                     "notions": 4,
                     "constraints": 1,

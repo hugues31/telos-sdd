@@ -49,7 +49,9 @@
 //!    scenario this delta makes new or different owes an intact red/green
 //!    pair on the bytes its test file has right now. Under `advisory` the
 //!    same verdicts come back as [`ReconcileOutcome::witness_warnings`]
-//!    instead of refusing. See [`check_witnesses`].
+//!    instead of refusing. With `[test] report` configured, only
+//!    report-backed runs pay a witness; an exit-status pair is
+//!    `TELOS_TEST_NOT_EXECUTED`. See [`check_witnesses`].
 //! 9. **Sealable structure**. Every scenario of every active
 //!    intent has at least one `proves`, and active obligations have a runner.
 //!    This is deliberately stricter than spec-only model loading/rebuild.
@@ -60,7 +62,10 @@
 //!     is actually run and `tests_run` is honest. A production path this
 //!     change claims through `accept` or a journal `bind` impacts every intent
 //!     it implements, so shared code cannot enter the new seal while another
-//!     intent's proof still describes its previous bytes.
+//!     intent's proof still describes its previous bytes. Each run is judged
+//!     per scenario the target proves: red is the integrity refusal, a report
+//!     that does not prove the scenario is `TELOS_TEST_NOT_EXECUTED`.
+//!     `--full` judges every active proved scenario against its single run.
 //!
 //! [`reconcile_full`] is the same transaction with the delta taken out: no
 //! change, so no drift, status, digest or accept gate, no journal
@@ -138,7 +143,7 @@ use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
 use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
-use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
+use crate::exec::{ProofRun, ProofVerdict, run_proof, run_shell};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::{NodeRef, Relation};
@@ -146,8 +151,8 @@ use crate::ids::{ConstraintId, ContextId, IntentId, NotionRef, RepoPath, Scenari
 use crate::lock::{LOCK_VERSION, Lock};
 use crate::model::change::context_bindings_path;
 use crate::model::{
-    Binding, Change, ChangeStatus, Constraint, IntentStatus, JournalEntry, Scope, StagedOp,
-    TelFile, TelosModel, TestRef,
+    Binding, Change, ChangeStatus, Constraint, Evidence, IntentStatus, JournalEntry, Scope,
+    StagedOp, TelFile, TelosModel, TestRef,
 };
 use crate::overlay::{apply_config_ops, apply_ops_idempotent, fold_journal_bindings, parse_base};
 use crate::repo_fs::RepoFs;
@@ -242,7 +247,12 @@ pub fn reconcile_change(
     require_complete_map("specification", &spec_paths, &spec)?;
     require_code_snapshot(git, &proven.code)?;
     let publication_spec = spec.clone();
-    let mut fresh = lock_from_maps(spec, proven.code.clone(), Some(change.id));
+    let mut fresh = lock_from_maps(
+        spec,
+        proven.code.clone(),
+        Some(change.id),
+        effective_ws.config.test.evidence(),
+    );
     carry_over(&mut fresh, lock, &carried);
     store_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
     fresh.write_to_workspace(ws)?;
@@ -329,13 +339,18 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
         .values()
         .any(|intent| intent.status == IntentStatus::Active)
     {
-        run_full_tests(ws)?
+        run_full_tests(ws, &model)?
     } else {
         0
     };
 
     require_unchanged_snapshot(ws, git, &proven)?;
-    let lock = lock_from_maps(proven.spec.clone(), proven.code.clone(), None);
+    let lock = lock_from_maps(
+        proven.spec.clone(),
+        proven.code.clone(),
+        None,
+        ws.config.test.evidence(),
+    );
     store_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
     lock.write_to_workspace(ws)?;
     require_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
@@ -501,12 +516,14 @@ fn lock_from_maps(
     spec: BTreeMap<RepoPath, Oid>,
     code: BTreeMap<RepoPath, Oid>,
     sealed_by: Option<crate::ids::ChangeId>,
+    proof_evidence: Evidence,
 ) -> Lock {
     Lock {
         version: LOCK_VERSION,
         tool: format!("telos {}", crate::VERSION),
         sealed_by,
         spec_digest: Lock::compute_digest(&spec),
+        proof_evidence,
         spec,
         code,
     }
@@ -948,6 +965,17 @@ fn is_context_bindings_path(path: &RepoPath) -> bool {
 /// this skip merely avoids suggesting an impossible `telos test` command
 /// before that authoritative structural diagnosis.
 /// ([`run_tests`] likewise has nothing to execute without a command.)
+///
+/// # With a report configured, only report-backed runs count
+///
+/// An exit-status red may be a compile error and an exit-status green a
+/// zero-test run, so with `[test] report` configured, exit-status runs are
+/// filtered out of the journal before it is judged. When the filtered
+/// verdict is not intact and the *unfiltered* journal still holds an
+/// exit-status run for the scenario, that is named as the reason rather than
+/// falling through to `MissingRed`/`MissingGreen`: `TELOS_TEST_NOT_EXECUTED`,
+/// naming the scenario and pointing at `telos test` to record a report-backed
+/// pair.
 fn check_witnesses(
     ws: &Workspace,
     git: &GitRepo,
@@ -964,6 +992,21 @@ fn check_witnesses(
         return Ok(Vec::new());
     }
 
+    // With a report configured, only report-backed runs can pay a witness: an
+    // exit-status red may be a compile error, an exit-status green a zero-test
+    // run. Filter them out before judging, and name the situation when it is
+    // what made the verdict fail.
+    let report_required = ws.config.test.evidence() == Evidence::Report;
+    let judged: Vec<JournalEntry> = change
+        .journal
+        .iter()
+        .filter(|entry| {
+            !report_required
+                || !matches!(entry, JournalEntry::Run(run) if run.evidence == Evidence::ExitStatus)
+        })
+        .cloned()
+        .collect();
+
     let test_paths: Vec<RepoPath> = change
         .journal
         .iter()
@@ -978,8 +1021,23 @@ fn check_witnesses(
 
     let mut warnings = Vec::new();
     for scenario in required {
-        let (code, message, hint) = match witness_verdict(&change.journal, scenario, &current) {
+        let (code, message, hint) = match witness_verdict(&judged, scenario, &current) {
             WitnessVerdict::Intact => continue,
+            _ if report_required
+                && change
+                    .runs_for(scenario)
+                    .any(|run| run.evidence == Evidence::ExitStatus) =>
+            {
+                (
+                    ErrorCode::TelosTestNotExecuted,
+                    format!(
+                        "scenario {scenario}'s witness was taken by exit status; `[test] report` is configured"
+                    ),
+                    format!(
+                        "run `telos test {scenario}` again to record a report-backed red and green"
+                    ),
+                )
+            }
             WitnessVerdict::MissingRed => (
                 ErrorCode::TelosScenarioRedExpected,
                 format!("scenario {scenario} has no sealed red witness"),
@@ -1284,11 +1342,15 @@ fn constraint_failed(id: ConstraintId, command: &str) -> TelosError {
 ///
 /// An empty `cmd` skips the whole gate and reports zero runs. Gate 9 already
 /// proved that no active obligation requires one; draft-only/spec scaffolding
-/// may therefore still reconcile without a runner. A run that fails is the
-/// runtime half of the proof check --
-/// a scenario the spec claims is proved, whose proof does not currently
-/// pass -- and is reported as `TELOS_INTEGRITY_VIOLATION` carrying the
-/// substituted command, so the caller can rerun exactly what ran.
+/// may therefore still reconcile without a runner. Each run is judged once
+/// per impacted scenario its target proves, ascending, through
+/// [`require_proven`]: a red is the `TELOS_INTEGRITY_VIOLATION` this gate
+/// always had -- a scenario the spec claims is proved, whose proof does not
+/// currently pass; with `[test] report` configured, a run that does not
+/// prove one of its impacted scenarios is `TELOS_TEST_NOT_EXECUTED` instead,
+/// naming that scenario. A pre-run failure -- a stale report that cannot be
+/// removed, or a runner that cannot be spawned -- surfaces as `run_proof`'s
+/// own `TELOS_INTERNAL`, the same as `telos test` and `rebuild status`.
 fn run_tests(
     ws: &Workspace,
     model: &TelosModel,
@@ -1302,53 +1364,115 @@ fn run_tests(
     let scenarios = impacted_scenarios(model, impacted);
     // Keyed by the target's rendered form: that both deduplicates two
     // scenarios proved by one test and orders the runs deterministically.
-    let mut targets: BTreeMap<String, &TestRef> = BTreeMap::new();
+    // Each target carries the impacted scenarios it proves, so one run can
+    // be judged once per scenario.
+    let mut targets: BTreeMap<String, (&TestRef, BTreeSet<ScenarioId>)> = BTreeMap::new();
     for binding in &model.bindings {
         if let Binding::Proves { test, scenario } = binding
             && scenarios.contains(&scenario.node)
         {
-            targets.insert(test.to_string(), test);
+            targets
+                .entry(test.to_string())
+                .or_insert_with(|| (test, BTreeSet::new()))
+                .1
+                .insert(scenario.node);
         }
     }
 
     let mut tests_run = 0;
-    for (rendered, test) in targets {
+    for (rendered, (test, proved)) in targets {
         let filter = test
             .name
             .clone()
             .unwrap_or_else(|| test.path.as_str().to_string());
-        match run_shell_with_filter(cmd, &filter, &ws.repo_root) {
-            Ok(run) if run.result.status == 0 => tests_run += 1,
-            Ok(run) => return Err(test_failed(&rendered, &run.command)),
-            Err(_) => {
-                let command = substitute_filter(cmd, &filter);
-                return Err(test_failed(&rendered, &command));
-            }
-        }
+        let run = run_proof(&ws.config.test, &filter, &ws.repo_root)?;
+        tests_run += 1;
+        require_proven(&run, &rendered, proved)?;
     }
     Ok(tests_run)
 }
 
-/// A full reconcile invokes `[test] cmd` once with `{filter}` substituted by
-/// nothing -- the whole suite, once.
-///
-/// A full reseal with active obligations proves the spec as it stands rather
-/// than what a delta reached, so there is no per-target loop and nothing to
-/// deduplicate: the project's own runner decides what "everything" means.
-/// The caller skips this function entirely for a draft-only model. `cmd`
-/// empty skips the gate and reports zero runs, exactly as in the per-change
-/// path.
-fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
+/// Judges one run for every scenario its target proves, ascending. A red
+/// is the integrity refusal gate 11 always had; a run that proves nothing
+/// is `TELOS_TEST_NOT_EXECUTED`, naming the target, the scenario and the
+/// reason. Under exit-status evidence every scenario reads the same, so
+/// the loop answers as the single check used to.
+fn require_proven(
+    run: &ProofRun,
+    target: &str,
+    scenarios: impl IntoIterator<Item = ScenarioId>,
+) -> Result<(), TelosError> {
+    for scenario in scenarios {
+        match run.verdict(scenario) {
+            ProofVerdict::Green { .. } => {}
+            ProofVerdict::Red { .. } => return Err(test_failed(target, &run.command)),
+            ProofVerdict::NotExecuted(reason) => {
+                let report = run
+                    .report_path()
+                    .expect("a not-executed verdict comes from a configured report");
+                return Err(test_not_executed(
+                    target,
+                    scenario,
+                    &reason.message(report, scenario),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The frozen `TELOS_TEST_NOT_EXECUTED` of gates 11 and `--full`.
+fn test_not_executed(target: &str, scenario: ScenarioId, reason: &str) -> TelosError {
+    TelosError::new(
+        ErrorCode::TelosTestNotExecuted,
+        format!("the test run for `{target}` did not execute {scenario}: {reason}"),
+    )
+    .hint("run the configured executable with the displayed arguments and inspect the report, then reconcile again")
+}
+
+/// A full reseal runs `[test] cmd` once with `{filter}` empty -- the whole
+/// suite -- and, with a report configured, judges every active scenario that
+/// has a proof against that one report, ascending. Without a report the
+/// exit status decides as before. The caller skips this for a draft-only
+/// model; an empty `cmd` reports zero runs. A pre-run failure -- a stale
+/// report that cannot be removed, or a runner that cannot be spawned --
+/// surfaces as `run_proof`'s own `TELOS_INTERNAL`, the same as `telos test`
+/// and `rebuild status`.
+fn run_full_tests(ws: &Workspace, model: &TelosModel) -> Result<u32, TelosError> {
     let cmd = &ws.config.test.cmd;
     if cmd.trim().is_empty() {
         return Ok(0);
     }
 
-    let command = substitute_filter(cmd, "");
-    match run_shell_with_filter(cmd, "", &ws.repo_root) {
-        Ok(run) if run.result.status == 0 => Ok(1),
-        Ok(_) | Err(_) => Err(test_failed("the whole suite", &command)),
+    let run = run_proof(&ws.config.test, "", &ws.repo_root)?;
+    match run.kind() {
+        Evidence::ExitStatus if run.status == 0 => {}
+        Evidence::ExitStatus => return Err(test_failed("the whole suite", &run.command)),
+        Evidence::Report => {
+            require_proven(&run, "the whole suite", active_proved_scenarios(model))?
+        }
     }
+    Ok(1)
+}
+
+/// Every scenario of an active intent that has at least one `proves`
+/// binding, ascending.
+fn active_proved_scenarios(model: &TelosModel) -> BTreeSet<ScenarioId> {
+    let proved: BTreeSet<ScenarioId> = model
+        .bindings
+        .iter()
+        .filter_map(|binding| match binding {
+            Binding::Proves { scenario, .. } => Some(scenario.node),
+            _ => None,
+        })
+        .collect();
+    model
+        .intents
+        .values()
+        .filter(|intent| intent.status == IntentStatus::Active)
+        .flat_map(|intent| intent.scenarios.iter().map(|scenario| scenario.id))
+        .filter(|id| proved.contains(id))
+        .collect()
 }
 
 /// Names what was run and the command that ran for it -- the latter after
@@ -1592,6 +1716,7 @@ mod tests {
             tool: "telos test".to_string(),
             sealed_by: None,
             spec_digest: Lock::compute_digest(&spec),
+            proof_evidence: Evidence::ExitStatus,
             spec,
             code: code
                 .iter()

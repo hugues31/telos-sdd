@@ -156,8 +156,8 @@ const IMPLEMENTING_RUNS_ONLY: &str = concat!(
     "\n",
     "  op remove notion billing/Ledger\n",
     "\n",
-    "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
-    "  run  SCN-0107 green \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+    "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n",
+    "  run  SCN-0107 green \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n",
     "}\n",
 );
 
@@ -170,9 +170,9 @@ const IMPLEMENTING_RUNS_AND_BINDS: &str = concat!(
     "\n",
     "  op remove notion billing/Ledger\n",
     "\n",
-    "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+    "  run  SCN-0107 red \"tests/billing.rs::scn_0107_full_payment\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n",
     "  bind \"src/billing.rs\" -> INT-0042\n",
-    "  run  SCN-0107 green \"tests/billing.rs\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+    "  run  SCN-0107 green \"tests/billing.rs\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n",
     "  bind \"src/ledger.rs\" -> INT-0042\n",
     "}\n",
 );
@@ -461,8 +461,8 @@ fn a_journalled_change_claims_its_test_files_and_bound_paths() {
 fn a_journal_line_naming_the_spec_tree_does_not_parse() {
     for line in [
         "  bind \"telos/contexts/billing/bindings.tel\" -> INT-0042",
-        "  run  SCN-0107 green \"telos/contexts/billing/bindings.tel\" \"e69de29\"",
-        "  run  SCN-0107 red \"telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel::scn_0107\" \"e69de29\"",
+        "  run  SCN-0107 green \"telos/contexts/billing/bindings.tel\" \"e69de29\" exit-status",
+        "  run  SCN-0107 red \"telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel::scn_0107\" \"e69de29\" exit-status",
     ] {
         let src = format!(
             "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
@@ -530,10 +530,39 @@ fn a_verdict_that_is_neither_red_nor_green_is_rejected() {
         "  status implementing\n",
         "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
         "\n",
-        "  run  SCN-0107 blue \"tests/billing.rs\" \"cafe\"\n",
+        "  run  SCN-0107 blue \"tests/billing.rs\" \"cafe\" exit-status\n",
         "}\n",
     );
     assert_reports(&parse_err(src), "expected `red` or `green`, found `blue`");
+}
+
+#[test]
+fn a_run_line_without_a_known_evidence_word_is_rejected() {
+    let src = concat!(
+        "change CHG-0001 \"x\" {\n",
+        "  status implementing\n",
+        "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+        "\n",
+        "  run  SCN-0107 red \"tests/billing.rs\" \"cafe\" maybe\n",
+        "}\n",
+    );
+    assert_reports(
+        &parse_err(src),
+        "expected `exit-status` or `report`, found `maybe`",
+    );
+}
+
+#[test]
+fn a_run_line_without_any_evidence_word_is_rejected() {
+    let src = concat!(
+        "change CHG-0001 \"x\" {\n",
+        "  status implementing\n",
+        "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+        "\n",
+        "  run  SCN-0107 red \"tests/billing.rs\" \"cafe\"\n",
+        "}\n",
+    );
+    assert_reports(&parse_err(src), "expected `exit-status` or `report`");
 }
 
 #[test]

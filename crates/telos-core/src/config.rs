@@ -8,6 +8,8 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, TelosError};
+use crate::ids::RepoPath;
+use crate::model::Evidence;
 
 /// Agent integrations selected when the project was initialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -65,9 +67,12 @@ impl Config {
     /// Deserialization validates the TOML/JSON shape and enum values; glob
     /// compilation lives here so staging, approval, reconcile, and full
     /// resealing all use the exact matching semantics used by the walker.
+    /// The `[test]` section is validated here too: the report path and the
+    /// `{report}` placeholder rule.
     pub fn validate_self(&self) -> Result<(), TelosError> {
         compile_globs(&self.code.globs)?;
         compile_globs(&self.tests.globs)?;
+        validate_test_cfg(&self.test)?;
         Ok(())
     }
 
@@ -129,11 +134,61 @@ pub struct Globs {
     pub globs: Vec<String>,
 }
 
-/// `[test]`: the command used to run the test suite.
+/// `[test]`: the command used to run the test suite, and the JUnit XML
+/// report it writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TestCfg {
     #[serde(default)]
     pub cmd: String,
+    /// `[test] report = "..."` -- the repository-relative path of the JUnit
+    /// XML report the runner writes. Empty means no report: verdicts are
+    /// read from the exit status alone.
+    #[serde(default)]
+    pub report: String,
+}
+
+impl TestCfg {
+    /// The configured report as a validated repository path, `None` when
+    /// unset. Validity is the code-path rule: normalized, `/`-separated,
+    /// nothing under `telos/`.
+    pub fn report_path(&self) -> Result<Option<RepoPath>, TelosError> {
+        if self.report.is_empty() {
+            return Ok(None);
+        }
+        let path = RepoPath::parse(self.report.clone())?;
+        if path.first_component() == Some("telos") {
+            return Err(TelosError::new(
+                ErrorCode::TelosParseError,
+                format!(
+                    "invalid [test] report: `{}` is under the spec tree",
+                    self.report
+                ),
+            )
+            .hint("write the report outside telos/, e.g. `target/telos-report.xml`"));
+        }
+        Ok(Some(path))
+    }
+
+    /// The kind of evidence runs under this configuration produce.
+    pub fn evidence(&self) -> Evidence {
+        if self.report.is_empty() {
+            Evidence::ExitStatus
+        } else {
+            Evidence::Report
+        }
+    }
+}
+
+/// `[test] report` must be a code path, and `{report}` in `cmd` requires it.
+pub(crate) fn validate_test_cfg(test: &TestCfg) -> Result<(), TelosError> {
+    if test.report_path()?.is_none() && test.cmd.contains("{report}") {
+        return Err(TelosError::new(
+            ErrorCode::TelosParseError,
+            "invalid [test] cmd: `{report}` is used but `[test] report` is not configured",
+        )
+        .hint("set [test] report to the repository-relative path the runner writes its JUnit XML report to"));
+    }
+    Ok(())
 }
 
 /// `[policy]`: process-level policy switches.
@@ -156,6 +211,8 @@ pub enum TddPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::RepoPath;
+    use crate::model::Evidence;
 
     #[test]
     fn empty_toml_yields_every_default() {
@@ -165,6 +222,7 @@ mod tests {
         assert!(config.code.globs.is_empty());
         assert!(config.tests.globs.is_empty());
         assert_eq!(config.test.cmd, "");
+        assert_eq!(config.test.report, "");
     }
 
     #[test]
@@ -178,6 +236,7 @@ mod tests {
 
             [test]
             cmd = "cargo test {filter}"
+            report = "target/telos-report.xml"
 
             [policy]
             tdd = "advisory"
@@ -186,6 +245,7 @@ mod tests {
         assert_eq!(config.code.globs, vec!["src/**/*.rs".to_string()]);
         assert_eq!(config.tests.globs, vec!["tests/**/*.rs".to_string()]);
         assert_eq!(config.test.cmd, "cargo test {filter}");
+        assert_eq!(config.test.report, "target/telos-report.xml");
         assert_eq!(config.policy.tdd, TddPolicy::Advisory);
     }
 
@@ -244,5 +304,74 @@ mod tests {
         };
         let error = Config::validate_transition(&base, &removed).unwrap_err();
         assert_eq!(error.code, ErrorCode::TelosIntegrityViolation);
+    }
+
+    #[test]
+    fn a_report_under_the_spec_tree_is_refused() {
+        let config = Config {
+            test: TestCfg {
+                cmd: "runner {filter}".to_string(),
+                report: "telos/report.xml".to_string(),
+            },
+            ..Config::default()
+        };
+        let error = config.validate_self().unwrap_err();
+        assert_eq!(error.code, ErrorCode::TelosParseError);
+        assert_eq!(
+            error.message,
+            "invalid [test] report: `telos/report.xml` is under the spec tree"
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some("write the report outside telos/, e.g. `target/telos-report.xml`")
+        );
+    }
+
+    #[test]
+    fn a_report_placeholder_without_a_report_is_refused() {
+        let config = Config {
+            test: TestCfg {
+                cmd: "runner --junit {report} {filter}".to_string(),
+                report: String::new(),
+            },
+            ..Config::default()
+        };
+        let error = config.validate_self().unwrap_err();
+        assert_eq!(error.code, ErrorCode::TelosParseError);
+        assert_eq!(
+            error.message,
+            "invalid [test] cmd: `{report}` is used but `[test] report` is not configured"
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some(
+                "set [test] report to the repository-relative path the runner writes its JUnit XML report to"
+            )
+        );
+    }
+
+    #[test]
+    fn report_path_and_evidence_follow_the_report_field() {
+        let unset = TestCfg::default();
+        assert_eq!(unset.report_path().unwrap(), None);
+        assert_eq!(unset.evidence(), Evidence::ExitStatus);
+
+        let set = TestCfg {
+            cmd: String::new(),
+            report: "target/telos-report.xml".to_string(),
+        };
+        assert_eq!(
+            set.report_path().unwrap(),
+            Some(RepoPath::new("target/telos-report.xml"))
+        );
+        assert_eq!(set.evidence(), Evidence::Report);
+        assert!(
+            TestCfg {
+                cmd: String::new(),
+                report: "../escape.xml".to_string()
+            }
+            .report_path()
+            .is_err()
+        );
     }
 }

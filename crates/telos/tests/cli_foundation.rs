@@ -9,7 +9,7 @@ use std::fs;
 
 use serde_json::{Value, json};
 use telos_core::ids::RepoPath;
-use telos_core::lock::Lock;
+use telos_core::lock::{LOCK_VERSION, Lock};
 
 use common::{repo, telos, with_fixture};
 
@@ -74,7 +74,7 @@ fn init_seals_an_empty_repository() {
     let lock = Lock::read(&lock_path)
         .expect("the lock parses")
         .expect("the lock exists");
-    assert_eq!(lock.version, 2);
+    assert_eq!(lock.version, LOCK_VERSION);
     assert_eq!(lock.sealed_by, None);
     assert!(
         lock.spec
@@ -103,7 +103,7 @@ fn init_creates_the_whole_telos_tree() {
     }
     assert_eq!(
         fs::read_to_string(telos_dir.join("telos.toml")).unwrap(),
-        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = []\n"
+        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\nreport = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = []\n"
     );
     assert_eq!(
         fs::read_to_string(telos_dir.join("context-map.tel")).unwrap(),

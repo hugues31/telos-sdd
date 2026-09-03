@@ -1,7 +1,7 @@
 # telos CLI contracts
 
 This document is the frozen reference for everything an agent or other tool
-routes on without interpretation: the `--json` envelope shape, the 17 error
+routes on without interpretation: the `--json` envelope shape, the 18 error
 codes and their canonical hints, the `status --json` schema, `check`'s
 semantics, and the whole change/transaction surface (`show`,
 `change open|list|abandon|diff|approve|reconcile`,
@@ -111,7 +111,7 @@ envelope surface.
 
 ## Error codes
 
-The seventeen codes below are stable. Strict TDD reconciliation uses
+The eighteen codes below are stable. Strict TDD reconciliation uses
 `TELOS_SCENARIO_RED_EXPECTED` and `TELOS_TEST_SEALED`; test discovery uses
 `TELOS_TEST_NOT_FOUND`. Variants are never renamed or removed, only added —
 this is the whole contract agent tooling routes on.
@@ -137,6 +137,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_GIT_ERROR` |
 | `TELOS_INTERNAL` |
 | `TELOS_TEST_NOT_FOUND` |
+| `TELOS_TEST_NOT_EXECUTED` |
 
 ### Detailed emission cases
 
@@ -153,6 +154,9 @@ this is the whole contract agent tooling routes on.
 | `TELOS_SCENARIO_RED_EXPECTED` | `reconcile` under `policy.tdd = "strict"` requires an intact sealed red witness for a scenario before its green run; none exists. | Run `telos test SCN-…` to record a red witness before implementing. |
 | `TELOS_TEST_SEALED` | The bytes of a test file sealed as a red witness changed before the scenario went green — the witness no longer proves anything. | The red witness is invalid; run `telos test SCN-…` again on the current bytes before reconciling. |
 | `TELOS_TEST_NOT_FOUND` | No `[test] cmd` is configured; discovery finds zero or more than one file containing the scenario's `scn_NNNN` convention; or `--file` names no file. | The exact cases follow this table. |
+| `TELOS_TEST_NOT_EXECUTED` | `telos test` with `[test] report` configured: the report is missing, invalid, names no testcase for the scenario, or every such testcase was skipped (message: one of the four sentences in the `test` section). Nothing is journalled; under `--all` the loop stops there. | `` make the runner execute the test named after `scn_NNNN` and write the report, then run `telos test SCN-NNNN` again `` |
+| `TELOS_TEST_NOT_EXECUTED` | Gate 8 under strict policy with `[test] report` configured: the scenario's witnesses were taken by exit status (message `` scenario SCN-NNNN's witness was taken by exit status; `[test] report` is configured ``). A warning under advisory. | `` run `telos test SCN-NNNN` again to record a report-backed red and green `` |
+| `TELOS_TEST_NOT_EXECUTED` | Gate 11 or `--full` with `[test] report` configured: a run's report does not prove an impacted (respectively active) scenario (message `` the test run for `<target>` did not execute SCN-NNNN: <reason> ``, `<target>` being `the whole suite` under `--full`). | `` run the configured executable with the displayed arguments and inspect the report, then reconcile again `` |
 | `TELOS_ORPHAN_CODE` | `change reconcile`'s unbound-code gate, evaluated over the delta's post model: a file matched by `[code]`/`[tests]` globs in `telos.toml` is not covered by any `implements`/`proves` binding (message names which of the two families and the binding relation it's missing). | Bind it with `telos bind <path> <INT-id>`, or remove it from the `telos.toml` globs if it isn't spec-governed. |
 | `TELOS_CONSTRAINT_FAILED` | `change reconcile`'s constraint-checks gate: a constraint's `check` shell command exited non-zero, or could not even be spawned (message `` CON-0001 check failed: `<cmd>` ``). The command's own output is deliberately *not* included — it is not reproducible across machines (a git version, a locale, `$PATH`), so it cannot be frozen contract. | Run the constraint's `check` command directly to see its output. |
 | `TELOS_CHANGE_STATE_INVALID` | `change reconcile <id>` on a change whose status is not `approved`/`implementing` (message `` change CHG-0001 is not approved; approve it first ``). | `` run `telos change diff CHG-0001` then `telos change approve CHG-0001` `` |
@@ -167,7 +171,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_PARSE_ERROR` | An `add`/`edit` payload on stdin is not a JSON object, or its shape does not match the payload schemas section below (`message` prefixed `` payload: `` — e.g. `` payload: missing required field `title` in intent payload ``). A handful of exact wordings are frozen verbatim without that prefix: an unknown key (`` unknown key `titel` in notion payload ``), an unknown closed-set word (`` unknown attribute type `txt`; expected one of string, int, decimal, money, bool, date, datetime, enum, ref ``), a `decimal` value sent as a JSON number, and a malformed `set` action. | None today. |
 | `TELOS_INTEGRITY_VIOLATION` | An integrity violation with no dedicated hint: `seal` finding a binding to a code file that doesn't exist on disk, an entity declared twice, or `remove`/`adopt` leaving a still-referenced entity behind (`cannot remove <entity>: <referrer>`). | None today — `message` names the offending path or entity. |
 | `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s accept-OID gate: an `accept` op's path changed, or vanished, since `adopt` recorded its OID (message `` `<path>` changed since it was accepted `` or `` `<path>` was accepted but no longer exists ``). | `` re-run `telos adopt` to accept the current bytes of `<path>` `` |
-| `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once when at least one intent is active) exited non-zero or could not be spawned (message `` the test run for `<target>` failed: `<substituted cmd>` ``). A full reconcile with only draft/deprecated intents invokes no runner. The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the configured executable with the displayed arguments, then reconcile again` |
+| `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once when at least one intent is active) failed. Without `[test] report`, that run exited non-zero. With `[test] report` configured, a testcase named after the impacted (respectively active) scenario failed in that run's report (message `` the test run for `<target>` failed: `<substituted cmd>` ``). A runner that cannot be spawned, or a stale report that cannot be removed before the run, is `TELOS_INTERNAL` instead — `run_proof`'s own message — not this code. A full reconcile with only draft/deprecated intents invokes no runner. The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the configured executable with the displayed arguments, then reconcile again` |
 | `TELOS_CHANGE_STATE_INVALID` | `change approve <id> --expected-digest <digest>` reaches a mutation boundary whose live delta digest differs (message `` change CHG-0001 no longer matches the expected digest ``). The check is repeated after validation immediately before the write. | `` run `telos change diff` again and review the new digest `` |
 | `TELOS_CHANGE_STATE_INVALID` | `adopt` or `revert` reaches a mutation boundary whose exact sealed lock plus sorted drift paths/kinds differs from `--expected-state` (message `` project drift no longer matches the expected state token ``). | `` run `telos status` again and review the new drift scope `` |
 | `TELOS_INTEGRITY_VIOLATION` | An `edit notion` payload changes the notion's `name` — a staged op cannot rename an entity, since the op's target path is derived from the entity's identity (message `` cannot rename notion `<from>` to `<to>` ``). | `` stage `remove notion <from>` and an `add` of the new one instead `` |
@@ -214,6 +218,16 @@ as all zeros rather than blocking the command. (This is a deliberate choice
 where the spec left the case ambiguous — "coverage computed over what
 parses" doesn't have an obvious meaning when *nothing* parses.)
 
+### `telos.lock`
+
+Format version `3`: `version`, `tool`, optional `sealed_by`, `spec_digest`,
+`proof_evidence` (`"exit-status"` | `"report"`, required), then the `[spec]`
+and `[code]` tables. A lock of any other version is `TELOS_PARSE_ERROR` with
+hint `` run `telos reconcile --full` to regenerate telos.lock `` — `--full`
+never reads the lock, so the hint is always actionable. `init`, a per-change
+reconcile (from the effective configuration), and `--full` all write
+`proof_evidence`.
+
 ### `result` schema
 
 ```json
@@ -221,6 +235,7 @@ parses" doesn't have an obvious meaning when *nothing* parses.)
   "state": "coherent",
   "changes": [],
   "drift": null,
+  "proof_evidence": "exit-status",
   "coverage": {
     "notions": 4,
     "constraints": 1,
@@ -254,6 +269,14 @@ parses" doesn't have an obvious meaning when *nothing* parses.)
   spec/code OID tables, the exact sorted `(path, drift kind)` scope, and the live blob
   OID of every present drift entry, so a path whose bytes or kind changes
   receives another token even when the displayed path list is unchanged.
+- `proof_evidence` — `"exit-status"` or `"report"`, read from `telos.lock`:
+  how every proof the current seal rests on was judged. `"report"` means the
+  sealing configuration had a `[test] report`, so each sealed green is a
+  testcase named after its scenario that executed and passed; `"exit-status"`
+  means the runner's exit code alone was read, which cannot distinguish a
+  zero-test run from green. It reports what the seal proved, not what the
+  configuration says now: the two differ only between turning the report on
+  and the next reconcile.
 - `coverage` — exact counts off the loaded model, or all zeros if the spec
   didn't parse. `scenarios_proved` counts scenarios with ≥ 1 `proves`
   binding; `intents_implemented` counts intents with ≥ 1 `implements`
@@ -408,10 +431,13 @@ implements by path; proves by `(scenario, test)`; neighbours by
 
 Runs the configured `[test] cmd` and appends an immutable witness journal
 record to the approved or implementing change whose staged intent owns the
-scenario. A non-zero runner exit is **red evidence, not a command failure**:
-the command still exits zero and records the exact blob OID of the test file
-that was run. A zero exit records green. The test command does not parse test
-runner output, so it cannot distinguish a zero-test run from green.
+scenario. Without `[test] report`, a non-zero runner exit is **red evidence, not a
+command failure**: the command still exits zero and records the exact blob
+OID of the test file that was run, and a zero exit records green. That
+reading cannot distinguish a zero-test run from green, and the run line, the
+seal and the result say so (`exit-status`). With `[test] report` configured
+the verdict is the report's — see "Report-backed evidence" below — and a run
+that proves nothing is `TELOS_TEST_NOT_EXECUTED` with no journal line.
 
 Before the process starts, Telos hashes the selected proof file. It re-hashes
 it after the process exits and journals only when the OID is unchanged; a
@@ -428,8 +454,14 @@ run returns:
 ```json
 {"scenario":"SCN-0108","witness":"red|green",
  "test":"tests/billing.rs::scn_0108_x","change":"CHG-0001",
- "command":"cargo test scn_0108_x"}
+ "command":"cargo nextest run --profile telos scn_0108_x",
+ "evidence":"report|exit-status","executed":1}
 ```
+
+`evidence` says how the verdict was decided. `executed` is the number of
+testcases named after the scenario that ran (passed plus failed) under
+`report`, and `null` under `exit-status`. The journal line ends in the same
+evidence word: `` run  SCN-0108 green "tests/billing.rs::scn_0108_x" "<oid>" report ``.
 
 Red returns `next_actions: ["telos test SCN-0108"]`; green returns
 `["telos change reconcile CHG-0001"]`. `test --all` witnesses every scenario
@@ -441,6 +473,51 @@ The drift carve-out is exact-path only: a test run admits drift of the test
 path it records, but refuses any other unclaimed drift. A journal record
 moves `approved` to `implementing`; journal records are digest-inert and
 therefore do not invalidate a prior approval. Re-running appends evidence.
+
+### Report-backed evidence
+
+`[test] report = "<path>"` names the JUnit XML report the runner writes,
+repository-relative and outside `telos/`. `{report}` in `[test] cmd` is
+substituted with that path as argument data exactly like `{filter}`; a
+runner that always writes to a fixed path needs no placeholder. Before every
+run Telos deletes the report if it exists; after the run it reads it back.
+The exit status is then diagnostic only.
+
+A `testcase` is named after the scenario when its `name` attribute contains
+`scn_NNNN` at an identifier boundary — the same predicate as discovery.
+`classname` is ignored. A testcase with a `failure` or `error` child is
+failed; with a `skipped` child, skipped; otherwise passed. Over the
+testcases named after the scenario, in this order: any failed → **red**;
+otherwise any skipped → not executed; otherwise any passed → **green**;
+otherwise not executed. Every `testcase` in the document counts, whether the
+root is `testsuites` or `testsuite`.
+
+"Not executed" is `TELOS_TEST_NOT_EXECUTED`, nothing is journalled, and the
+message is one of four frozen sentences (`<path>` the configured report,
+`scn_NNNN` the scenario's pattern):
+
+| Reason | Message |
+|---|---|
+| no file at the report path after the run | `` the runner did not write the report at `<path>` `` |
+| unreadable or malformed XML | `` the report at `<path>` is not valid JUnit XML: <parser error> `` |
+| no testcase named after the scenario | `` the report at `<path>` contains no testcase named after `scn_NNNN` `` |
+| testcases named after the scenario, none failed, `<n>` skipped | `` <n> testcase(s) named after `scn_NNNN` were skipped in the report at `<path>` `` |
+
+The hint is always
+`` make the runner execute the test named after `scn_NNNN` and write the report, then run `telos test SCN-NNNN` again ``.
+A compile error, a missing dependency, or a runner that selected nothing all
+land here rather than as red or green. Under `--all` the first such verdict
+aborts the loop; runs already taken stay journalled. The parser refuses XML
+that carries a `<!DOCTYPE>` declaration — entity expansion is never
+processed — so such a report reads as `not valid JUnit XML`.
+
+Wiring a report: `cargo nextest run --profile <p> {filter}` with a junit
+profile, `pytest --junitxml={report} -k {filter}`, `gotestsum --junitfile
+{report} -- -run {filter}` (behind a runner script, since pipes are refused),
+`jest --ci --reporters=jest-junit -t {filter}` with `JEST_JUNIT_OUTPUT_FILE`,
+`phpunit --log-junit {report} --filter {filter}`, `dotnet test --logger
+"junit;LogFilePath={report}" --filter {filter}`. Keep the report path out of
+the `[code]`/`[tests]` globs and in `.gitignore`.
 
 ### Display and runner-template execution
 
@@ -636,10 +713,10 @@ which only happens if the complaint is always the *first* thing wrong:
 | 5 | effective configuration validation, then the overlay (the delta's post-spec must parse, resolve references, validate active intents and events, type-check literals, and preserve referential integrity) | invalid globs/configuration use their exact `TELOS_PARSE_ERROR` or `TELOS_INTEGRITY_VIOLATION`; otherwise whatever `TELOS_*` diagnostic the semantic pass raises first |
 | 6 | no unbound code, evaluated over the post model | `TELOS_ORPHAN_CODE` |
 | 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages its owning `telos/contexts/<context>/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`; the error names the uncovered path and owning bindings file |
-| 8 | sealed red/green witness for every new or changed scenario | `TELOS_SCENARIO_RED_EXPECTED` or `TELOS_TEST_SEALED` under strict policy; warnings under advisory policy |
+| 8 | sealed red/green witness for every new or changed scenario | `TELOS_SCENARIO_RED_EXPECTED` or `TELOS_TEST_SEALED` under strict policy; `TELOS_TEST_NOT_EXECUTED` when `[test] report` is configured and the scenario's witnesses were taken by exit status; warnings under advisory policy |
 | 9 | sealable structure: every active scenario has at least one `proves`, and any active obligation has a nonblank runner | `TELOS_INTEGRITY_VIOLATION`, ``active scenario SCN-NNNN has no `proves` binding``; then `TELOS_TEST_NOT_FOUND` for no runner |
 | 10 | constraint checks, for the constraints this delta puts in scope | `TELOS_CONSTRAINT_FAILED` |
-| 11 | tests, one run per distinct `proves` target of the impacted scenarios | `TELOS_INTEGRITY_VIOLATION`, `` the test run for `<target>` failed `` |
+| 11 | tests, one run per distinct `proves` target of the impacted scenarios | `TELOS_INTEGRITY_VIOLATION`, `` the test run for `<target>` failed ``; with `[test] report`, `TELOS_TEST_NOT_EXECUTED`, `` the test run for `<target>` did not execute SCN-NNNN: <reason> `` |
 
 Immediately before gates 10–11, reconcile records a snapshot captured before
 checks/tests: the complete current spec path/OID map and every bound code/proof
@@ -663,6 +740,21 @@ first missing red witness, missing green witness, or changed witness bytes;
 `"advisory"` reconciles and returns each same frozen verdict in
 `result.witness_warnings`. Both `approved` and `implementing` changes owe
 reconciliation, and a journal is folded into the post-model before gates 5–11.
+
+With `[test] report` configured, gate 8 reads only `report` runs. When the
+filtered verdict is not intact and the journal holds an `exit-status` run
+for the scenario, the refusal is `TELOS_TEST_NOT_EXECUTED` with message
+`` scenario SCN-NNNN's witness was taken by exit status; `[test] report` is configured ``
+and hint `` run `telos test SCN-NNNN` again to record a report-backed red and green ``
+(a warning under `advisory`). Gate 11 runs each impacted target once and
+judges the run for every impacted scenario the target proves, in scenario-id
+order: a red keeps the integrity refusal above; a report that does not prove
+the scenario is `TELOS_TEST_NOT_EXECUTED` with message
+`` the test run for `<target>` did not execute SCN-NNNN: <reason> `` — `<reason>`
+one of the four sentences of the `test` section — and hint
+`` run the configured executable with the displayed arguments and inspect the report, then reconcile again ``.
+The seal records `proof_evidence = "report"` from the effective
+configuration.
 
 #### The carry-over: drift another open change claims is never sealed here
 
@@ -701,6 +793,9 @@ code) is unchanged; 9 requires all active proof bindings and a runner; 10
 runs the `check` of **every** constraint that has one. Gate 11 invokes
 `[test] cmd` with `{filter}` empty exactly once when the model contains at
 least one active intent, and zero times when all intents are draft/deprecated.
+With `[test] report` configured that single run's report is judged for every
+active scenario that has a `proves` binding, in scenario-id order, with the
+same two refusals as gate 11 and `<target>` being `the whole suite`.
 `result.ops_applied` is always `0` under `--full` (no ops — nothing was
 staged, the state was simply found and re-proved). Open changes are
 tolerated and left untouched (their files, still open), and the seal this
@@ -1023,7 +1118,7 @@ JSON output is the complete typed configuration:
   "result": {
     "code": {"globs": ["src/**/*.rs"]},
     "tests": {"globs": ["tests/**/*.rs"]},
-    "test": {"cmd": "cargo test {filter}"},
+    "test": {"cmd": "cargo test {filter}", "report": ""},
     "policy": {"tdd": "strict"},
     "agents": {"hosts": ["claude", "codex"]}
   },
@@ -1032,12 +1127,28 @@ JSON output is the complete typed configuration:
 }
 ```
 
+`test.report` is the repository-relative path of the JUnit XML report the
+runner writes (`""` when unset — exit-status evidence; see the `test`
+section). It must be a code path outside `telos/`: a path under the spec
+tree is `TELOS_PARSE_ERROR` with message
+`` invalid [test] report: `<path>` is under the spec tree `` and hint
+`` write the report outside telos/, e.g. `target/telos-report.xml` ``. A
+`{report}` placeholder in `test.cmd` requires it: otherwise
+`TELOS_PARSE_ERROR` with message
+`` invalid [test] cmd: `{report}` is used but `[test] report` is not configured ``
+and hint
+`` set [test] report to the repository-relative path the runner writes its JUnit XML report to ``.
+Both checks run wherever the configuration is validated (the validation
+matrix below), so no surface executes a runner under an incoherent `[test]`.
+On the write side `test.report` is optional and defaults to `""`.
+
 Write mode reads one complete JSON object of that same nested shape from
-stdin. Partial objects, unknown fields, an invalid `policy.tdd`, or an invalid
-glob are `TELOS_PARSE_ERROR`. `policy.tdd` is exactly `"strict"` or
-`"advisory"`. The normalized, sorted/deduplicated `agents.hosts` must equal
-the current value: `telos config` preserves this `init --agents` project
-metadata and never installs or deletes host artifacts.
+stdin. Partial objects (`test.report` excepted), unknown fields, an invalid
+`policy.tdd`, or an invalid glob are `TELOS_PARSE_ERROR`. `policy.tdd` is
+exactly `"strict"` or `"advisory"`. The normalized, sorted/deduplicated
+`agents.hosts` must equal the current value: `telos config` preserves this
+`init --agents` project metadata and never installs or deletes host
+artifacts.
 
 The target change must exist and be `open` or `drafted`. The ordinary
 unclaimed-drift and one-file/one-change claim gates run first. Success stages
@@ -1057,7 +1168,7 @@ reconcile's globs, test runner, and TDD policy.
     "config": {
       "code": {"globs": ["src/**/*.rs"]},
       "tests": {"globs": ["tests/**/*.rs"]},
-      "test": {"cmd": "cargo test {filter}"},
+      "test": {"cmd": "cargo test {filter}", "report": ""},
       "policy": {"tdd": "advisory"},
       "agents": {"hosts": ["claude", "codex"]}
     }
@@ -1072,7 +1183,7 @@ reconcile's globs, test runner, and TDD policy.
 The same canonical validators are authoritative at every trust boundary; a
 hand-edited change cannot bypass the CLI staging checks.
 
-| Boundary | Glob validation | agents.hosts validation | Refusal effect |
+| Boundary | Glob and `[test]` validation | agents.hosts validation | Refusal effect |
 |---|---|---|---|
 | `config --change` | compile with runtime walker semantics | normalized value must equal base | config/change/counters unchanged |
 | `change approve` | revalidate effective config | revalidate transition from base | change stays drafted and gains no digest |
@@ -1328,10 +1439,15 @@ with the target substituted for `{filter}`. One target shared by multiple
 scenarios is still invoked once globally; the identical cached outcome and
 display command are projected into every owning row. A scenario is green iff
 it has at least one proof and **all** proof targets are safe, present,
-resolvable, and exit zero. No proof, a missing/unsafe file, a stale named test,
-or any non-zero runner exit produces an explanatory red row, not a command
-failure. A missing or blank runner is `TELOS_TEST_NOT_FOUND` because progress
-cannot be measured. Each test row has exactly `test`, `green`, and the literal
+resolvable, and exit zero. With `[test] report` configured, "exit zero"
+becomes "the run's report gives the row's scenario a green verdict" (the
+`test` section's rule); a target shared by several scenarios is still run
+once, and its cached report is judged once per scenario, so two rows on one
+target may differ. A run that proves nothing, no proof, a missing/unsafe file, a stale named
+test, or any non-zero runner exit all produce an explanatory red row, not a
+command failure.
+A missing or blank runner is `TELOS_TEST_NOT_FOUND` because progress cannot
+be measured. Each test row has exactly `test`, `green`, and the literal
 substituted `command`; each scenario row has `id`, aggregate `green`, and
 `tests`.
 
@@ -1368,6 +1484,9 @@ new seal. A path claimed only by another open change is still carried over at
 its previously sealed OID and does not enter this transaction's impacted set.
 
 ### Proof and constraint execution matrix
+
+Every scenario/test execution above is judged by the exit status without
+`[test] report` and by the report with it (`test` section).
 
 | Surface | Scenario/test execution | Constraint check execution |
 |---|---|---|

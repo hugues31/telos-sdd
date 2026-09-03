@@ -22,6 +22,7 @@ Route frozen error codes literally; do not reinterpret messages:
 - `TELOS_REFERENCE_UNKNOWN`: stop the mutation and resolve the named reference through bounded queries.
 - `TELOS_SCENARIO_RED_EXPECTED`: route to the implementer to record a genuine red witness.
 - `TELOS_TEST_SEALED`: stop; restore the sealed test bytes or record a new red witness before green.
+- `TELOS_TEST_NOT_EXECUTED`: route to the implementer; the scenario's test did not execute (missing report, skipped or unselected test, build failure) and must, before any witness or seal.
 - `TELOS_ORPHAN_CODE`: route to the implementer to bind legitimate code or remove unnecessary code.
 - `TELOS_CONSTRAINT_FAILED`: stop implementation and report the failed constraint.
 - `TELOS_CHANGE_STATE_INVALID`: stop and return to the phase named by `error.hint`.

@@ -21,8 +21,8 @@ pub mod scenario;
 
 pub use binding::{Binding, TestRef};
 pub use change::{
-    Change, ChangeStatus, JournalEntry, StagedOp, TestRun, Witness, constraint_path, intent_path,
-    notion_path,
+    Change, ChangeStatus, Evidence, JournalEntry, StagedOp, TestRun, Witness, constraint_path,
+    intent_path, notion_path,
 };
 pub use constraint::{Constraint, ConstraintKind, Rule, Scope};
 pub use domain::{Capability, Context, ContextDependency, ContextKind, ContextMap, NotionMapping};

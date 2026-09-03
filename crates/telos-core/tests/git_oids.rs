@@ -19,7 +19,8 @@ use tempfile::TempDir;
 use telos_core::error::ErrorCode;
 use telos_core::git::{GitRepo, MISSING_BLOB_HINT, Oid};
 use telos_core::ids::{ChangeId, RepoPath};
-use telos_core::lock::Lock;
+use telos_core::lock::{LOCK_VERSION, Lock};
+use telos_core::model::Evidence;
 
 // --- fixture plumbing ------------------------------------------------------
 
@@ -271,10 +272,11 @@ fn sample_lock() -> Lock {
     );
 
     Lock {
-        version: 2,
+        version: LOCK_VERSION,
         tool: "telos 0.12.0".to_string(),
         sealed_by: Some(ChangeId(7)),
         spec_digest: Lock::compute_digest(&spec),
+        proof_evidence: Evidence::ExitStatus,
         spec,
         code,
     }
@@ -418,8 +420,9 @@ fn lock_read_tolerates_reformatted_toml() {
         &path,
         r#"
             spec_digest = "sha256:deadbeef"
-            version     = 2
+            version     = 3
             tool = "telos 0.12.0"
+            proof_evidence = "exit-status"
 
             [code]
             "src/billing/invoice.rs" = "cccccccccccccccccccccccccccccccccccccccc"
@@ -432,10 +435,11 @@ fn lock_read_tolerates_reformatted_toml() {
 
     let lock = Lock::read(&path).unwrap().unwrap();
 
-    assert_eq!(lock.version, 2);
+    assert_eq!(lock.version, 3);
     assert_eq!(lock.tool, "telos 0.12.0");
     assert_eq!(lock.sealed_by, None);
     assert_eq!(lock.spec_digest, "sha256:deadbeef");
+    assert_eq!(lock.proof_evidence, Evidence::ExitStatus);
     assert_eq!(
         lock.spec.get(&RepoPath::new("telos/telos.toml")),
         Some(&Oid("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()))

@@ -2204,8 +2204,8 @@ fn whitespace_runner_reports_missing_runner_before_missing_red_witness() {
     let change_path = tmp.path().join(CHG_0001);
     let change = fs::read_to_string(&change_path).unwrap();
     let whitespace = change.replace(
-        "test_cmd   \"git hash-object {filter}\"",
-        "test_cmd   \"   \"",
+        "test_cmd    \"git hash-object {filter}\"",
+        "test_cmd    \"   \"",
     );
     assert_ne!(whitespace, change, "the staged runner was not found");
     fs::write(change_path, whitespace).unwrap();

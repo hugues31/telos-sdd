@@ -120,6 +120,11 @@ Staging commands accept structured input on standard input. See the
 [Billing demo](demo/billing) for the complete executable protocol. Every
 command also supports a stable `--json` envelope for agent and CI automation.
 
+Set `[test] report` in `telos/telos.toml` to the JUnit XML file your runner
+writes (and `{report}` in `[test] cmd` to tell it where): every green then
+means a test named after the scenario executed and passed, a run that
+executed nothing is refused, and `telos status` reports `proof_evidence`.
+
 If `telos status` reports later drift, use `telos adopt` to capture it or
 `telos revert` to restore the sealed state.
 

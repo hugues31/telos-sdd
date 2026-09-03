@@ -87,6 +87,8 @@ mod width {
     pub const CHANGE: usize = 6;
     /// `run`, `bind` -- the two journal lines of a change.
     pub const JOURNAL: usize = 4;
+    /// `code_glob`, `test_glob`, `test_cmd`, `test_report`, `tdd`, `agent_host`.
+    pub const CONFIG: usize = 11;
 }
 
 /// Emits one parsed file in canonical form.
@@ -664,24 +666,31 @@ pub fn emit_op(op: &StagedOp) -> String {
             config.normalize();
             let mut out = String::from("op edit config {\n");
             for glob in &config.code.globs {
-                w!(out, "  code_glob  {}\n", quote(glob));
+                keyword(&mut out, 1, "code_glob", width::CONFIG);
+                w!(out, "{}\n", quote(glob));
             }
             for glob in &config.tests.globs {
-                w!(out, "  test_glob  {}\n", quote(glob));
+                keyword(&mut out, 1, "test_glob", width::CONFIG);
+                w!(out, "{}\n", quote(glob));
             }
-            w!(out, "  test_cmd   {}\n", quote(&config.test.cmd));
+            keyword(&mut out, 1, "test_cmd", width::CONFIG);
+            w!(out, "{}\n", quote(&config.test.cmd));
+            keyword(&mut out, 1, "test_report", width::CONFIG);
+            w!(out, "{}\n", quote(&config.test.report));
+            keyword(&mut out, 1, "tdd", width::CONFIG);
             w!(
                 out,
-                "  tdd        {}\n",
+                "{}\n",
                 match config.policy.tdd {
                     crate::config::TddPolicy::Strict => "strict",
                     crate::config::TddPolicy::Advisory => "advisory",
                 }
             );
             for host in &config.agents.hosts {
+                keyword(&mut out, 1, "agent_host", width::CONFIG);
                 w!(
                     out,
-                    "  agent_host {}\n",
+                    "{}\n",
                     match host {
                         crate::config::AgentHost::Claude => "claude",
                         crate::config::AgentHost::Codex => "codex",
@@ -705,7 +714,8 @@ pub fn emit_op(op: &StagedOp) -> String {
 /// reflows nothing. Both strings are quoted like any other: a test locator
 /// is written as the single `path[::name]` string [`crate::model::TestRef`]
 /// displays, and the oid is written verbatim -- it is opaque, never
-/// parsed, only compared.
+/// parsed, only compared. The evidence word closes the line: `exit-status`
+/// or `report`.
 ///
 /// Unlike [`emit_op`], this is *not* an input of any digest: the journal is
 /// written after the approval it must not move.
@@ -716,11 +726,12 @@ pub fn emit_journal_entry(e: &JournalEntry) -> String {
             keyword(&mut out, 0, "run", width::JOURNAL);
             w!(
                 out,
-                "{} {} {} {}\n",
+                "{} {} {} {} {}\n",
                 run.scenario,
                 run.witness.as_str(),
                 quote(&run.test.to_string()),
-                quote(&run.oid.0)
+                quote(&run.oid.0),
+                run.evidence.as_str()
             );
         }
         JournalEntry::Bind { path, intent } => {
@@ -1194,9 +1205,9 @@ mod tests {
         use crate::model::ChangeStatus;
         use crate::model::change::fixtures::{
             CHANGE_EXAMPLE, JOURNAL_EXAMPLE, con_0003, empty_change, example_change,
-            implementing_change, int_0017, invoice, notion_name, run, run_oid,
+            implementing_change, int_0017, invoice, notion_name, run, run_oid, run_with,
         };
-        use crate::model::{TestRun, Witness};
+        use crate::model::{Evidence, TestRun, Witness};
 
         #[test]
         fn emit_change_reproduces_the_canonical_example_byte_for_byte() {
@@ -1215,12 +1226,20 @@ mod tests {
             assert_eq!(
                 emit_journal_entry(&run(Witness::Red)),
                 "run  SCN-0001 red \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \
-                 \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n"
+                 \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n"
             );
             assert_eq!(
                 emit_journal_entry(&run(Witness::Green)),
                 "run  SCN-0001 green \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \
-                 \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n"
+                 \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n"
+            );
+        }
+
+        #[test]
+        fn a_report_backed_run_ends_in_the_report_word() {
+            assert!(
+                emit_journal_entry(&run_with(Witness::Green, Evidence::Report))
+                    .ends_with("\" report\n")
             );
         }
 
@@ -1256,6 +1275,7 @@ mod tests {
                 witness: Witness::Green,
                 test: "tests/billing.rs".parse().unwrap(),
                 oid: run_oid(),
+                evidence: Evidence::ExitStatus,
             });
             assert!(
                 emit_journal_entry(&entry)
@@ -1282,8 +1302,8 @@ mod tests {
                 journal,
                 concat!(
                     "\n",
-                    "  run  SCN-0001 red \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
-                    "  run  SCN-0001 green \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\"\n",
+                    "  run  SCN-0001 red \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n",
+                    "  run  SCN-0001 green \"tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice\" \"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\" exit-status\n",
                     "  bind \"src/billing.rs\" -> INT-0001\n",
                     "}\n",
                 )

@@ -2,8 +2,10 @@
 //! the code its bindings reference.
 //!
 //! Writing is hand-rendered TOML, deterministic to the byte -- fixed key
-//! order, sorted tables (a free consequence of `BTreeMap`'s iteration
-//! order), LF line endings, exactly one trailing newline. The `toml` crate
+//! order (`version`, `tool`, `sealed_by`, `spec_digest`, `proof_evidence`,
+//! then the `[spec]` and `[code]` tables), sorted tables (a free consequence
+//! of `BTreeMap`'s iteration order), LF line endings, exactly one trailing
+//! newline. The `toml` crate
 //! is deliberately *not* used to serialize a `Lock`: its formatting and key
 //! ordering aren't under our control, and a lock file that isn't
 //! byte-identical between two seals of the same content would make
@@ -26,16 +28,16 @@ use sha2::{Digest, Sha256};
 use crate::error::{ErrorCode, TelosError};
 use crate::git::{GitRepo, Oid};
 use crate::ids::{ChangeId, RepoPath};
-use crate::model::TelosModel;
+use crate::model::{Evidence, TelosModel};
 use crate::repo_fs::RepoFs;
 use crate::workspace::Workspace;
 
-pub const LOCK_VERSION: u32 = 2;
+pub const LOCK_VERSION: u32 = 3;
 
 /// A parsed or in-memory `telos.lock`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lock {
-    /// Lock file format version -- `2`.
+    /// Lock file format version -- `3`.
     pub version: u32,
     /// The tool that produced this lock, e.g. `"telos 0.7.0"`.
     pub tool: String,
@@ -44,6 +46,9 @@ pub struct Lock {
     pub sealed_by: Option<ChangeId>,
     /// `"sha256:<hex>"`, over `spec` -- see [`Lock::compute_digest`].
     pub spec_digest: String,
+    /// How every proof this seal rests on was judged: `report` when the
+    /// sealing configuration had a `[test] report`, `exit-status` otherwise.
+    pub proof_evidence: Evidence,
     /// `telos.toml` plus every `.tel` file (excluding `telos/changes/` and
     /// `telos.lock` itself), by repo-relative path.
     pub spec: BTreeMap<RepoPath, Oid>,
@@ -67,24 +72,39 @@ impl Lock {
             }
         };
 
+        // The version is checked against a lenient probe first, before the
+        // full, version-3-shaped `RawLock` is required to deserialize: a
+        // lock from a different format version is expected not to have this
+        // version's fields (`proof_evidence` among them), and such a lock
+        // must fail on its version, with the actionable hint, rather than on
+        // a field it was never going to have.
+        let probed_version = toml::from_str::<RawVersion>(&src)
+            .map_err(|e| {
+                TelosError::new(
+                    ErrorCode::TelosParseError,
+                    format!("{}: {e}", path.display()),
+                )
+            })?
+            .version;
+        if probed_version != LOCK_VERSION {
+            return Err(TelosError::new(
+                ErrorCode::TelosParseError,
+                format!(
+                    "{}: unsupported lock format version {}; expected {}",
+                    path.display(),
+                    probed_version,
+                    LOCK_VERSION
+                ),
+            )
+            .hint("run `telos reconcile --full` to regenerate telos.lock"));
+        }
+
         let raw: RawLock = toml::from_str(&src).map_err(|e| {
             TelosError::new(
                 ErrorCode::TelosParseError,
                 format!("{}: {e}", path.display()),
             )
         })?;
-        if raw.version != LOCK_VERSION {
-            return Err(TelosError::new(
-                ErrorCode::TelosParseError,
-                format!(
-                    "{}: unsupported lock format version {}; expected {}",
-                    path.display(),
-                    raw.version,
-                    LOCK_VERSION
-                ),
-            )
-            .hint("run `telos reconcile --full` with Telos 0.9 to regenerate telos.lock"));
-        }
 
         let sealed_by = raw
             .sealed_by
@@ -98,11 +118,26 @@ impl Lock {
             })
             .transpose()?;
 
+        let proof_evidence = match raw.proof_evidence.as_str() {
+            "exit-status" => Evidence::ExitStatus,
+            "report" => Evidence::Report,
+            other => {
+                return Err(TelosError::new(
+                    ErrorCode::TelosParseError,
+                    format!(
+                        "{}: invalid `proof_evidence` value `{other}`; expected `exit-status` or `report`",
+                        path.display()
+                    ),
+                ));
+            }
+        };
+
         Ok(Some(Lock {
             version: raw.version,
             tool: raw.tool,
             sealed_by,
             spec_digest: raw.spec_digest,
+            proof_evidence,
             spec: into_oid_map(raw.spec, path)?,
             code: into_oid_map(raw.code, path)?,
         }))
@@ -110,10 +145,10 @@ impl Lock {
 
     /// Writes `self` to `path` as canonical, deterministic TOML: `version`,
     /// `tool`, `sealed_by` (omitted entirely when `None`, else the
-    /// `"CHG-NNNN"` string), `spec_digest`, then a `[spec]` table and a
-    /// `[code]` table, each with its entries sorted by path (guaranteed by
-    /// `BTreeMap`'s iteration order) and quoted as TOML keys. LF line
-    /// endings throughout, exactly one trailing newline.
+    /// `"CHG-NNNN"` string), `spec_digest`, `proof_evidence`, then a `[spec]`
+    /// table and a `[code]` table, each with its entries sorted by path
+    /// (guaranteed by `BTreeMap`'s iteration order) and quoted as TOML keys.
+    /// LF line endings throughout, exactly one trailing newline.
     pub fn write(&self, path: &Path) -> Result<(), TelosError> {
         fs::write(path, self.render()).map_err(|e| {
             TelosError::new(
@@ -128,7 +163,7 @@ impl Lock {
             .write(&RepoPath::new("telos/telos.lock"), self.render().as_bytes())
     }
 
-    fn render(&self) -> String {
+    pub fn render(&self) -> String {
         let mut out = String::new();
         // `write!`/`writeln!` on a `String` only fail on a `fmt::Display`
         // impl erroring, which none of these types do -- `.unwrap()` is
@@ -139,6 +174,12 @@ impl Lock {
             writeln!(out, "sealed_by = {}", quote(&id.to_string())).unwrap();
         }
         writeln!(out, "spec_digest = {}", quote(&self.spec_digest)).unwrap();
+        writeln!(
+            out,
+            "proof_evidence = {}",
+            quote(self.proof_evidence.as_str())
+        )
+        .unwrap();
 
         out.push('\n');
         out.push_str("[spec]\n");
@@ -176,7 +217,7 @@ impl Lock {
 /// Computes a fresh [`Lock`] from a live workspace: OIDs of
 /// [`Workspace::spec_files`] as `spec`, and the deduplicated
 /// [`crate::model::Binding::code_path`] of every binding in `model` as
-/// `code`.
+/// `code`, and the kind of evidence `ws`'s `[test]` section produces.
 ///
 /// A binding that names a code file missing from disk at seal time is
 /// `TelosIntegrityViolation`, naming the path -- a binding cannot be sealed
@@ -239,6 +280,7 @@ pub fn seal(
         tool: format!("telos {}", crate::VERSION),
         sealed_by,
         spec_digest,
+        proof_evidence: ws.config.test.evidence(),
         spec,
         code,
     })
@@ -266,6 +308,14 @@ fn quote(s: &str) -> String {
     q
 }
 
+/// Just enough of a lock file to read its `version` -- ignoring every other
+/// key, `toml` fashion -- so [`Lock::read`] can reject an older format on
+/// its version rather than on a field that format never had.
+#[derive(Debug, Deserialize)]
+struct RawVersion {
+    version: u32,
+}
+
 /// The shape `toml::from_str` deserializes into: plain strings throughout,
 /// tolerant of whatever formatting produced the file. [`Lock::read`]
 /// converts this into the typed [`Lock`], which is where a malformed
@@ -277,6 +327,7 @@ struct RawLock {
     #[serde(default)]
     sealed_by: Option<String>,
     spec_digest: String,
+    proof_evidence: String,
     #[serde(default)]
     spec: BTreeMap<String, String>,
     #[serde(default)]
@@ -308,6 +359,7 @@ fn into_oid_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Evidence;
 
     #[test]
     fn compute_digest_of_empty_spec_is_the_empty_hash() {
@@ -319,13 +371,13 @@ mod tests {
     }
 
     #[test]
-    fn read_rejects_the_v1_lock_format_with_an_actionable_hint() {
+    fn read_rejects_an_older_lock_format_with_an_actionable_hint() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("telos.lock");
         std::fs::write(
             &path,
             concat!(
-                "version = 1\n",
+                "version = 2\n",
                 "tool = \"telos 0.12.0\"\n",
                 "spec_digest = \"sha256:old\"\n",
                 "\n[spec]\n",
@@ -336,11 +388,52 @@ mod tests {
 
         let error = Lock::read(&path).unwrap_err();
         assert_eq!(error.code, ErrorCode::TelosParseError);
-        assert!(error.message.contains("lock format version 1"));
+        assert!(error.message.contains("lock format version 2"));
         assert_eq!(
             error.hint.as_deref(),
-            Some("run `telos reconcile --full` with Telos 0.9 to regenerate telos.lock")
+            Some("run `telos reconcile --full` to regenerate telos.lock")
         );
+    }
+
+    #[test]
+    fn render_writes_proof_evidence_right_after_the_digest() {
+        let lock = Lock {
+            version: LOCK_VERSION,
+            tool: "telos 0.13.0".to_string(),
+            sealed_by: None,
+            spec_digest: Lock::compute_digest(&BTreeMap::new()),
+            proof_evidence: Evidence::Report,
+            spec: BTreeMap::new(),
+            code: BTreeMap::new(),
+        };
+        assert_eq!(
+            lock.render(),
+            format!(
+                "version = 3\ntool = \"telos 0.13.0\"\nspec_digest = \"{}\"\nproof_evidence = \"report\"\n\n[spec]\n\n[code]\n",
+                Lock::compute_digest(&BTreeMap::new())
+            )
+        );
+    }
+
+    #[test]
+    fn read_requires_a_known_proof_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("telos.lock");
+        for (body, needle) in [
+            (
+                "version = 3\ntool = \"telos 0.13.0\"\nspec_digest = \"sha256:x\"\n\n[spec]\n\n[code]\n",
+                "proof_evidence",
+            ),
+            (
+                "version = 3\ntool = \"telos 0.13.0\"\nspec_digest = \"sha256:x\"\nproof_evidence = \"vibes\"\n\n[spec]\n\n[code]\n",
+                "invalid `proof_evidence` value `vibes`",
+            ),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let error = Lock::read(&path).unwrap_err();
+            assert_eq!(error.code, ErrorCode::TelosParseError);
+            assert!(error.message.contains(needle), "{}", error.message);
+        }
     }
 
     #[test]

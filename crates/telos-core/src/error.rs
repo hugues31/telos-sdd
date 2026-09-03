@@ -48,6 +48,11 @@ pub enum ErrorCode {
     /// No test runner configured, or `telos test`/`witness_verdict`'s test
     /// discovery found zero or more than one candidate.
     TelosTestNotFound,
+    /// A run proved nothing about the scenario: with `[test] report`
+    /// configured, the report is missing, invalid, names no testcase for the
+    /// scenario, or every such testcase was skipped -- or a sealed witness was
+    /// taken by exit status while a report is configured.
+    TelosTestNotExecuted,
 }
 
 /// A non-localized engine error: a code, a human-readable message, and an
@@ -116,7 +121,7 @@ mod tests {
     #[test]
     fn error_code_serialization_is_frozen() -> Result<(), serde_json::Error> {
         // One assertion per variant -- this list IS the freeze. The public
-        // contract enumerates 17 identifiers; every one is checked here.
+        // contract enumerates eighteen identifiers; every one is checked here.
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosDriftDetected)?,
             "\"TELOS_DRIFT_DETECTED\""
@@ -192,6 +197,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosTestNotFound)?,
             "\"TELOS_TEST_NOT_FOUND\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosTestNotExecuted)?,
+            "\"TELOS_TEST_NOT_EXECUTED\""
         );
         Ok(())
     }

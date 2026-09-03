@@ -422,7 +422,7 @@ fn published_error_codes(contracts: &str) -> Vec<&str> {
 }
 
 /// The canonical table is an exact set, not a sampling of prose. This catches
-/// a removed code, an accidental eighteenth code, and a duplicate row.
+/// a removed code, an accidental nineteenth code, and a duplicate row.
 #[test]
 fn published_error_code_table_is_exact_and_unique() {
     let contracts = include_str!("../../../docs/contracts.md");
@@ -446,11 +446,12 @@ fn published_error_code_table_is_exact_and_unique() {
         "TELOS_GIT_ERROR",
         "TELOS_INTERNAL",
         "TELOS_TEST_NOT_FOUND",
+        "TELOS_TEST_NOT_EXECUTED",
     ]
     .into_iter()
     .collect();
 
-    assert_eq!(live.len(), 17, "the executable ErrorCode set is complete");
+    assert_eq!(live.len(), 18, "the executable ErrorCode set is complete");
     assert_eq!(
         documented.len(),
         documented_set.len(),
@@ -470,7 +471,7 @@ fn published_error_code_parser_accepts_crlf_contracts() {
     assert!(!contracts.contains("\r\r\n"));
     let documented = published_error_codes(&contracts);
 
-    assert_eq!(documented.len(), 17);
+    assert_eq!(documented.len(), 18);
     assert!(documented.contains(&"TELOS_TEST_NOT_FOUND"));
 }
 
@@ -767,7 +768,7 @@ fn published_config_validation_matrix_is_exact() {
         rows[0],
         [
             "Boundary",
-            "Glob validation",
+            "Glob and `[test]` validation",
             "agents.hosts validation",
             "Refusal effect",
         ]
@@ -1082,7 +1083,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
             "result": {
                 "code": {"globs": ["src/**/*.rs"]},
                 "tests": {"globs": ["tests/**/*.rs"]},
-                "test": {"cmd": "cargo test {filter}"},
+                "test": {"cmd": "cargo test {filter}", "report": ""},
                 "policy": {"tdd": "strict"},
                 "agents": {"hosts": ["claude", "codex"]}
             },
@@ -1115,7 +1116,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
                 "config":{
                     "code":{"globs":["src/**/*.rs"]},
                     "tests":{"globs":["tests/**/*.rs"]},
-                    "test":{"cmd":"cargo test {filter}"},
+                    "test":{"cmd":"cargo test {filter}","report":""},
                     "policy":{"tdd":"advisory"},
                     "agents":{"hosts":["claude","codex"]}
                 }

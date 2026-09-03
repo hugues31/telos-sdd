@@ -10,7 +10,6 @@
 //! that the very first seal already runs the `eol=lf` clean filter and the
 //! OIDs it records are the cross-OS ones.
 
-use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -23,7 +22,7 @@ use telos_core::config::{
 use telos_core::emit::emit_config;
 use telos_core::error::{Diagnostic, ErrorCode, TelosError};
 use telos_core::git::GitRepo;
-use telos_core::lock::{Lock, seal};
+use telos_core::lock::seal;
 use telos_core::reconcile::require_sealable_structure;
 use telos_core::workspace::Workspace;
 
@@ -658,55 +657,7 @@ fn compute_lock_bytes(root: &Path, git: &GitRepo) -> Result<Vec<u8>, TelosError>
     ws.config.validate_self()?;
     let model = ws.load_model().map_err(first_error)?;
     require_sealable_structure(&ws, &model)?;
-    Ok(render_lock(&seal(&ws, &model, git, None)?).into_bytes())
-}
-
-fn render_lock(lock: &Lock) -> String {
-    let mut out = String::new();
-    writeln!(out, "version = {}", lock.version).unwrap();
-    writeln!(out, "tool = {}", quote_lock(&lock.tool)).unwrap();
-    if let Some(id) = &lock.sealed_by {
-        writeln!(out, "sealed_by = {}", quote_lock(&id.to_string())).unwrap();
-    }
-    writeln!(out, "spec_digest = {}", quote_lock(&lock.spec_digest)).unwrap();
-    out.push_str("\n[spec]\n");
-    for (path, oid) in &lock.spec {
-        writeln!(
-            out,
-            "{} = {}",
-            quote_lock(path.as_str()),
-            quote_lock(&oid.0)
-        )
-        .unwrap();
-    }
-    out.push_str("\n[code]\n");
-    for (path, oid) in &lock.code {
-        writeln!(
-            out,
-            "{} = {}",
-            quote_lock(path.as_str()),
-            quote_lock(&oid.0)
-        )
-        .unwrap();
-    }
-    out
-}
-
-fn quote_lock(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            '\n' => quoted.push_str("\\n"),
-            '\t' => quoted.push_str("\\t"),
-            '\r' => quoted.push_str("\\r"),
-            other => quoted.push(other),
-        }
-    }
-    quoted.push('"');
-    quoted
+    Ok(seal(&ws, &model, git, None)?.render().into_bytes())
 }
 
 fn read_core(safe_root: &SafeRoot, relative: &str) -> Result<Option<Vec<u8>>, TelosError> {
@@ -1262,7 +1213,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("telos/contexts/billing")).unwrap();
         fs::write(
             tmp.path().join("telos/telos.toml"),
-            b"[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n",
+            b"[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\nreport = \"\"\n",
         )
         .unwrap();
         fs::write(

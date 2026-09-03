@@ -1023,7 +1023,7 @@ JSON output is the complete typed configuration:
   "result": {
     "code": {"globs": ["src/**/*.rs"]},
     "tests": {"globs": ["tests/**/*.rs"]},
-    "test": {"cmd": "cargo test {filter}"},
+    "test": {"cmd": "cargo test {filter}", "report": ""},
     "policy": {"tdd": "strict"},
     "agents": {"hosts": ["claude", "codex"]}
   },
@@ -1032,12 +1032,28 @@ JSON output is the complete typed configuration:
 }
 ```
 
+`test.report` is the repository-relative path of the JUnit XML report the
+runner writes (`""` when unset — exit-status evidence; see the `test`
+section). It must be a code path outside `telos/`: a path under the spec
+tree is `TELOS_PARSE_ERROR` with message
+`` invalid [test] report: `<path>` is under the spec tree `` and hint
+`` write the report outside telos/, e.g. `target/telos-report.xml` ``. A
+`{report}` placeholder in `test.cmd` requires it: otherwise
+`TELOS_PARSE_ERROR` with message
+`` invalid [test] cmd: `{report}` is used but `[test] report` is not configured ``
+and hint
+`` set [test] report to the repository-relative path the runner writes its JUnit XML report to ``.
+Both checks run wherever the configuration is validated (the validation
+matrix below), so no surface executes a runner under an incoherent `[test]`.
+On the write side `test.report` is optional and defaults to `""`.
+
 Write mode reads one complete JSON object of that same nested shape from
-stdin. Partial objects, unknown fields, an invalid `policy.tdd`, or an invalid
-glob are `TELOS_PARSE_ERROR`. `policy.tdd` is exactly `"strict"` or
-`"advisory"`. The normalized, sorted/deduplicated `agents.hosts` must equal
-the current value: `telos config` preserves this `init --agents` project
-metadata and never installs or deletes host artifacts.
+stdin. Partial objects (`test.report` excepted), unknown fields, an invalid
+`policy.tdd`, or an invalid glob are `TELOS_PARSE_ERROR`. `policy.tdd` is
+exactly `"strict"` or `"advisory"`. The normalized, sorted/deduplicated
+`agents.hosts` must equal the current value: `telos config` preserves this
+`init --agents` project metadata and never installs or deletes host
+artifacts.
 
 The target change must exist and be `open` or `drafted`. The ordinary
 unclaimed-drift and one-file/one-change claim gates run first. Success stages
@@ -1057,7 +1073,7 @@ reconcile's globs, test runner, and TDD policy.
     "config": {
       "code": {"globs": ["src/**/*.rs"]},
       "tests": {"globs": ["tests/**/*.rs"]},
-      "test": {"cmd": "cargo test {filter}"},
+      "test": {"cmd": "cargo test {filter}", "report": ""},
       "policy": {"tdd": "advisory"},
       "agents": {"hosts": ["claude", "codex"]}
     }

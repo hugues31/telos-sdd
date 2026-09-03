@@ -1796,6 +1796,9 @@ impl<'a> P<'a> {
             } else if self.at_kw("test_cmd") {
                 self.advance();
                 config.test.cmd = self.expect_str("a test command")?.node;
+            } else if self.at_kw("test_report") {
+                self.advance();
+                config.test.report = self.expect_str("a test report path")?.node;
             } else if self.at_kw("tdd") {
                 self.advance();
                 config.policy.tdd = if self.at_kw("strict") {

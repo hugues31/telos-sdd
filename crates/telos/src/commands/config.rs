@@ -34,6 +34,8 @@ struct PayloadGlobs {
 #[serde(deny_unknown_fields)]
 struct PayloadTest {
     cmd: String,
+    #[serde(default)]
+    report: String,
 }
 
 #[derive(Deserialize)]
@@ -90,6 +92,7 @@ fn stage(ctx: &Ctx, change: &str, raw: &str) -> CmdResult {
         },
         test: TestCfg {
             cmd: payload.test.cmd,
+            report: payload.test.report,
         },
         policy: Policy {
             tdd: payload.policy.tdd,

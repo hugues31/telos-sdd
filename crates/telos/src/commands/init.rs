@@ -1262,7 +1262,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("telos/contexts/billing")).unwrap();
         fs::write(
             tmp.path().join("telos/telos.toml"),
-            b"[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n",
+            b"[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\nreport = \"\"\n",
         )
         .unwrap();
         fs::write(

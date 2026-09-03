@@ -87,6 +87,8 @@ mod width {
     pub const CHANGE: usize = 6;
     /// `run`, `bind` -- the two journal lines of a change.
     pub const JOURNAL: usize = 4;
+    /// `code_glob`, `test_glob`, `test_cmd`, `test_report`, `tdd`, `agent_host`.
+    pub const CONFIG: usize = 11;
 }
 
 /// Emits one parsed file in canonical form.
@@ -664,24 +666,31 @@ pub fn emit_op(op: &StagedOp) -> String {
             config.normalize();
             let mut out = String::from("op edit config {\n");
             for glob in &config.code.globs {
-                w!(out, "  code_glob  {}\n", quote(glob));
+                keyword(&mut out, 1, "code_glob", width::CONFIG);
+                w!(out, "{}\n", quote(glob));
             }
             for glob in &config.tests.globs {
-                w!(out, "  test_glob  {}\n", quote(glob));
+                keyword(&mut out, 1, "test_glob", width::CONFIG);
+                w!(out, "{}\n", quote(glob));
             }
-            w!(out, "  test_cmd   {}\n", quote(&config.test.cmd));
+            keyword(&mut out, 1, "test_cmd", width::CONFIG);
+            w!(out, "{}\n", quote(&config.test.cmd));
+            keyword(&mut out, 1, "test_report", width::CONFIG);
+            w!(out, "{}\n", quote(&config.test.report));
+            keyword(&mut out, 1, "tdd", width::CONFIG);
             w!(
                 out,
-                "  tdd        {}\n",
+                "{}\n",
                 match config.policy.tdd {
                     crate::config::TddPolicy::Strict => "strict",
                     crate::config::TddPolicy::Advisory => "advisory",
                 }
             );
             for host in &config.agents.hosts {
+                keyword(&mut out, 1, "agent_host", width::CONFIG);
                 w!(
                     out,
-                    "  agent_host {}\n",
+                    "{}\n",
                     match host {
                         crate::config::AgentHost::Claude => "claude",
                         crate::config::AgentHost::Codex => "codex",

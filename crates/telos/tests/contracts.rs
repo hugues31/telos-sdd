@@ -1082,7 +1082,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
             "result": {
                 "code": {"globs": ["src/**/*.rs"]},
                 "tests": {"globs": ["tests/**/*.rs"]},
-                "test": {"cmd": "cargo test {filter}"},
+                "test": {"cmd": "cargo test {filter}", "report": ""},
                 "policy": {"tdd": "strict"},
                 "agents": {"hosts": ["claude", "codex"]}
             },
@@ -1115,7 +1115,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
                 "config":{
                     "code":{"globs":["src/**/*.rs"]},
                     "tests":{"globs":["tests/**/*.rs"]},
-                    "test":{"cmd":"cargo test {filter}"},
+                    "test":{"cmd":"cargo test {filter}","report":""},
                     "policy":{"tdd":"advisory"},
                     "agents":{"hosts":["claude","codex"]}
                 }

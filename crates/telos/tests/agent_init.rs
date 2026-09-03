@@ -143,7 +143,7 @@ fn init_persists_normalized_agent_hosts_in_project_configuration() {
 
     assert_eq!(
         read(tmp.path(), "telos/telos.toml"),
-        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
+        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\nreport = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = [\"claude\", \"codex\"]\n"
     );
 }
 

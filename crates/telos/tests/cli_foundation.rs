@@ -103,7 +103,7 @@ fn init_creates_the_whole_telos_tree() {
     }
     assert_eq!(
         fs::read_to_string(telos_dir.join("telos.toml")).unwrap(),
-        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = []\n"
+        "[code]\nglobs = []\n\n[tests]\nglobs = []\n\n[test]\ncmd = \"\"\nreport = \"\"\n\n[policy]\ntdd = \"strict\"\n\n[agents]\nhosts = []\n"
     );
     assert_eq!(
         fs::read_to_string(telos_dir.join("context-map.tel")).unwrap(),

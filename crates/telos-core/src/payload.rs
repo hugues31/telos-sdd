@@ -649,6 +649,14 @@ fn instance_step_from_json(
 /// `money` amount -- is the semantic pass's job, once the whole model
 /// exists to check it against; this boundary only ever needs to decide,
 /// from the JSON value alone, which `Literal` variant it becomes.
+///
+/// The one lexeme this boundary does check is a `decimal`'s. The string
+/// is stored verbatim, emitted verbatim into the change file, and read
+/// back by the lexer -- so anything but a `decimal-lit` would come back as
+/// a different variant (`"2"` as an `Int` the semantic pass rejects at
+/// reconcile, long after staging accepted it) or not lex at all. Nothing
+/// downstream ever sees that string as a decimal again, so the check has
+/// to happen here, where the attribute is still in hand to name.
 fn literal_from_field_json(
     v: &Value,
     attr: &Attr,
@@ -668,7 +676,14 @@ fn literal_from_field_json(
                     "decimal values must be JSON strings to avoid float hazards".to_string(),
                 ));
             }
-            Ok(Literal::Decimal(as_str(v, field.as_str())?.to_string()))
+            let lexeme = as_str(v, field.as_str())?;
+            if !is_decimal_lexeme(lexeme) {
+                return Err(shape_err(format!(
+                    "field `{notion}.{field}` has type `decimal`, but `{lexeme}` is not \
+                     a decimal of the form `120.50`; a whole number is written `2.0`"
+                )));
+            }
+            Ok(Literal::Decimal(lexeme.to_string()))
         }
         AttrType::Money => Ok(Literal::Str(as_str(v, field.as_str())?.to_string())),
         AttrType::Bool => Ok(Literal::Bool(as_bool(v, field.as_str())?)),
@@ -680,6 +695,21 @@ fn literal_from_field_json(
             "ref attributes cannot be set from payloads".to_string(),
         )),
     }
+}
+
+/// `^-?\d+\.\d+$` -- the canonical `decimal-lit` lexeme, exactly the
+/// strings the lexer turns into one `Decimal` token (see
+/// `syntax::lexer`'s `lex_number`): an optional `-`, at least one ASCII
+/// digit, a `.`, at least one ASCII digit. No exponent, no leading `+`, no
+/// bare `.5` or `2.`, and no surrounding whitespace either, since the string
+/// is stored and emitted as is.
+fn is_decimal_lexeme(s: &str) -> bool {
+    let unsigned = s.strip_prefix('-').unwrap_or(s);
+    let Some((units, fraction)) = unsigned.split_once('.') else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    digits(units) && digits(fraction)
 }
 
 fn unknown_notion_err(name: &NotionName, notions: &BTreeMap<NotionName, Notion>) -> TelosError {
@@ -1632,6 +1662,80 @@ mod tests {
             step.fields,
             vec![(sp(field("price")), Literal::Decimal("120.50".to_string()))]
         );
+    }
+
+    /// The lexeme is stored and re-emitted verbatim, then read back by the
+    /// lexer: `"2"` would come back as an `Int` and fail typing at reconcile
+    /// after staging had accepted it. The boundary refuses it, naming the
+    /// attribute and the fix.
+    #[test]
+    fn given_field_decimal_string_that_is_not_a_decimal_lexeme_is_rejected_naming_the_attribute() {
+        let mut notions = BTreeMap::new();
+        notions.insert(
+            name("Product"),
+            Notion {
+                name: name("Product"),
+                kind: NotionKind::Entity,
+                def: "x".to_string(),
+                attrs: vec![Attr {
+                    name: field("price"),
+                    ty: AttrType::Decimal,
+                }],
+                rels: vec![],
+            },
+        );
+        let json = serde_json::json!({"notion": "Product", "fields": {"price": "2"}});
+        let err = instance_step_from_json(&json, &notions).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TelosParseError);
+        assert_eq!(
+            err.message,
+            "payload: field `Product.price` has type `decimal`, but `2` is not a decimal \
+             of the form `120.50`; a whole number is written `2.0`"
+        );
+    }
+
+    /// What the boundary accepts is exactly what the lexer reads back as a
+    /// single `Decimal` token covering the whole string -- the round-trip
+    /// invariant the check exists for, pinned so the two cannot drift.
+    #[test]
+    fn is_decimal_lexeme_accepts_exactly_what_lexes_as_one_decimal_token() {
+        let cases = [
+            ("120.50", true),
+            ("-0.10", true),
+            ("2.0", true),
+            ("0.5", true),
+            ("2", false),
+            ("-2", false),
+            (".5", false),
+            ("2.", false),
+            ("+1.0", false),
+            ("--1.0", false),
+            ("1e5", false),
+            ("1.5.5", false),
+            ("1.5 2", false),
+            (" 1.5", false),
+            ("1.5\n", false),
+            ("2026-08-19", false),
+            ("abc", false),
+            ("", false),
+            ("\u{FF11}.\u{FF15}", false),
+        ];
+        for (lexeme, expected) in cases {
+            assert_eq!(is_decimal_lexeme(lexeme), expected, "{lexeme:?}");
+            let lexes_as_one_decimal = match lex(lexeme) {
+                Ok(toks) => matches!(
+                    toks.as_slice(),
+                    [first, eof]
+                        if first.kind == TokKind::Decimal(lexeme.to_string())
+                            && eof.kind == TokKind::Eof
+                ),
+                Err(_) => false,
+            };
+            assert_eq!(
+                lexes_as_one_decimal, expected,
+                "lexer disagrees on {lexeme:?}"
+            );
+        }
     }
 
     #[test]

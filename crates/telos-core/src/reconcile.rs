@@ -244,7 +244,7 @@ pub fn reconcile_change(
     let publication_spec = spec.clone();
     let mut fresh = lock_from_maps(spec, proven.code.clone(), Some(change.id));
     carry_over(&mut fresh, lock, &carried);
-    require_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
+    store_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
     fresh.write_to_workspace(ws)?;
     require_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
     delete_change(ws, change.id)?;
@@ -336,7 +336,7 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
 
     require_unchanged_snapshot(ws, git, &proven)?;
     let lock = lock_from_maps(proven.spec.clone(), proven.code.clone(), None);
-    require_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
+    store_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
     lock.write_to_workspace(ws)?;
     require_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
 
@@ -417,19 +417,54 @@ fn require_code_snapshot(
     require_exact_oids(git, expected, "bound code or proof files")
 }
 
+/// Verifies, read-only, that the tree still hashes to the maps a lock
+/// records: the check that brackets the lock write on both sides.
 fn require_publication_snapshot(
     ws: &Workspace,
     git: &GitRepo,
     spec: &BTreeMap<RepoPath, Oid>,
     code: &BTreeMap<RepoPath, Oid>,
 ) -> Result<(), TelosError> {
+    publication_snapshot(ws, git, spec, code, GitRepo::blob_oids)
+}
+
+/// [`require_publication_snapshot`] hashed through [`GitRepo::store_blobs`]
+/// instead of `blob_oids`: the same check, and as its side effect every
+/// object the lock is about to name is now in the object store. Called
+/// exactly once, immediately before the lock is written -- the moment
+/// these OIDs become a seal is the moment their content has to be
+/// recoverable, commit or no commit, or `telos revert` cannot honour it.
+///
+/// A path whose bytes cannot be stored (git refuses, the file vanished) is
+/// therefore caught here, at seal time, rather than the day a revert needs
+/// it.
+fn store_publication_snapshot(
+    ws: &Workspace,
+    git: &GitRepo,
+    spec: &BTreeMap<RepoPath, Oid>,
+    code: &BTreeMap<RepoPath, Oid>,
+) -> Result<(), TelosError> {
+    publication_snapshot(ws, git, spec, code, GitRepo::store_blobs)
+}
+
+/// One `GitRepo` hashing entry point, `blob_oids` or `store_blobs`: the two
+/// hash identically and differ only in whether the object is written.
+type BlobHasher = fn(&GitRepo, &[RepoPath]) -> Result<BTreeMap<RepoPath, Oid>, TelosError>;
+
+fn publication_snapshot(
+    ws: &Workspace,
+    git: &GitRepo,
+    spec: &BTreeMap<RepoPath, Oid>,
+    code: &BTreeMap<RepoPath, Oid>,
+    hash: BlobHasher,
+) -> Result<(), TelosError> {
     let current_spec_paths = ws.spec_files()?;
     let expected_spec_paths = spec.keys().cloned().collect::<Vec<_>>();
     if current_spec_paths != expected_spec_paths {
         return Err(snapshot_changed("the specification tree"));
     }
-    require_exact_oids(git, spec, "the specification tree")?;
-    require_exact_oids(git, code, "bound code or proof files")
+    require_exact_oids_via(git, spec, "the specification tree", hash)?;
+    require_exact_oids_via(git, code, "bound code or proof files", hash)
 }
 
 fn require_exact_oids(
@@ -437,8 +472,17 @@ fn require_exact_oids(
     expected: &BTreeMap<RepoPath, Oid>,
     subject: &str,
 ) -> Result<(), TelosError> {
+    require_exact_oids_via(git, expected, subject, GitRepo::blob_oids)
+}
+
+fn require_exact_oids_via(
+    git: &GitRepo,
+    expected: &BTreeMap<RepoPath, Oid>,
+    subject: &str,
+    hash: BlobHasher,
+) -> Result<(), TelosError> {
     let paths = expected.keys().cloned().collect::<Vec<_>>();
-    let current = git.blob_oids(&paths)?;
+    let current = hash(git, &paths)?;
     if &current != expected {
         return Err(snapshot_changed(subject));
     }

@@ -178,7 +178,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_CYCLE_DETECTED` | A cycle exists on `requires` or `refines`. | None today — `message` renders the cycle's path (`` INT-0001 → INT-0002 → INT-0001 ``). |
 | `TELOS_GIT_ERROR` | `git rev-parse --show-toplevel` failed (most commonly: not inside a git repository). | `` not a git repository; run `git init` `` |
 | `TELOS_GIT_ERROR` | The `git` binary itself could not be spawned (missing from `PATH`). | None — `message` names the underlying I/O error. |
-| `TELOS_GIT_ERROR` | `revert`'s `git cat-file blob <oid>` fails — the sealed OID names a blob the object store does not hold (a project sealed but never committed; message `` `git cat-file blob <oid>` failed: <stderr> ``). **Not** `TELOS_INTEGRITY_VIOLATION` — a seal records OIDs, it never writes objects, so a missing blob is git's own diagnosis, not a spec integrity one. | the frozen `MISSING_BLOB_HINT`: `` the sealed content is not in the git object store; commit the sealed state or restore the file by hand `` |
+| `TELOS_GIT_ERROR` | `revert`'s `git cat-file blob <oid>` fails — the sealed OID names a blob the object store does not hold (a lock sealed by an older `telos`, or an unreachable object git has pruned; message `` `git cat-file blob <oid>` failed: <stderr> ``). Every seal writes its objects (`git hash-object -w`), so a project sealed but never committed is *not* this case. **Not** `TELOS_INTEGRITY_VIOLATION` — a missing blob is git's own diagnosis, not a spec integrity one. | the frozen `MISSING_BLOB_HINT`: `` the sealed content is not in the git object store; commit the sealed state or restore the file by hand `` |
 | `TELOS_INTERNAL` | An internal invariant broke — a bug, not a spec or usage problem. | None. |
 
 `TELOS_TEST_NOT_FOUND` has four exact forms. No runner is
@@ -899,12 +899,15 @@ The mirror image: every sealed path is restored from the blob its OID
 names, every unsealed path is deleted. Destructive (no undo beyond what git
 already holds) and not atomic (a failure part-way leaves what was already
 restored restored — strictly closer to the seal than where it started, and
-safe to re-run). Needs the sealed content in the object store — a seal
-records OIDs, it does not write objects — so a project sealed but never
-committed gets **`TELOS_GIT_ERROR`** (not `TELOS_INTEGRITY_VIOLATION` — a
-missing blob is git's own diagnosis, `git cat-file blob` failing, not a
-spec integrity one) with the frozen `MISSING_BLOB_HINT` rather than
-silently restoring nothing.
+safe to re-run). Needs the sealed content in the object store, and every
+seal puts it there (`git hash-object -w` at `init` and at each reconcile),
+so a project sealed but never committed reverts like any other. The objects
+stay unreachable until a commit names them; should git prune them first
+(`gc.pruneExpire`, two weeks by default), or should the lock predate this
+behaviour, `revert` gets **`TELOS_GIT_ERROR`** (not
+`TELOS_INTEGRITY_VIOLATION` — a missing blob is git's own diagnosis, `git
+cat-file blob` failing, not a spec integrity one) with the frozen
+`MISSING_BLOB_HINT` rather than silently restoring nothing.
 
 Every restoration/deletion uses the same validated repository path contract
 as `bind`, plus capability-rooted no-follow mutation. A symlink or parent-path

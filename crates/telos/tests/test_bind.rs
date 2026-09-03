@@ -406,7 +406,7 @@ fn test_appends_the_exact_journal_line_to_the_owning_change() {
     let oid = blob_oid(tmp.path(), BILLING_TEST);
     assert!(
         change_file(tmp.path()).contains(&format!(
-            "  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\"\n"
+            "  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status\n"
         )),
         "{}",
         change_file(tmp.path())
@@ -436,8 +436,8 @@ fn a_second_run_appends_rather_than_replacing_the_first() {
     assert_eq!(
         runs,
         vec![
-            format!("  run  {SCN} green \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\""),
-            format!("  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\""),
+            format!("  run  {SCN} green \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status"),
+            format!("  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status"),
         ]
     );
 }

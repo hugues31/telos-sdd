@@ -336,6 +336,7 @@ fn find_base_intent(base: &[(RepoPath, TelFile)], id: IntentId) -> Option<&Inten
 mod tests {
     use super::*;
     use crate::config::{Config, Globs};
+    use crate::model::Evidence;
     use crate::span::Span;
 
     // --- scenario_pattern --------------------------------------------------
@@ -530,6 +531,7 @@ mod tests {
                 name: None,
             },
             oid: oid(oid_str),
+            evidence: Evidence::ExitStatus,
         })
     }
 

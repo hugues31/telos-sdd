@@ -45,7 +45,8 @@ use telos_core::error::{ErrorCode, TelosError};
 use telos_core::exec::run_shell_with_filter;
 use telos_core::ids::{ChangeId, RepoPath, ScenarioId};
 use telos_core::model::{
-    Change, ChangeStatus, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun, Witness,
+    Change, ChangeStatus, Evidence, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun,
+    Witness,
 };
 use telos_core::overlay::parse_base;
 use telos_core::witness::{find_test_for, required_witnesses};
@@ -399,6 +400,7 @@ fn journal_run(
         witness,
         test: test.clone(),
         oid,
+        evidence: Evidence::ExitStatus,
     }));
     if change.status == ChangeStatus::Approved {
         change.status = ChangeStatus::Implementing;

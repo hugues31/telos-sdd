@@ -435,6 +435,31 @@ impl Witness {
     }
 }
 
+/// How a run's verdict was decided.
+///
+/// `ExitStatus` is the runner's exit code alone: 0 read as green, anything
+/// else as red, with nothing saying whether a test ran at all. `Report` is a
+/// JUnit XML report the runner wrote, in which a testcase named after the
+/// scenario passed or failed -- the only reading under which green means
+/// "executed and passed". The word is part of the `run` line so a reconcile
+/// can tell the two apart (`docs/contracts.md`, gate 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Evidence {
+    ExitStatus,
+    Report,
+}
+
+impl Evidence {
+    /// The keyword this evidence is written as on a `run` line, in
+    /// `telos.lock`'s `proof_evidence`, and in `--json` results.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Evidence::ExitStatus => "exit-status",
+            Evidence::Report => "report",
+        }
+    }
+}
+
 /// One recorded execution of one scenario's test.
 ///
 /// `oid` is the blob oid of the test *file* at the moment of the run, not a
@@ -442,12 +467,16 @@ impl Witness {
 /// taken on these bytes, and the bytes have not moved since". There is no
 /// timestamp -- goldens must be deterministic, and the chronology is the
 /// journal's append order.
+///
+/// `evidence` says whether the verdict came from the exit status or a
+/// report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestRun {
     pub scenario: ScenarioId,
     pub witness: Witness,
     pub test: TestRef,
     pub oid: Oid,
+    pub evidence: Evidence,
 }
 
 /// One line of a change's journal: a test run, or a code file bound to an
@@ -874,6 +903,19 @@ pub(crate) mod fixtures {
             witness,
             test: billing_test(),
             oid: run_oid(),
+            evidence: Evidence::ExitStatus,
+        })
+    }
+
+    /// One run of the example's scenario, on either verdict and either kind
+    /// of evidence.
+    pub(crate) fn run_with(witness: Witness, evidence: Evidence) -> JournalEntry {
+        JournalEntry::Run(TestRun {
+            scenario: ScenarioId(1),
+            witness,
+            test: billing_test(),
+            oid: run_oid(),
+            evidence,
         })
     }
 
@@ -920,8 +962,8 @@ pub(crate) mod fixtures {
     attr state enum(open, settled)
   }
 
-  run  SCN-0001 red "tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
-  run  SCN-0001 green "tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+  run  SCN-0001 red "tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" exit-status
+  run  SCN-0001 green "tests/billing.rs::scn_0001_a_full_payment_settles_the_invoice" "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" exit-status
   bind "src/billing.rs" -> INT-0001
 }
 "#;
@@ -1507,6 +1549,7 @@ mod tests {
             witness: Witness::Green,
             test: billing_test(),
             oid: run_oid(),
+            evidence: Evidence::ExitStatus,
         }));
         assert_eq!(change.runs_for(ScenarioId(1)).count(), 2);
         assert_eq!(change.runs_for(ScenarioId(2)).count(), 1);

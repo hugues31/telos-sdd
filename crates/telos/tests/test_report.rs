@@ -23,6 +23,7 @@ const BILLING_TEST: &str = "tests/billing.rs";
 const SCN: &str = "SCN-0108";
 const TEST_FN: &str = "scn_0108_x";
 const SCN_0107: &str = "scn_0107_full_payment_settles_the_invoice";
+const SCN_0091: &str = "scn_0091_issued_invoice_is_open";
 const NOT_EXECUTED_HINT: &str = "make the runner execute the test named after `scn_0108` and write the report, then run `telos test SCN-0108` again";
 
 fn json_stdout(out: &std::process::Output) -> Value {
@@ -411,4 +412,214 @@ fn test_all_stops_at_the_first_unexecuted_scenario_and_keeps_earlier_runs() {
     // but must have gained no `run` journal line of its own.
     assert!(!change.contains("run  SCN-0109"), "{change}");
     assert!(change.contains("status implementing"), "{change}");
+}
+
+// --- reconcile ------------------------------------------------------------
+
+/// Red then green through the report, on the same bytes.
+fn witness_pair_through_the_report(tmp: &TempDir) {
+    write_report_fixture(tmp.path(), &junit_report(&[(TEST_FN, "failed")]));
+    let red = json_stdout(
+        &telos(tmp.path(), &["test", SCN, "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(red["result"]["witness"], json!("red"), "{red}");
+    write_report_fixture(tmp.path(), &junit_report(&[(TEST_FN, "passed")]));
+    let green = json_stdout(
+        &telos(tmp.path(), &["test", SCN, "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(green["result"]["witness"], json!("green"), "{green}");
+}
+
+/// What gate 11 must find: every impacted target's scenario passed.
+fn impacted_all_passed() -> String {
+    junit_report(&[
+        (SCN_0091, "passed"),
+        (TEST_FN, "passed"),
+        (SCN_0107, "passed"),
+    ])
+}
+
+const RECONCILE_HINT: &str = "run the configured executable with the displayed arguments and inspect the report, then reconcile again";
+
+#[test]
+fn reconcile_reproves_every_impacted_scenario_in_the_report_and_seals_report_evidence() {
+    let tmp = approved_with_report();
+    witness_pair_through_the_report(&tmp);
+    write_report_fixture(tmp.path(), &impacted_all_passed());
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    // Three distinct targets: `tests/billing.rs` (SCN-0091), the sealed
+    // SCN-0107 test (INT-0042 requires INT-0017, so it is a dependent), and
+    // the journalled SCN-0108 test.
+    assert_eq!(json_stdout(&out)["result"]["tests_run"], json!(3));
+    let lock = fs::read_to_string(tmp.path().join("telos/telos.lock")).unwrap();
+    assert!(lock.contains("\nproof_evidence = \"report\"\n"), "{lock}");
+    let status = json_stdout(&telos(tmp.path(), &["status", "--json"]).output().unwrap());
+    assert_eq!(status["result"]["proof_evidence"], json!("report"));
+    assert_eq!(status["result"]["state"], json!("coherent"));
+}
+
+#[test]
+fn gate_11_refuses_an_impacted_scenario_the_report_skipped() {
+    let tmp = approved_with_report();
+    witness_pair_through_the_report(&tmp);
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[
+            (SCN_0091, "skipped"),
+            (TEST_FN, "passed"),
+            (SCN_0107, "passed"),
+        ]),
+    );
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(
+        json_stdout(&out)["error"],
+        json!({
+            "code": "TELOS_TEST_NOT_EXECUTED",
+            "message": format!(
+                "the test run for `tests/billing.rs` did not execute SCN-0091: 1 testcase(s) named after `scn_0091` were skipped in the report at `{REPORT}`"
+            ),
+            "hint": RECONCILE_HINT,
+        })
+    );
+    assert!(tmp.path().join("telos/changes/CHG-0001.tel").exists());
+}
+
+#[test]
+fn gate_11_keeps_the_integrity_violation_for_a_failed_impacted_test() {
+    let tmp = approved_with_report();
+    witness_pair_through_the_report(&tmp);
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[
+            (SCN_0091, "failed"),
+            (TEST_FN, "passed"),
+            (SCN_0107, "passed"),
+        ]),
+    );
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let error = json_stdout(&out)["error"].clone();
+    assert_eq!(error["code"], json!("TELOS_INTEGRITY_VIOLATION"));
+    assert_eq!(
+        error["message"],
+        json!(format!(
+            "the test run for `tests/billing.rs` failed: `{}`",
+            display("tests/billing.rs")
+        ))
+    );
+}
+
+/// Hand-writes an exit-status red/green pair into the change file, the way
+/// a journal taken before the report was configured would look.
+fn journal_exit_status_pair(dir: &Path) {
+    let path = dir.join("telos/changes/CHG-0001.tel");
+    let oid = blob_oid(dir, BILLING_TEST);
+    let src = fs::read_to_string(&path)
+        .unwrap()
+        .replace("status approved", "status implementing");
+    let (body, _) = src
+        .rsplit_once("}\n")
+        .expect("a change file ends its block");
+    fs::write(
+        &path,
+        format!(
+            "{body}\n  run  {SCN} red \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status\n  run  {SCN} green \"{BILLING_TEST}::{TEST_FN}\" \"{oid}\" exit-status\n}}\n"
+        ),
+    )
+    .unwrap();
+}
+
+const EXIT_STATUS_WITNESS: &str =
+    "scenario SCN-0108's witness was taken by exit status; `[test] report` is configured";
+
+#[test]
+fn gate_8_refuses_an_exit_status_witness_when_a_report_is_configured() {
+    let tmp = approved_with_report();
+    journal_exit_status_pair(tmp.path());
+    write_report_fixture(tmp.path(), &impacted_all_passed());
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(
+        json_stdout(&out)["error"],
+        json!({
+            "code": "TELOS_TEST_NOT_EXECUTED",
+            "message": EXIT_STATUS_WITNESS,
+            "hint": "run `telos test SCN-0108` again to record a report-backed red and green",
+        })
+    );
+}
+
+#[test]
+fn gate_8_warns_about_an_exit_status_witness_under_advisory_policy() {
+    let tmp = with_report_fixture("advisory");
+    open_change(tmp.path());
+    assert_eq!(stage_new_scenarios(tmp.path(), 1), vec![SCN.to_string()]);
+    approve(tmp.path());
+    append_test_fns(tmp.path(), &[TEST_FN]);
+    journal_exit_status_pair(tmp.path());
+    write_report_fixture(tmp.path(), &impacted_all_passed());
+
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        json_stdout(&out)["result"]["witness_warnings"],
+        json!([EXIT_STATUS_WITNESS])
+    );
+}
+
+#[test]
+fn full_reconcile_judges_every_active_scenario_against_one_report() {
+    let tmp = with_report_fixture("strict");
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[(SCN_0091, "passed"), (SCN_0107, "skipped")]),
+    );
+
+    let out = telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert_eq!(
+        json_stdout(&out)["error"],
+        json!({
+            "code": "TELOS_TEST_NOT_EXECUTED",
+            "message": format!(
+                "the test run for `the whole suite` did not execute SCN-0107: 1 testcase(s) named after `scn_0107` were skipped in the report at `{REPORT}`"
+            ),
+            "hint": RECONCILE_HINT,
+        })
+    );
+
+    write_report_fixture(tmp.path(), &common::sealed_scenarios_passed());
+    let out = telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(json_stdout(&out)["result"]["tests_run"], json!(1));
 }

@@ -155,6 +155,8 @@ this is the whole contract agent tooling routes on.
 | `TELOS_TEST_SEALED` | The bytes of a test file sealed as a red witness changed before the scenario went green — the witness no longer proves anything. | The red witness is invalid; run `telos test SCN-…` again on the current bytes before reconciling. |
 | `TELOS_TEST_NOT_FOUND` | No `[test] cmd` is configured; discovery finds zero or more than one file containing the scenario's `scn_NNNN` convention; or `--file` names no file. | The exact cases follow this table. |
 | `TELOS_TEST_NOT_EXECUTED` | `telos test` with `[test] report` configured: the report is missing, invalid, names no testcase for the scenario, or every such testcase was skipped (message: one of the four sentences in the `test` section). Nothing is journalled; under `--all` the loop stops there. | `` make the runner execute the test named after `scn_NNNN` and write the report, then run `telos test SCN-NNNN` again `` |
+| `TELOS_TEST_NOT_EXECUTED` | Gate 8 under strict policy with `[test] report` configured: the scenario's witnesses were taken by exit status (message `` scenario SCN-NNNN's witness was taken by exit status; `[test] report` is configured ``). A warning under advisory. | `` run `telos test SCN-NNNN` again to record a report-backed red and green `` |
+| `TELOS_TEST_NOT_EXECUTED` | Gate 11 or `--full` with `[test] report` configured: a run's report does not prove an impacted (respectively active) scenario (message `` the test run for `<target>` did not execute SCN-NNNN: <reason> ``, `<target>` being `the whole suite` under `--full`). | `` run the configured executable with the displayed arguments and inspect the report, then reconcile again `` |
 | `TELOS_ORPHAN_CODE` | `change reconcile`'s unbound-code gate, evaluated over the delta's post model: a file matched by `[code]`/`[tests]` globs in `telos.toml` is not covered by any `implements`/`proves` binding (message names which of the two families and the binding relation it's missing). | Bind it with `telos bind <path> <INT-id>`, or remove it from the `telos.toml` globs if it isn't spec-governed. |
 | `TELOS_CONSTRAINT_FAILED` | `change reconcile`'s constraint-checks gate: a constraint's `check` shell command exited non-zero, or could not even be spawned (message `` CON-0001 check failed: `<cmd>` ``). The command's own output is deliberately *not* included — it is not reproducible across machines (a git version, a locale, `$PATH`), so it cannot be frozen contract. | Run the constraint's `check` command directly to see its output. |
 | `TELOS_CHANGE_STATE_INVALID` | `change reconcile <id>` on a change whose status is not `approved`/`implementing` (message `` change CHG-0001 is not approved; approve it first ``). | `` run `telos change diff CHG-0001` then `telos change approve CHG-0001` `` |
@@ -709,10 +711,10 @@ which only happens if the complaint is always the *first* thing wrong:
 | 5 | effective configuration validation, then the overlay (the delta's post-spec must parse, resolve references, validate active intents and events, type-check literals, and preserve referential integrity) | invalid globs/configuration use their exact `TELOS_PARSE_ERROR` or `TELOS_INTEGRITY_VIOLATION`; otherwise whatever `TELOS_*` diagnostic the semantic pass raises first |
 | 6 | no unbound code, evaluated over the post model | `TELOS_ORPHAN_CODE` |
 | 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages its owning `telos/contexts/<context>/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`; the error names the uncovered path and owning bindings file |
-| 8 | sealed red/green witness for every new or changed scenario | `TELOS_SCENARIO_RED_EXPECTED` or `TELOS_TEST_SEALED` under strict policy; warnings under advisory policy |
+| 8 | sealed red/green witness for every new or changed scenario | `TELOS_SCENARIO_RED_EXPECTED` or `TELOS_TEST_SEALED` under strict policy; `TELOS_TEST_NOT_EXECUTED` when `[test] report` is configured and the scenario's witnesses were taken by exit status; warnings under advisory policy |
 | 9 | sealable structure: every active scenario has at least one `proves`, and any active obligation has a nonblank runner | `TELOS_INTEGRITY_VIOLATION`, ``active scenario SCN-NNNN has no `proves` binding``; then `TELOS_TEST_NOT_FOUND` for no runner |
 | 10 | constraint checks, for the constraints this delta puts in scope | `TELOS_CONSTRAINT_FAILED` |
-| 11 | tests, one run per distinct `proves` target of the impacted scenarios | `TELOS_INTEGRITY_VIOLATION`, `` the test run for `<target>` failed `` |
+| 11 | tests, one run per distinct `proves` target of the impacted scenarios | `TELOS_INTEGRITY_VIOLATION`, `` the test run for `<target>` failed ``; with `[test] report`, `TELOS_TEST_NOT_EXECUTED`, `` the test run for `<target>` did not execute SCN-NNNN: <reason> `` |
 
 Immediately before gates 10–11, reconcile records a snapshot captured before
 checks/tests: the complete current spec path/OID map and every bound code/proof
@@ -736,6 +738,21 @@ first missing red witness, missing green witness, or changed witness bytes;
 `"advisory"` reconciles and returns each same frozen verdict in
 `result.witness_warnings`. Both `approved` and `implementing` changes owe
 reconciliation, and a journal is folded into the post-model before gates 5–11.
+
+With `[test] report` configured, gate 8 reads only `report` runs. When the
+filtered verdict is not intact and the journal holds an `exit-status` run
+for the scenario, the refusal is `TELOS_TEST_NOT_EXECUTED` with message
+`` scenario SCN-NNNN's witness was taken by exit status; `[test] report` is configured ``
+and hint `` run `telos test SCN-NNNN` again to record a report-backed red and green ``
+(a warning under `advisory`). Gate 11 runs each impacted target once and
+judges the run for every impacted scenario the target proves, in scenario-id
+order: a red keeps the integrity refusal above; a report that does not prove
+the scenario is `TELOS_TEST_NOT_EXECUTED` with message
+`` the test run for `<target>` did not execute SCN-NNNN: <reason> `` — `<reason>`
+one of the four sentences of the `test` section — and hint
+`` run the configured executable with the displayed arguments and inspect the report, then reconcile again ``.
+The seal records `proof_evidence = "report"` from the effective
+configuration.
 
 #### The carry-over: drift another open change claims is never sealed here
 
@@ -774,6 +791,9 @@ code) is unchanged; 9 requires all active proof bindings and a runner; 10
 runs the `check` of **every** constraint that has one. Gate 11 invokes
 `[test] cmd` with `{filter}` empty exactly once when the model contains at
 least one active intent, and zero times when all intents are draft/deprecated.
+With `[test] report` configured that single run's report is judged for every
+active scenario that has a `proves` binding, in scenario-id order, with the
+same two refusals as gate 11 and `<target>` being `the whole suite`.
 `result.ops_applied` is always `0` under `--full` (no ops — nothing was
 staged, the state was simply found and re-proved). Open changes are
 tolerated and left untouched (their files, still open), and the seal this

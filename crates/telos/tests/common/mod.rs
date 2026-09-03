@@ -302,11 +302,12 @@ pub const FAKE_RUNNER_TEMPLATE: &str = if cfg!(windows) {
 /// exits 101 without writing (a compile error, a network failure) when the
 /// fixture is absent. A shell script on Unix, a batch file on Windows.
 ///
-/// A missing (empty) first argument also exits 0 without writing: today's
-/// `reconcile --full` -- the seal every fixture goes through -- runs the
-/// full-suite gate through the pre-`{report}` code path and so never passes
-/// one. Every real `telos test` invocation always supplies its report path,
-/// so this only ever fires for that one sealing run.
+/// Every real invocation -- `telos test`, the reconcile gates, and the
+/// sealing `reconcile --full` a report fixture goes through -- runs through
+/// `telos_core::exec::run_proof`, which always substitutes `{report}`, so
+/// the first argument is never empty here; an unsubstituted `{report}`
+/// placeholder reaching the runner as a literal argument is exactly the bug
+/// this script must not mask.
 pub fn install_fake_runner(root: &Path) {
     #[cfg(unix)]
     {
@@ -318,7 +319,6 @@ pub fn install_fake_runner(root: &Path) {
                 "#!/bin/sh\n",
                 "# telos fake runner: $1 is the report path telos asked for.\n",
                 "if test -f .report-silent; then exit 0; fi\n",
-                "if test -z \"$1\"; then exit 0; fi\n",
                 "if test -f .report-fixture.xml; then cp .report-fixture.xml \"$1\" && exit 0; fi\n",
                 "exit 101\n",
             ),
@@ -333,7 +333,6 @@ pub fn install_fake_runner(root: &Path) {
             concat!(
                 "@echo off\r\n",
                 "if exist .report-silent exit /b 0\r\n",
-                "if \"%~1\"==\"\" exit /b 0\r\n",
                 "if exist .report-fixture.xml (\r\n",
                 "  copy /Y .report-fixture.xml \"%~1\" >nul\r\n",
                 "  exit /b 0\r\n",

@@ -1,10 +1,15 @@
-//! Cross-OS command execution: the platform shell `check` and `[test] cmd`
-//! run through, and `{filter}` substitution.
+//! Cross-OS command execution: the platform shell `check` runs through, and
+//! the proof cycle `[test] cmd` runs under -- `{filter}`/`{report}`
+//! substitution, stale-report removal, and the report read-back.
 
 use std::path::Path;
 use std::process::Command;
 
+use crate::config::TestCfg;
 use crate::error::{ErrorCode, TelosError};
+use crate::ids::{RepoPath, ScenarioId};
+use crate::model::Evidence;
+use crate::report::{NotExecuted, Report, ReportVerdict};
 
 /// The result of running a shell command: its exit status and captured
 /// output.
@@ -61,9 +66,9 @@ pub fn run_shell_with_filter(
     filter: &str,
     cwd: &Path,
 ) -> Result<FilteredRun, TelosError> {
-    let command = substitute_filter(template, filter);
+    let command = substitute_placeholders(template, filter, "");
     validate_filter_data(filter)?;
-    let argv = parse_runner_template(template, filter)?;
+    let argv = parse_runner_template(template, filter, "")?;
     let output = Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(cwd)
@@ -91,8 +96,13 @@ fn validate_filter_data(filter: &str) -> Result<(), TelosError> {
     Ok(())
 }
 
-fn parse_runner_template(template: &str, filter: &str) -> Result<Vec<String>, TelosError> {
+fn parse_runner_template(
+    template: &str,
+    filter: &str,
+    report: &str,
+) -> Result<Vec<String>, TelosError> {
     const FILTER: &str = "{filter}";
+    const REPORT: &str = "{report}";
     let unsafe_template = || {
         TelosError::new(
             ErrorCode::TelosParseError,
@@ -115,6 +125,15 @@ fn parse_runner_template(template: &str, filter: &str) -> Result<Vec<String>, Te
                 in_word = true;
             }
             index += FILTER.len();
+            continue;
+        }
+
+        if rest.starts_with(REPORT) {
+            if !report.is_empty() {
+                word.push_str(report);
+                in_word = true;
+            }
+            index += REPORT.len();
             continue;
         }
 
@@ -228,21 +247,181 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-/// Replaces every occurrence of the literal `{filter}` in `cmd` with
-/// `filter`, then `trim_end`s the whole result.
+/// Replaces every `{filter}` and `{report}` in `cmd` with `filter` and
+/// `report` respectively, then `trim_end`s the whole result.
 ///
 /// The `trim_end` runs after substitution and over the *whole* string, not
-/// just around the placeholder, so an empty filter (the `--full` case)
-/// leaves no trailing whitespace where the placeholder used to sit:
-/// `"cargo test {filter}"` with an empty filter becomes `"cargo test"`, not
-/// `"cargo test "`.
-pub fn substitute_filter(cmd: &str, filter: &str) -> String {
-    cmd.replace("{filter}", filter).trim_end().to_string()
+/// just around the placeholders, so an empty filter (the `--full` case) or
+/// an unconfigured report leaves no trailing whitespace where the
+/// placeholder used to sit: `"cargo test {filter}"` with an empty filter
+/// becomes `"cargo test"`, not `"cargo test "`.
+pub fn substitute_placeholders(cmd: &str, filter: &str, report: &str) -> String {
+    cmd.replace("{filter}", filter)
+        .replace("{report}", report)
+        .trim_end()
+        .to_string()
+}
+
+/// One execution of `[test] cmd` for one filter: the frozen display
+/// command, the raw exit status, and the evidence the configuration asked
+/// for. Built by [`run_proof`]; read through [`ProofRun::verdict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofRun {
+    /// The template with `{filter}` and `{report}` literally substituted --
+    /// diagnostic display, not a shell-replay contract.
+    pub command: String,
+    /// The runner's exit status (`-1` when killed by a signal).
+    pub status: i32,
+    pub evidence: ProofEvidence,
+}
+
+/// What a run left behind to judge it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofEvidence {
+    /// No `[test] report`: the exit status is all there is.
+    ExitStatus,
+    /// `[test] report` is configured: the report read after the run, or the
+    /// reason it could not be.
+    Report {
+        path: RepoPath,
+        parsed: Result<Report, NotExecuted>,
+    },
+}
+
+/// A run's verdict for one scenario. `executed` is the number of testcases
+/// named after the scenario that ran (passed plus failed) under report
+/// evidence, `None` under exit-status evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofVerdict {
+    Green { executed: Option<u32> },
+    Red { executed: Option<u32> },
+    NotExecuted(NotExecuted),
+}
+
+impl ProofRun {
+    /// Which kind of evidence this run carries.
+    pub fn kind(&self) -> Evidence {
+        match self.evidence {
+            ProofEvidence::ExitStatus => Evidence::ExitStatus,
+            ProofEvidence::Report { .. } => Evidence::Report,
+        }
+    }
+
+    /// The configured report path, when there is one.
+    pub fn report_path(&self) -> Option<&RepoPath> {
+        match &self.evidence {
+            ProofEvidence::ExitStatus => None,
+            ProofEvidence::Report { path, .. } => Some(path),
+        }
+    }
+
+    /// The verdict for `scenario`. With a report the exit status is
+    /// diagnostic only: a runner that exits 1 over an unrelated failure is
+    /// still green when the scenario's testcase passed, and one that exits
+    /// 0 having run nothing is not executed.
+    pub fn verdict(&self, scenario: ScenarioId) -> ProofVerdict {
+        match &self.evidence {
+            ProofEvidence::ExitStatus if self.status == 0 => ProofVerdict::Green { executed: None },
+            ProofEvidence::ExitStatus => ProofVerdict::Red { executed: None },
+            ProofEvidence::Report {
+                parsed: Err(reason),
+                ..
+            } => ProofVerdict::NotExecuted(reason.clone()),
+            ProofEvidence::Report {
+                parsed: Ok(report), ..
+            } => match report.verdict(scenario) {
+                ReportVerdict::Passed { passed } => ProofVerdict::Green {
+                    executed: Some(passed),
+                },
+                ReportVerdict::Failed { passed, failed } => ProofVerdict::Red {
+                    executed: Some(passed + failed),
+                },
+                ReportVerdict::NotExecuted(reason) => ProofVerdict::NotExecuted(reason),
+            },
+        }
+    }
+}
+
+/// Runs `[test] cmd` once for `filter` under the delete-run-read cycle:
+/// a stale report is removed first so nothing can be read from a previous
+/// run, the template runs as a direct argv, and the report (when one is
+/// configured) is read back. The runner not writing it is evidence in its
+/// own right (`NotExecuted::ReportMissing`), never an error here.
+///
+/// The template is parsed with `cmd` as configured; callers have already
+/// refused an empty one. A report path that fails validation or a stale
+/// report that cannot be removed are `TELOS_PARSE_ERROR` / `TELOS_INTERNAL`
+/// respectively, before anything runs.
+pub fn run_proof(test: &TestCfg, filter: &str, repo_root: &Path) -> Result<ProofRun, TelosError> {
+    let report = test.report_path()?;
+    let report_str = report.as_ref().map(RepoPath::as_str).unwrap_or("");
+    let command = substitute_placeholders(&test.cmd, filter, report_str);
+    validate_filter_data(filter)?;
+    let argv = parse_runner_template(&test.cmd, filter, report_str)?;
+
+    let report_file = report.as_ref().map(|path| absolute(repo_root, path));
+    if let Some(file) = &report_file {
+        remove_stale_report(file)?;
+    }
+
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| {
+            TelosError::new(
+                ErrorCode::TelosInternal,
+                format!("failed to spawn the test runner displayed as `{command}`: {e}"),
+            )
+        })?;
+    let status = run_result(output).status;
+
+    let evidence = match (report, report_file) {
+        (Some(path), Some(file)) => ProofEvidence::Report {
+            path,
+            parsed: read_report(&file),
+        },
+        _ => ProofEvidence::ExitStatus,
+    };
+    Ok(ProofRun {
+        command,
+        status,
+        evidence,
+    })
+}
+
+/// `repo_root` joined with a validated repository path, component by
+/// component, so the OS separator is never guessed from the `/` form.
+fn absolute(repo_root: &Path, path: &RepoPath) -> std::path::PathBuf {
+    let mut absolute = repo_root.to_path_buf();
+    for component in path.as_str().split('/') {
+        absolute.push(component);
+    }
+    absolute
+}
+
+fn remove_stale_report(file: &Path) -> Result<(), TelosError> {
+    match std::fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(TelosError::new(
+            ErrorCode::TelosInternal,
+            format!("failed to remove the stale report {}: {e}", file.display()),
+        )),
+    }
+}
+
+fn read_report(file: &Path) -> Result<Report, NotExecuted> {
+    match std::fs::read_to_string(file) {
+        Ok(xml) => Report::parse(&xml).map_err(NotExecuted::ReportInvalid),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(NotExecuted::ReportMissing),
+        Err(e) => Err(NotExecuted::ReportInvalid(e.to_string())),
+    }
 }
 
 #[cfg(test)]
 mod filter_rewrite_tests {
-    use super::{parse_runner_template, validate_filter_data};
+    use super::{parse_runner_template, substitute_placeholders, validate_filter_data};
 
     #[test]
     fn direct_runner_preserves_composition_in_every_quote_context() {
@@ -250,6 +429,7 @@ mod filter_rewrite_tests {
             parse_runner_template(
                 "runner module::{filter}_case \"double::{filter}\" 'single::{filter}'",
                 "proof;still-data",
+                "",
             )
             .unwrap(),
             [
@@ -264,15 +444,15 @@ mod filter_rewrite_tests {
     #[test]
     fn an_empty_trailing_filter_does_not_create_an_empty_argument() {
         assert_eq!(
-            parse_runner_template("git hash-object {filter}", "").unwrap(),
+            parse_runner_template("git hash-object {filter}", "", "").unwrap(),
             ["git", "hash-object"]
         );
         assert_eq!(
-            parse_runner_template("runner prefix-{filter}-suffix", "").unwrap(),
+            parse_runner_template("runner prefix-{filter}-suffix", "", "").unwrap(),
             ["runner", "prefix--suffix"]
         );
         assert_eq!(
-            parse_runner_template("runner \"{filter}\"", "").unwrap(),
+            parse_runner_template("runner \"{filter}\"", "", "").unwrap(),
             ["runner", ""]
         );
     }
@@ -289,7 +469,7 @@ mod filter_rewrite_tests {
             "runner {filter} && second",
         ] {
             assert!(
-                parse_runner_template(template, "proof").is_err(),
+                parse_runner_template(template, "proof", "").is_err(),
                 "accepted {template}"
             );
         }
@@ -301,8 +481,185 @@ mod filter_rewrite_tests {
             assert!(validate_filter_data(filter).is_err());
         }
         assert_eq!(
-            parse_runner_template("runner {filter}", "proof\"'literal").unwrap(),
+            parse_runner_template("runner {filter}", "proof\"'literal", "").unwrap(),
             ["runner", "proof\"'literal"]
         );
+    }
+
+    #[test]
+    fn the_report_placeholder_is_data_in_every_quote_context() {
+        assert_eq!(
+            parse_runner_template(
+                "runner --junit={report} \"{report}\" {filter}",
+                "scn_0108_x",
+                "target/telos report.xml",
+            )
+            .unwrap(),
+            [
+                "runner",
+                "--junit=target/telos report.xml",
+                "target/telos report.xml",
+                "scn_0108_x",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_report_creates_no_empty_argument() {
+        assert_eq!(
+            parse_runner_template("runner {report} {filter}", "scn_0108_x", "").unwrap(),
+            ["runner", "scn_0108_x"]
+        );
+    }
+
+    #[test]
+    fn substitution_displays_both_placeholders_literally() {
+        assert_eq!(
+            substitute_placeholders("runner {report} {filter}", "", "out.xml"),
+            "runner out.xml"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_proof_tests {
+    use super::*;
+    use crate::config::TestCfg;
+    use crate::ids::ScenarioId;
+    use crate::report::{NotExecuted, Report};
+
+    fn report_run(parsed: Result<Report, NotExecuted>, status: i32) -> ProofRun {
+        ProofRun {
+            command: "runner".to_string(),
+            status,
+            evidence: ProofEvidence::Report {
+                path: RepoPath::new("telos-report.xml"),
+                parsed,
+            },
+        }
+    }
+
+    #[test]
+    fn exit_status_evidence_reads_zero_as_green_and_anything_else_as_red() {
+        let green = ProofRun {
+            command: "runner".to_string(),
+            status: 0,
+            evidence: ProofEvidence::ExitStatus,
+        };
+        let red = ProofRun {
+            status: 3,
+            ..green.clone()
+        };
+        assert_eq!(green.kind(), Evidence::ExitStatus);
+        assert_eq!(
+            green.verdict(ScenarioId(1)),
+            ProofVerdict::Green { executed: None }
+        );
+        assert_eq!(
+            red.verdict(ScenarioId(1)),
+            ProofVerdict::Red { executed: None }
+        );
+    }
+
+    #[test]
+    fn report_evidence_outranks_the_exit_status() {
+        let passed =
+            Report::parse(r#"<testsuite><testcase name="scn_0001_x"/></testsuite>"#).unwrap();
+        let failed = Report::parse(
+            r#"<testsuite><testcase name="scn_0001_x"><failure/></testcase><testcase name="scn_0001_y"/></testsuite>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            report_run(Ok(passed), 1).verdict(ScenarioId(1)),
+            ProofVerdict::Green { executed: Some(1) }
+        );
+        assert_eq!(
+            report_run(Ok(failed), 0).verdict(ScenarioId(1)),
+            ProofVerdict::Red { executed: Some(2) }
+        );
+        assert_eq!(
+            report_run(Err(NotExecuted::ReportMissing), 0).verdict(ScenarioId(1)),
+            ProofVerdict::NotExecuted(NotExecuted::ReportMissing)
+        );
+        assert_eq!(
+            report_run(Err(NotExecuted::ReportMissing), 0).kind(),
+            Evidence::Report
+        );
+    }
+
+    #[test]
+    fn without_a_report_run_proof_reads_the_exit_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test = TestCfg {
+            cmd: "git --version".to_string(),
+            report: String::new(),
+        };
+        let run = run_proof(&test, "", tmp.path()).unwrap();
+        assert_eq!(run.command, "git --version");
+        assert_eq!(run.status, 0);
+        assert_eq!(run.evidence, ProofEvidence::ExitStatus);
+    }
+
+    #[test]
+    fn a_stale_report_is_deleted_before_the_run_and_its_absence_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("telos-report.xml"), "<testsuite/>").unwrap();
+        let test = TestCfg {
+            cmd: "git --version".to_string(),
+            report: "telos-report.xml".to_string(),
+        };
+        let run = run_proof(&test, "", tmp.path()).unwrap();
+        assert!(!tmp.path().join("telos-report.xml").exists());
+        assert_eq!(
+            run.verdict(ScenarioId(1)),
+            ProofVerdict::NotExecuted(NotExecuted::ReportMissing)
+        );
+        assert_eq!(run.report_path(), Some(&RepoPath::new("telos-report.xml")));
+    }
+
+    #[cfg(unix)]
+    fn writer(dir: &std::path::Path, body: &str) -> TestCfg {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("writer");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s' '{body}' > \"$1\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        TestCfg {
+            cmd: "./writer {report} {filter}".to_string(),
+            report: "out/report.xml".to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_report_the_runner_writes_is_read_after_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("out")).unwrap();
+        let test = writer(
+            tmp.path(),
+            r#"<testsuite><testcase name="scn_0001_x"/></testsuite>"#,
+        );
+        let run = run_proof(&test, "scn_0001_x", tmp.path()).unwrap();
+        assert_eq!(run.command, "./writer out/report.xml scn_0001_x");
+        assert_eq!(
+            run.verdict(ScenarioId(1)),
+            ProofVerdict::Green { executed: Some(1) }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unparseable_report_is_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("out")).unwrap();
+        let test = writer(tmp.path(), "<testsuite><testcase");
+        let run = run_proof(&test, "", tmp.path()).unwrap();
+        assert!(matches!(
+            run.verdict(ScenarioId(1)),
+            ProofVerdict::NotExecuted(NotExecuted::ReportInvalid(_))
+        ));
     }
 }

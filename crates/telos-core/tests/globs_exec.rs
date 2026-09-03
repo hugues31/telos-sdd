@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use telos_core::config::{Config, Globs};
 use telos_core::error::ErrorCode;
-use telos_core::exec::{run_shell, run_shell_with_filter, substitute_filter};
+use telos_core::exec::{run_shell, run_shell_with_filter, substitute_placeholders};
 use telos_core::globs::{glob_matches, orphan_code};
 use telos_core::ids::{IntentId, RepoPath, ScenarioId};
 use telos_core::model::{Binding, TelosModel, TestRef};
@@ -242,12 +242,12 @@ fn orphan_code_a_file_bound_in_both_families_is_not_orphaned() {
     assert_eq!(orphan_code(&ws, &model).unwrap(), Vec::<RepoPath>::new());
 }
 
-// --- substitute_filter ---------------------------------------------------
+// --- substitute_placeholders -----------------------------------------------
 
 #[test]
 fn substitute_filter_replaces_the_placeholder() {
     assert_eq!(
-        substitute_filter("cargo test {filter}", "scn_x"),
+        substitute_placeholders("cargo test {filter}", "scn_x", ""),
         "cargo test scn_x"
     );
 }
@@ -255,19 +255,25 @@ fn substitute_filter_replaces_the_placeholder() {
 #[test]
 fn substitute_filter_replaces_every_occurrence() {
     assert_eq!(
-        substitute_filter("{filter} && echo {filter}", "scn_x"),
+        substitute_placeholders("{filter} && echo {filter}", "scn_x", ""),
         "scn_x && echo scn_x"
     );
 }
 
 #[test]
 fn substitute_filter_of_an_empty_filter_trims_the_trailing_space() {
-    assert_eq!(substitute_filter("cargo test {filter}", ""), "cargo test");
+    assert_eq!(
+        substitute_placeholders("cargo test {filter}", "", ""),
+        "cargo test"
+    );
 }
 
 #[test]
 fn substitute_filter_with_no_placeholder_is_unchanged_but_still_trimmed() {
-    assert_eq!(substitute_filter("cargo test  ", ""), "cargo test");
+    assert_eq!(
+        substitute_placeholders("cargo test  ", "", ""),
+        "cargo test"
+    );
 }
 
 // --- run_shell -------------------------------------------------------------

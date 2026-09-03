@@ -138,7 +138,7 @@ use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
 use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
-use crate::exec::{run_shell, run_shell_with_filter, substitute_filter};
+use crate::exec::{run_shell, run_shell_with_filter, substitute_placeholders};
 use crate::git::{GitRepo, Oid};
 use crate::globs::{glob_matches, orphan_code};
 use crate::graph::{NodeRef, Relation};
@@ -1321,7 +1321,7 @@ fn run_tests(
             Ok(run) if run.result.status == 0 => tests_run += 1,
             Ok(run) => return Err(test_failed(&rendered, &run.command)),
             Err(_) => {
-                let command = substitute_filter(cmd, &filter);
+                let command = substitute_placeholders(cmd, &filter, &ws.config.test.report);
                 return Err(test_failed(&rendered, &command));
             }
         }
@@ -1344,7 +1344,7 @@ fn run_full_tests(ws: &Workspace) -> Result<u32, TelosError> {
         return Ok(0);
     }
 
-    let command = substitute_filter(cmd, "");
+    let command = substitute_placeholders(cmd, "", &ws.config.test.report);
     match run_shell_with_filter(cmd, "", &ws.repo_root) {
         Ok(run) if run.result.status == 0 => Ok(1),
         Ok(_) | Err(_) => Err(test_failed("the whole suite", &command)),

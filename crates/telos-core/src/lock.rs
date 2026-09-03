@@ -195,6 +195,12 @@ impl Lock {
 /// [`crate::reconcile::reconcile_change`]'s carry-over, which keeps a path
 /// another open change claims at its previously sealed OID.
 ///
+/// Both maps come from [`GitRepo::store_blobs`], not `blob_oids`: the
+/// `Lock` this hands back exists to be written, and every OID a written
+/// lock records must name an object the store holds -- commit or no commit
+/// -- or `telos revert` has nothing to restore from. See the `git` module
+/// docs.
+///
 /// Does not write the lock to disk -- the caller does that with
 /// [`Lock::write`].
 pub fn seal(
@@ -206,7 +212,7 @@ pub fn seal(
     git.ensure_matches_workspace_root(&ws.repo_root)?;
 
     let spec_paths = ws.spec_files()?;
-    let spec = git.blob_oids(&spec_paths)?;
+    let spec = git.store_blobs(&spec_paths)?;
 
     let code_paths: Vec<RepoPath> = model
         .bindings
@@ -215,7 +221,7 @@ pub fn seal(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let code = git.blob_oids(&code_paths)?;
+    let code = git.store_blobs(&code_paths)?;
 
     for path in &code_paths {
         if !code.contains_key(path) {

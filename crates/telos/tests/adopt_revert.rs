@@ -12,12 +12,12 @@
 //! Two things are worth knowing before reading further:
 //!
 //! - **`adopt` never reads a blob, `revert` always does.** `adopt` only
-//!   hashes the tree (`git hash-object`, no object store involved), which is
-//!   why every `adopt` test here runs on an uncommitted fixture. `revert`
-//!   restores sealed *content*, which only exists in the object store once
-//!   somebody committed it -- hence the `commit` helper, and the last test of
-//!   the file, which proves the exact refusal a caller gets when they did
-//!   not.
+//!   hashes the tree (`git hash-object`, no object store involved). `revert`
+//!   restores sealed *content* from the object store -- and finds it there
+//!   whether or not anybody committed, because the seal itself writes the
+//!   objects it names. The revert section runs on committed and on
+//!   never-committed fixtures alike, and its last test pins the one way a
+//!   sealed blob can still be missing: git pruned it as unreachable.
 //! - **After `adopt` the project is `changing`, not `coherent`.** The drift
 //!   is claimed by the change that adopted it, so it stops being drift
 //!   and becomes the change in progress. It is the reconcile, not the adopt,
@@ -94,7 +94,7 @@ const ROGUE_TEL: &str = "notion billing/Rogue entity {\n  \
 const PARSE_HINT: &str = "fix the file or run `telos revert`";
 
 /// The exact `TELOS_GIT_ERROR` hint `revert` attaches when the sealed blob is
-/// not in the object store.
+/// not in the object store (pruned, or sealed by an older `telos`).
 const SEALED_HINT: &str = "the sealed content is not in the git object store; commit the sealed state or restore the file by hand";
 
 // --- plumbing ---------------------------------------------------------------
@@ -176,8 +176,10 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
 
-/// Commits the whole fixture, which is what puts the *sealed* blobs in the
-/// object store -- the precondition `revert` has and `adopt` has not.
+/// Commits the whole fixture. The seal already wrote its blobs to the
+/// object store, so `revert` does not need this; the tests that call it
+/// exercise a *committed* project, where the sealed objects are reachable
+/// from `HEAD` rather than orphaned.
 fn commit(dir: &Path) {
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "--quiet", "-m", "seal the billing corpus"]);
@@ -971,13 +973,66 @@ fn revert_restores_deleted_spec_and_code_files() {
     assert_eq!(read(dir, CODE), sealed_code);
 }
 
-/// `revert` restores *content*, and content only lives in the object store
-/// once somebody committed it. A fixture that was sealed but never committed
-/// gets the one refusal that says exactly that.
+/// The seal writes the objects it names (`git hash-object -w`), so `revert`
+/// does not depend on a commit: a project `init` sealed and never committed
+/// still restores byte for byte.
 #[test]
-fn revert_without_the_sealed_blob_in_the_object_store_is_refused() {
+fn revert_restores_an_init_sealed_file_on_a_project_never_committed() {
     let tmp = with_fixture();
     let dir = tmp.path();
+    let sealed = read(dir, INVOICE);
+
+    append(dir, INVOICE, "\n");
+    assert_eq!(state(dir)["state"], json!("drifted"));
+
+    let result = run_ok(dir, &["revert", "--json"])["result"].clone();
+
+    assert_eq!(result, json!({ "restored": [INVOICE], "deleted": [] }));
+    assert_eq!(state(dir)["state"], json!("coherent"));
+    assert_eq!(read(dir, INVOICE), sealed);
+}
+
+/// The scenario that motivated this: a change reconciled but not yet
+/// committed, then drifted. The reconcile is the seal that named the new
+/// OIDs, so it is the reconcile that must have written them -- for the spec
+/// it rewrote and for the code it accepted alike.
+#[test]
+fn revert_restores_reconciled_spec_and_code_on_a_project_never_committed() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+
+    append(dir, INVOICE, "\n");
+    append(dir, CODE, "// adopted\n");
+    run_ok(dir, &["adopt", "--json"]);
+    approve_and_reconcile(dir, "CHG-0001");
+    assert_eq!(state(dir)["state"], json!("coherent"));
+    let sealed_invoice = read(dir, INVOICE);
+    let sealed_code = read(dir, CODE);
+
+    append(dir, INVOICE, "\n");
+    append(dir, CODE, "// drifted again\n");
+    assert_eq!(state(dir)["state"], json!("drifted"));
+
+    let result = run_ok(dir, &["revert", "--json"])["result"].clone();
+
+    assert_eq!(
+        result,
+        json!({ "restored": [CODE, INVOICE], "deleted": [] })
+    );
+    assert_eq!(state(dir)["state"], json!("coherent"));
+    assert_eq!(read(dir, INVOICE), sealed_invoice);
+    assert_eq!(read(dir, CODE), sealed_code);
+}
+
+/// The objects a seal writes stay unreachable until a commit references
+/// them, and git is free to prune unreachable objects (by default only
+/// after two weeks; `--expire=now` here). Once it has, the blob is gone and
+/// `revert` gets the one refusal that says exactly that.
+#[test]
+fn revert_after_git_pruned_the_sealed_blob_is_refused() {
+    let tmp = with_fixture();
+    let dir = tmp.path();
+    git(dir, &["prune", "--expire=now"]);
 
     append(dir, INVOICE, "\n");
 

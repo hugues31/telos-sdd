@@ -1,13 +1,22 @@
 //! Git blob OIDs: the bridge between the working tree and content-addressed
 //! sealing.
 //!
-//! [`GitRepo::blob_oids`] is deliberately a *single* `git hash-object
-//! --stdin-paths` process: no `-w` (it never writes objects -- read only),
-//! and crucially no `--no-filters`. Letting clean filters run is the whole
-//! point -- a repo's `.gitattributes` (e.g. `* text eol=lf`) then gives the
-//! same OID for the same logical content regardless of which OS checked the
-//! file out with which line endings, which is what makes a lock file
-//! sealed on Linux verifiable, byte for byte, on Windows.
+//! [`GitRepo::blob_oids`] and [`GitRepo::store_blobs`] are each deliberately
+//! a *single* `git hash-object --stdin-paths` process, and crucially neither
+//! passes `--no-filters`. Letting clean filters run is the whole point -- a
+//! repo's `.gitattributes` (e.g. `* text eol=lf`) then gives the same OID
+//! for the same logical content regardless of which OS checked the file out
+//! with which line endings, which is what makes a lock file sealed on Linux
+//! verifiable, byte for byte, on Windows.
+//!
+//! The two differ in exactly one flag. `blob_oids` never passes `-w`: it
+//! only hashes, and since it runs on every `status`, it must not litter the
+//! object store. `store_blobs` passes `-w`: it is what a *seal* uses, so
+//! that every OID a lock records names an object the store actually holds,
+//! commit or no commit -- which is what lets `telos revert` restore a
+//! project that was sealed but never committed. The objects it writes stay
+//! unreachable until a commit references them; git only prunes unreachable
+//! objects past `gc.pruneExpire`, two weeks by default.
 //!
 //! [`GitRepo::ensure_matches_workspace_root`] verifies that a
 //! [`crate::workspace::Workspace`]'s `repo_root` and this [`GitRepo`]'s
@@ -37,7 +46,9 @@ use crate::ids::RepoPath;
 use crate::repo_fs::RepoFs;
 
 /// The frozen hint of the one `TELOS_GIT_ERROR` [`GitRepo::cat_blob`]
-/// raises: an OID the seal records that the object store does not hold.
+/// raises: an OID the seal records that the object store does not hold --
+/// a lock sealed by a `telos` older than [`GitRepo::store_blobs`], or an
+/// object git has since pruned.
 ///
 /// It lives here, next to the command that produces it, because the caller
 /// that surfaces it -- `telos revert` -- is in another crate, and the
@@ -141,7 +152,34 @@ impl GitRepo {
     }
 
     /// Hashes `paths` as git blobs, filters applied, in exactly one child
-    /// process.
+    /// process -- and writes nothing to the object store.
+    ///
+    /// The read-only half of the pair: what every *comparison* against the
+    /// seal uses (`status`, the reconcile gates, `adopt`). See
+    /// [`GitRepo::store_blobs`] for the half a seal uses, and the module
+    /// docs for why they are two entry points and not a flag.
+    pub fn blob_oids(&self, paths: &[RepoPath]) -> Result<BTreeMap<RepoPath, Oid>, TelosError> {
+        self.hash_objects(paths, false)
+    }
+
+    /// Hashes `paths` as git blobs exactly like [`GitRepo::blob_oids`] --
+    /// same filters, same OIDs, same one child process -- and writes each
+    /// object to the store (`git hash-object -w`).
+    ///
+    /// The one to call when the OIDs are about to be *sealed*. A lock is
+    /// only a backup if the content its OIDs name exists somewhere, and
+    /// with no commit in between, this is the only thing that puts it
+    /// there; [`GitRepo::cat_blob`] is the inverse that reads it back. The
+    /// objects stay unreachable until a commit names them, which is fine:
+    /// git only prunes unreachable objects past `gc.pruneExpire` (two weeks
+    /// by default), and a seal that old with no commit behind it is
+    /// exactly the case [`MISSING_BLOB_HINT`] is worded for.
+    pub fn store_blobs(&self, paths: &[RepoPath]) -> Result<BTreeMap<RepoPath, Oid>, TelosError> {
+        self.hash_objects(paths, true)
+    }
+
+    /// The one body behind `blob_oids` (`write = false`) and `store_blobs`
+    /// (`write = true`).
     ///
     /// Paths that don't exist on disk (checked with `fs::metadata` against
     /// `root`-joined paths, before git is ever invoked) are silently
@@ -151,16 +189,19 @@ impl GitRepo {
     /// The existing paths are written to `git hash-object --stdin-paths`'s
     /// stdin, one repo-relative, `/`-separated path per line (git accepts
     /// `/` on every OS, including Windows), with `cwd = root` so
-    /// `.gitattributes` filters resolve against this worktree. No `-w`
-    /// (objects are never written -- this is read-only) and no
-    /// `--no-filters` (clean filters, e.g. `eol=lf`, MUST run: that is what
-    /// makes the resulting OID identical across OSes for the same logical
-    /// content).
+    /// `.gitattributes` filters resolve against this worktree. `-w` if and
+    /// only if `write`, and never `--no-filters` (clean filters, e.g.
+    /// `eol=lf`, MUST run: that is what makes the resulting OID identical
+    /// across OSes for the same logical content).
     ///
     /// Stdin is written from a dedicated thread while the calling thread
     /// drains stdout/stderr through `wait_with_output`, so neither pipe can
     /// block the other for large path sets.
-    pub fn blob_oids(&self, paths: &[RepoPath]) -> Result<BTreeMap<RepoPath, Oid>, TelosError> {
+    fn hash_objects(
+        &self,
+        paths: &[RepoPath],
+        write: bool,
+    ) -> Result<BTreeMap<RepoPath, Oid>, TelosError> {
         let safe_root = RepoFs::open(&self.root)?;
         let mut existing = Vec::new();
         for path in paths {
@@ -183,8 +224,17 @@ impl GitRepo {
             return Ok(BTreeMap::new());
         }
 
-        let mut child = Command::new("git")
-            .arg("hash-object")
+        let command_line = if write {
+            "git hash-object -w --stdin-paths"
+        } else {
+            "git hash-object --stdin-paths"
+        };
+        let mut command = Command::new("git");
+        command.arg("hash-object");
+        if write {
+            command.arg("-w");
+        }
+        let mut child = command
             .arg("--stdin-paths")
             .current_dir(&self.root)
             .stdin(Stdio::piped())
@@ -235,7 +285,7 @@ impl GitRepo {
             return Err(TelosError::new(
                 ErrorCode::TelosGitError,
                 format!(
-                    "`git hash-object --stdin-paths` failed: {}",
+                    "`{command_line}` failed: {}",
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
             ));
@@ -247,7 +297,7 @@ impl GitRepo {
             return Err(TelosError::new(
                 ErrorCode::TelosGitError,
                 format!(
-                    "`git hash-object --stdin-paths` returned {} OID(s) for {} path(s); stderr: {}",
+                    "`{command_line}` returned {} OID(s) for {} path(s); stderr: {}",
                     lines.len(),
                     existing.len(),
                     String::from_utf8_lossy(&output.stderr).trim()
@@ -283,13 +333,13 @@ impl GitRepo {
     /// Reads one blob's bytes back out of the object store: `git cat-file
     /// blob <oid>`, with `cwd = root`.
     ///
-    /// The exact inverse of [`GitRepo::blob_oids`] for
+    /// The exact inverse of [`GitRepo::store_blobs`] for
     /// [`crate::adopt::revert`]'s purposes -- given an OID the seal records,
-    /// answer with the content it names -- and the reason `revert` needs a
-    /// *committed* project while `adopt` does not: `blob_oids` only hashes
-    /// (no `-w`), so a seal can perfectly well record OIDs no object store
-    /// holds. That case is the one refusal here, and it carries
-    /// [`MISSING_BLOB_HINT`], which names the remedy.
+    /// answer with the content it names. A seal made with `store_blobs`
+    /// always has that content in the store, commit or no commit; a lock
+    /// sealed by an older `telos` (which only hashed) or an object git has
+    /// since pruned does not. That case is the one refusal here, and it
+    /// carries [`MISSING_BLOB_HINT`], which names the remedy.
     ///
     /// Answers with the blob's bytes as stored, i.e. *after* the clean
     /// filter that produced the OID and without the smudge filter a

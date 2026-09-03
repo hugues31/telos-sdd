@@ -15,14 +15,15 @@
 //!   every sealed path is restored from the blob its OID names and everything
 //!   unsealed is deleted.
 //!
-//! # Why one of them needs a committed repository and the other does not
+//! # Neither of them needs a committed repository
 //!
 //! [`plan_adopt`] only ever *hashes* the tree ([`GitRepo::blob_oids`], no
-//! `-w`), so it works on a project that was sealed but never committed.
-//! [`revert`] restores *content*, and content only exists in the object store
-//! once something wrote it there -- a commit, almost always. A seal is
-//! therefore not a backup on its own, and the refusal
-//! [`GitRepo::cat_blob`] raises says so in as many words.
+//! `-w`). [`revert`] restores *content*, which has to exist in the object
+//! store -- and it does, commit or no commit, because every seal writes the
+//! objects it names ([`GitRepo::store_blobs`]). The one way a sealed blob
+//! can still be missing is a lock sealed by an older `telos`, or an
+//! unreachable object git has since pruned; the refusal
+//! [`GitRepo::cat_blob`] raises then says so in as many words.
 //!
 //! # What `adopt` refuses
 //!

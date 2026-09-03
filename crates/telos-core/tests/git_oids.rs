@@ -17,7 +17,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use telos_core::error::ErrorCode;
-use telos_core::git::{GitRepo, Oid};
+use telos_core::git::{GitRepo, MISSING_BLOB_HINT, Oid};
 use telos_core::ids::{ChangeId, RepoPath};
 use telos_core::lock::Lock;
 
@@ -195,6 +195,45 @@ fn blob_oids_of_only_missing_paths_is_an_empty_map_not_an_error() {
     let oids = repo.blob_oids(&repo_paths(&["nope.txt"])).unwrap();
 
     assert!(oids.is_empty());
+}
+
+// --- store_blobs: the seal-time twin also writes the object -----------------
+
+/// `store_blobs` is `blob_oids` plus `-w`: the same OID comes back, and the
+/// object it names is now in the store, so `cat_blob` can hand the bytes
+/// back without anything having been committed. This is what lets
+/// `telos revert` work on a project that was sealed but never committed.
+#[test]
+fn store_blobs_writes_the_object_so_cat_blob_reads_it_back() {
+    let tmp = init_repo();
+    fs::write(tmp.path().join("f.txt"), "hello\n").unwrap();
+
+    let repo = GitRepo::discover(tmp.path()).unwrap();
+    let oids = repo.store_blobs(&repo_paths(&["f.txt"])).unwrap();
+
+    let oid = oids.get(&RepoPath::new("f.txt")).expect("f.txt was hashed");
+    assert_eq!(
+        oid,
+        &Oid("ce013625030ba8dba906f756967f9e9ca394464a".to_string())
+    );
+    assert_eq!(repo.cat_blob(oid).unwrap(), b"hello\n");
+}
+
+/// The read-only half must stay read-only: `blob_oids` runs on every
+/// `status`, and it must never litter the object store with objects nobody
+/// sealed. Pinned here so the two entry points cannot silently converge.
+#[test]
+fn blob_oids_leaves_the_object_store_untouched() {
+    let tmp = init_repo();
+    fs::write(tmp.path().join("f.txt"), "only hashed\n").unwrap();
+
+    let repo = GitRepo::discover(tmp.path()).unwrap();
+    let oids = repo.blob_oids(&repo_paths(&["f.txt"])).unwrap();
+
+    let oid = oids.get(&RepoPath::new("f.txt")).expect("f.txt was hashed");
+    let error = repo.cat_blob(oid).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TelosGitError);
+    assert_eq!(error.hint.as_deref(), Some(MISSING_BLOB_HINT));
 }
 
 // --- discover: not a git repository -----------------------------------------

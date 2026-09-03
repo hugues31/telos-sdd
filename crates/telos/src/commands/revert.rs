@@ -11,11 +11,13 @@
 //! - **It destroys the drifted bytes.** There is no undo beyond what git
 //!   already holds. `telos status` names the paths first, and `telos adopt`
 //!   is the other exit.
-//! - **It needs the sealed content in the object store.** A seal records
-//!   OIDs; it does not write objects. On a project sealed but never
-//!   committed, the content those OIDs name does not exist anywhere, and
-//!   this command says so ([`telos_core::git::MISSING_BLOB_HINT`]) rather
-//!   than silently restoring nothing.
+//! - **It needs the sealed content in the object store.** Every seal writes
+//!   the objects it names (`git hash-object -w`), so a project sealed but
+//!   never committed still reverts. What can still be missing is a blob
+//!   sealed by an older `telos`, or one git pruned as unreachable before a
+//!   commit named it; this command then says so
+//!   ([`telos_core::git::MISSING_BLOB_HINT`]) rather than silently
+//!   restoring nothing.
 //!
 //! Like `adopt`, it acts on *unclaimed* drift only: a path an open change
 //! claims is that change in progress, and throwing it away is

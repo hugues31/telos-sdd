@@ -328,6 +328,8 @@ fn test_records_a_green_witness_with_the_canonical_result() {
                 "test": format!("{BILLING_TEST}::{TEST_FN}"),
                 "change": "CHG-0001",
                 "command": RUNNER,
+                "evidence": "exit-status",
+                "executed": null,
             },
             "error": null,
             "next_actions": ["telos change reconcile CHG-0001"]
@@ -787,6 +789,8 @@ fn test_all_runs_every_scenario_that_owes_a_witness() {
                 "test": format!("{BILLING_TEST}::{TEST_FN}"),
                 "change": "CHG-0001",
                 "command": RUNNER,
+                "evidence": "exit-status",
+                "executed": null,
             }]},
             "error": null,
             "next_actions": []

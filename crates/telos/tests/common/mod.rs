@@ -281,3 +281,132 @@ fn git(cwd: &Path, args: &[&str]) {
         .unwrap_or_else(|e| panic!("failed to run git {args:?}: {e}"));
     assert!(status.success(), "git {args:?} failed in {}", cwd.display());
 }
+
+/// The report path every report-backed fixture configures, at the repo root
+/// so no `[code]`/`[tests]` glob ever matches it.
+pub const REPORT: &str = "telos-report.xml";
+/// The file the fake runner copies to `{report}`; tests rewrite it between
+/// runs to script what "the runner" reports.
+pub const REPORT_FIXTURE: &str = ".report-fixture.xml";
+/// Marker: while it exists the fake runner exits 0 without writing a report.
+pub const REPORT_SILENT: &str = ".report-silent";
+/// The `[test] cmd` the report fixtures install.
+pub const FAKE_RUNNER_TEMPLATE: &str = if cfg!(windows) {
+    "./fake-runner.bat {report} {filter}"
+} else {
+    "./fake-runner {report} {filter}"
+};
+
+/// Installs a runner that copies [`REPORT_FIXTURE`] to its first argument
+/// and exits 0, exits 0 without writing when [`REPORT_SILENT`] exists, and
+/// exits 101 without writing (a compile error, a network failure) when the
+/// fixture is absent. A shell script on Unix, a batch file on Windows.
+///
+/// A missing (empty) first argument also exits 0 without writing: today's
+/// `reconcile --full` -- the seal every fixture goes through -- runs the
+/// full-suite gate through the pre-`{report}` code path and so never passes
+/// one. Every real `telos test` invocation always supplies its report path,
+/// so this only ever fires for that one sealing run.
+pub fn install_fake_runner(root: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("fake-runner");
+        fs::write(
+            &script,
+            concat!(
+                "#!/bin/sh\n",
+                "# telos fake runner: $1 is the report path telos asked for.\n",
+                "if test -f .report-silent; then exit 0; fi\n",
+                "if test -z \"$1\"; then exit 0; fi\n",
+                "if test -f .report-fixture.xml; then cp .report-fixture.xml \"$1\" && exit 0; fi\n",
+                "exit 101\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        fs::write(
+            root.join("fake-runner.bat"),
+            concat!(
+                "@echo off\r\n",
+                "if exist .report-silent exit /b 0\r\n",
+                "if \"%~1\"==\"\" exit /b 0\r\n",
+                "if exist .report-fixture.xml (\r\n",
+                "  copy /Y .report-fixture.xml \"%~1\" >nul\r\n",
+                "  exit /b 0\r\n",
+                ")\r\n",
+                "exit /b 101\r\n",
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// Scripts the next runner report.
+pub fn write_report_fixture(root: &Path, xml: &str) {
+    fs::write(root.join(REPORT_FIXTURE), xml).unwrap();
+}
+
+/// A JUnit report with one `testcase` per `(name, status)`, `status` being
+/// one of `passed`, `failed`, `error`, `skipped`.
+pub fn junit_report(cases: &[(&str, &str)]) -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites>\n  <testsuite name=\"billing\">\n",
+    );
+    for (name, status) in cases {
+        let body = match *status {
+            "passed" => "",
+            "failed" => "<failure message=\"assertion failed\">left != right</failure>",
+            "error" => "<error message=\"panicked\">boom</error>",
+            "skipped" => "<skipped/>",
+            other => panic!("unknown testcase status `{other}`"),
+        };
+        xml.push_str(&format!(
+            "    <testcase name=\"{name}\" classname=\"billing\" time=\"0.01\">{body}</testcase>\n"
+        ));
+    }
+    xml.push_str("  </testsuite>\n</testsuites>\n");
+    xml
+}
+
+/// The corpus' two sealed scenarios, both passed: what the sealing
+/// `reconcile --full` of a report fixture must find in the report.
+pub fn sealed_scenarios_passed() -> String {
+    junit_report(&[
+        ("scn_0091_issued_invoice_is_open", "passed"),
+        ("scn_0107_full_payment_settles_the_invoice", "passed"),
+    ])
+}
+
+/// [`with_fixture`] with the fake runner installed, `[test] report` set to
+/// [`REPORT`], `[policy] tdd` set to `policy`, and a report proving both
+/// sealed scenarios in place before the seal.
+pub fn with_report_fixture(policy: &str) -> TempDir {
+    with_fixture_mut(|root| {
+        install_fake_runner(root);
+        write_report_fixture(root, &sealed_scenarios_passed());
+        // The corpus test file is a placeholder; give the sealed SCN-0107
+        // target a real function so `rebuild status` can resolve it.
+        fs::write(
+            root.join("tests/billing.rs"),
+            "fn scn_0107_full_payment_settles_the_invoice() {}\n",
+        )
+        .unwrap();
+        let config = root.join("telos/telos.toml");
+        let src = fs::read_to_string(&config).unwrap();
+        assert!(
+            src.contains("cmd = \"\""),
+            "the corpus no longer ships an empty `[test] cmd`: {src}"
+        );
+        let src = src
+            .replace(
+                "cmd = \"\"",
+                &format!("cmd = \"{FAKE_RUNNER_TEMPLATE}\"\nreport = \"{REPORT}\""),
+            )
+            .replace("tdd = \"strict\"", &format!("tdd = \"{policy}\""));
+        fs::write(&config, src).unwrap();
+    })
+}

@@ -154,6 +154,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_SCENARIO_RED_EXPECTED` | `reconcile` under `policy.tdd = "strict"` requires an intact sealed red witness for a scenario before its green run; none exists. | Run `telos test SCN-…` to record a red witness before implementing. |
 | `TELOS_TEST_SEALED` | The bytes of a test file sealed as a red witness changed before the scenario went green — the witness no longer proves anything. | The red witness is invalid; run `telos test SCN-…` again on the current bytes before reconciling. |
 | `TELOS_TEST_NOT_FOUND` | No `[test] cmd` is configured; discovery finds zero or more than one file containing the scenario's `scn_NNNN` convention; or `--file` names no file. | The exact cases follow this table. |
+| `TELOS_TEST_NOT_EXECUTED` | `telos test` with `[test] report` configured: the report is missing, invalid, names no testcase for the scenario, or every such testcase was skipped (message: one of the four sentences in the `test` section). Nothing is journalled; under `--all` the loop stops there. | `` make the runner execute the test named after `scn_NNNN` and write the report, then run `telos test SCN-NNNN` again `` |
 | `TELOS_ORPHAN_CODE` | `change reconcile`'s unbound-code gate, evaluated over the delta's post model: a file matched by `[code]`/`[tests]` globs in `telos.toml` is not covered by any `implements`/`proves` binding (message names which of the two families and the binding relation it's missing). | Bind it with `telos bind <path> <INT-id>`, or remove it from the `telos.toml` globs if it isn't spec-governed. |
 | `TELOS_CONSTRAINT_FAILED` | `change reconcile`'s constraint-checks gate: a constraint's `check` shell command exited non-zero, or could not even be spawned (message `` CON-0001 check failed: `<cmd>` ``). The command's own output is deliberately *not* included — it is not reproducible across machines (a git version, a locale, `$PATH`), so it cannot be frozen contract. | Run the constraint's `check` command directly to see its output. |
 | `TELOS_CHANGE_STATE_INVALID` | `change reconcile <id>` on a change whose status is not `approved`/`implementing` (message `` change CHG-0001 is not approved; approve it first ``). | `` run `telos change diff CHG-0001` then `telos change approve CHG-0001` `` |
@@ -428,10 +429,13 @@ implements by path; proves by `(scenario, test)`; neighbours by
 
 Runs the configured `[test] cmd` and appends an immutable witness journal
 record to the approved or implementing change whose staged intent owns the
-scenario. A non-zero runner exit is **red evidence, not a command failure**:
-the command still exits zero and records the exact blob OID of the test file
-that was run. A zero exit records green. The test command does not parse test
-runner output, so it cannot distinguish a zero-test run from green.
+scenario. Without `[test] report`, a non-zero runner exit is **red evidence, not a
+command failure**: the command still exits zero and records the exact blob
+OID of the test file that was run, and a zero exit records green. That
+reading cannot distinguish a zero-test run from green, and the run line, the
+seal and the result say so (`exit-status`). With `[test] report` configured
+the verdict is the report's — see "Report-backed evidence" below — and a run
+that proves nothing is `TELOS_TEST_NOT_EXECUTED` with no journal line.
 
 Before the process starts, Telos hashes the selected proof file. It re-hashes
 it after the process exits and journals only when the OID is unchanged; a
@@ -448,8 +452,14 @@ run returns:
 ```json
 {"scenario":"SCN-0108","witness":"red|green",
  "test":"tests/billing.rs::scn_0108_x","change":"CHG-0001",
- "command":"cargo test scn_0108_x"}
+ "command":"cargo nextest run --profile telos scn_0108_x",
+ "evidence":"report|exit-status","executed":1}
 ```
+
+`evidence` says how the verdict was decided. `executed` is the number of
+testcases named after the scenario that ran (passed plus failed) under
+`report`, and `null` under `exit-status`. The journal line ends in the same
+evidence word: `` run  SCN-0108 green "tests/billing.rs::scn_0108_x" "<oid>" report ``.
 
 Red returns `next_actions: ["telos test SCN-0108"]`; green returns
 `["telos change reconcile CHG-0001"]`. `test --all` witnesses every scenario
@@ -461,6 +471,49 @@ The drift carve-out is exact-path only: a test run admits drift of the test
 path it records, but refuses any other unclaimed drift. A journal record
 moves `approved` to `implementing`; journal records are digest-inert and
 therefore do not invalidate a prior approval. Re-running appends evidence.
+
+### Report-backed evidence
+
+`[test] report = "<path>"` names the JUnit XML report the runner writes,
+repository-relative and outside `telos/`. `{report}` in `[test] cmd` is
+substituted with that path as argument data exactly like `{filter}`; a
+runner that always writes to a fixed path needs no placeholder. Before every
+run Telos deletes the report if it exists; after the run it reads it back.
+The exit status is then diagnostic only.
+
+A `testcase` is named after the scenario when its `name` attribute contains
+`scn_NNNN` at an identifier boundary — the same predicate as discovery.
+`classname` is ignored. A testcase with a `failure` or `error` child is
+failed; with a `skipped` child, skipped; otherwise passed. Over the
+testcases named after the scenario, in this order: any failed → **red**;
+otherwise any skipped → not executed; otherwise any passed → **green**;
+otherwise not executed. Every `testcase` in the document counts, whether the
+root is `testsuites` or `testsuite`.
+
+"Not executed" is `TELOS_TEST_NOT_EXECUTED`, nothing is journalled, and the
+message is one of four frozen sentences (`<path>` the configured report,
+`scn_NNNN` the scenario's pattern):
+
+| Reason | Message |
+|---|---|
+| no file at the report path after the run | `` the runner did not write the report at `<path>` `` |
+| unreadable or malformed XML | `` the report at `<path>` is not valid JUnit XML: <parser error> `` |
+| no testcase named after the scenario | `` the report at `<path>` contains no testcase named after `scn_NNNN` `` |
+| testcases named after the scenario, none failed, `<n>` skipped | `` <n> testcase(s) named after `scn_NNNN` were skipped in the report at `<path>` `` |
+
+The hint is always
+`` make the runner execute the test named after `scn_NNNN` and write the report, then run `telos test SCN-NNNN` again ``.
+A compile error, a missing dependency, or a runner that selected nothing all
+land here rather than as red or green. Under `--all` the first such verdict
+aborts the loop; runs already taken stay journalled.
+
+Wiring a report: `cargo nextest run --profile <p> {filter}` with a junit
+profile, `pytest --junitxml={report} -k {filter}`, `gotestsum --junitfile
+{report} -- -run {filter}` (behind a runner script, since pipes are refused),
+`jest --ci --reporters=jest-junit -t {filter}` with `JEST_JUNIT_OUTPUT_FILE`,
+`phpunit --log-junit {report} --filter {filter}`, `dotnet test --logger
+"junit;LogFilePath={report}" --filter {filter}`. Keep the report path out of
+the `[code]`/`[tests]` globs and in `.gitignore`.
 
 ### Display and runner-template execution
 

@@ -1559,6 +1559,13 @@ pub fn with_report_fixture(policy: &str) -> TempDir {
     with_fixture_mut(|root| {
         install_fake_runner(root);
         write_report_fixture(root, &sealed_scenarios_passed());
+        // The corpus test file is a placeholder; give the sealed SCN-0107
+        // target a real function so `rebuild status` can resolve it.
+        fs::write(
+            root.join("tests/billing.rs"),
+            "fn scn_0107_full_payment_settles_the_invoice() {}\n",
+        )
+        .unwrap();
         let config = root.join("telos/telos.toml");
         let src = fs::read_to_string(&config).unwrap();
         assert!(

@@ -433,7 +433,7 @@ impl fmt::Display for FieldName {
     }
 }
 
-fn is_lower_kebab(s: &str) -> bool {
+pub(crate) fn is_lower_kebab(s: &str) -> bool {
     let mut segments = s.split('-');
     let Some(first) = segments.next() else {
         return false;

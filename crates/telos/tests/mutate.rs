@@ -512,6 +512,51 @@ fn a_decimal_field_that_would_read_back_as_an_int_is_refused_at_staging() {
     assert_eq!(read(tmp.path(), COUNTERS), counters_before);
 }
 
+/// The enum symbols of a staged attribute are written bare into the change
+/// file, where the parser reads them back as `lower-ident`s: `X` would be
+/// accepted, emitted as `enum(playing, X, o, draw)`, and every later command
+/// -- `change diff`, `change abandon`, the next `add` -- would then fail to
+/// parse the change, with a hand edit as the only way out (#29). The payload
+/// boundary refuses it instead, naming the attribute and the accepted
+/// spelling, and touches neither the change file nor `counters.toml`.
+#[test]
+fn an_enum_symbol_that_would_not_read_back_is_refused_at_staging() {
+    let tmp = fresh();
+    open_change(tmp.path());
+    let change_before = read(tmp.path(), CHG_0001);
+    let counters_before = read(tmp.path(), COUNTERS);
+
+    let error = stage_err(
+        tmp.path(),
+        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &json!({
+            "owner": "billing", "name": "Board", "kind": "entity", "def": "One round.",
+            "attrs": [ {"name": "outcome", "type": "enum",
+                        "values": ["playing", "X", "o", "draw"]} ]
+        })
+        .to_string(),
+    );
+
+    assert_eq!(error["code"], json!("TELOS_PARSE_ERROR"));
+    assert_eq!(
+        error["message"],
+        json!(
+            "payload: attribute `Board.outcome` has type `enum`, but `X` is not an enum \
+             symbol; symbols are lower-kebab-case like `x-wins`"
+        )
+    );
+    assert_eq!(
+        error["hint"],
+        json!(
+            "an enum symbol is ASCII lower-kebab-case, exactly what a `.tel` file accepts \
+             inside `enum(...)`: a lowercase letter, then lowercase letters or digits, \
+             segments joined by single `-` (`playing`, `x-wins`)"
+        )
+    );
+    assert_eq!(read(tmp.path(), CHG_0001), change_before);
+    assert_eq!(read(tmp.path(), COUNTERS), counters_before);
+}
+
 /// End-to-end lexeme validation: a JSON payload is
 /// the one way a malformed `date` can reach the model, and the semantic
 /// pass is where it is caught.

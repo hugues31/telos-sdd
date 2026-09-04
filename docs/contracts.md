@@ -168,7 +168,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_NOT_INITIALIZED` | `telos/telos.toml` exists, but `telos.lock` is missing (`status`, `check --sealed`). `telos init` always seals, so this is not "unsealed" — it's abnormal. | `` the project was never sealed; run `telos init` in a fresh repository or restore telos.lock from git `` |
 | `TELOS_ALREADY_INITIALIZED` | `telos init` run on a project that already has `telos/telos.toml`. | `` project already initialized; see `telos status` `` |
 | `TELOS_PARSE_ERROR` | A `.tel` file (or `telos.lock`, or `telos.toml`) is syntactically invalid (`load_model`, `check`, `change diff`'s base parse, …). | None today — `message` names the offending file and, when the parser can determine it, the line and column. **Exception:** `adopt` on a drifted `.tel` file it cannot parse forces this same code but replaces the hint with `ADOPT_PARSE_HINT`; see the `adopt` section below. |
-| `TELOS_PARSE_ERROR` | An `add`/`edit` payload on stdin is not a JSON object, or its shape does not match the payload schemas section below (`message` prefixed `` payload: `` — e.g. `` payload: missing required field `title` in intent payload ``). A handful of exact wordings are frozen verbatim without that prefix: an unknown key (`` unknown key `titel` in notion payload ``), an unknown closed-set word (`` unknown attribute type `txt`; expected one of string, int, decimal, money, bool, date, datetime, enum, ref ``), a `decimal` value sent as a JSON number, and a malformed `set` action. | None today. |
+| `TELOS_PARSE_ERROR` | An `add`/`edit` payload on stdin is not a JSON object, or its shape does not match the payload schemas section below (`message` prefixed `` payload: `` — e.g. `` payload: missing required field `title` in intent payload ``). A handful of exact wordings are frozen verbatim without that prefix: an unknown key (`` unknown key `titel` in notion payload ``), an unknown closed-set word (`` unknown attribute type `txt`; expected one of string, int, decimal, money, bool, date, datetime, enum, ref ``), a `decimal` value sent as a JSON number, and a malformed `set` action. | None, except the two grammar cases: an expression field that does not parse (hint names the mini-language grammar; see `add intent` below) and an `enum` symbol that is not lower-kebab-case (hint names the symbol grammar; see `add notion` below). |
 | `TELOS_INTEGRITY_VIOLATION` | An integrity violation with no dedicated hint: `seal` finding a binding to a code file that doesn't exist on disk, an entity declared twice, or `remove`/`adopt` leaving a still-referenced entity behind (`cannot remove <entity>: <referrer>`). | None today — `message` names the offending path or entity. |
 | `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s accept-OID gate: an `accept` op's path changed, or vanished, since `adopt` recorded its OID (message `` `<path>` changed since it was accepted `` or `` `<path>` was accepted but no longer exists ``). | `` re-run `telos adopt` to accept the current bytes of `<path>` `` |
 | `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once when at least one intent is active) failed. Without `[test] report`, that run exited non-zero. With `[test] report` configured, a testcase named after the impacted (respectively active) scenario failed in that run's report (message `` the test run for `<target>` failed: `<substituted cmd>` ``). A runner that cannot be spawned, or a stale report that cannot be removed before the run, is `TELOS_INTERNAL` instead — `run_proof`'s own message — not this code. A full reconcile with only draft/deprecated intents invokes no runner. The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the configured executable with the displayed arguments, then reconcile again` |
@@ -887,7 +887,14 @@ entity's current value. `remove <kind> <key>` takes no payload.
 ```
 `attrs`/`rels` default to `[]` when absent.
 `type` ∈ `string|int|decimal|money|bool|date|datetime|enum|ref`;
-`enum` requires `values` (≥ 1 entry); `ref` requires `target`.
+`enum` requires `values` (≥ 1 entry); `ref` requires `target`. Every
+`values` entry is an enum symbol: ASCII lower-kebab-case (`playing`,
+`x-wins`), because the symbol is written bare into the change file and
+read back by the parser as a `lower-ident`. Any other spelling (`X`) is
+refused at staging, so `add` never writes a change it cannot read back:
+`` payload: attribute `Board.outcome` has type `enum`, but `X` is not an
+enum symbol; symbols are lower-kebab-case like `x-wins` `` — the one
+shape error whose `hint` is set, naming the accepted grammar.
 
 **`add intent`** (no `id` on the intent or on any scenario — every id is
 allocated and reported back in `result`; steps carry their state under

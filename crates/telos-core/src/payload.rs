@@ -43,7 +43,7 @@ use serde_json::{Map, Value};
 
 use crate::counters::Alloc;
 use crate::error::{ErrorCode, TelosError};
-use crate::ids::{FieldName, IntentId, NotionName, ScenarioId};
+use crate::ids::{FieldName, IntentId, NotionName, ScenarioId, is_lower_kebab};
 use crate::model::{
     Action, Attr, AttrRef, AttrType, CmpOp, Constraint, ConstraintKind, Expr, InstanceStep, Intent,
     IntentStatus, Literal, Notion, NotionKind, Operand, Rel, Rule, Scenario, Scope, Statement,
@@ -110,7 +110,12 @@ fn notion_from_obj(obj: &Map<String, Value>, base: Option<&Notion>) -> Result<No
         "notion",
         base.map(|b| b.attrs.clone()),
         Some(Vec::new()),
-        |v| as_array(v, "attrs")?.iter().map(attr_from_json).collect(),
+        |v| {
+            as_array(v, "attrs")?
+                .iter()
+                .map(|attr| attr_from_json(attr, &name))
+                .collect()
+        },
     )?;
     let rels = resolve(
         obj,
@@ -137,16 +142,36 @@ fn notion_kind_from_str(s: &str) -> Result<NotionKind, TelosError> {
         .ok_or_else(|| closed_set_err("notion kind", s, &NOTION_KIND_WORDS.map(|(word, _)| word)))
 }
 
-fn attr_from_json(v: &Value) -> Result<Attr, TelosError> {
+fn attr_from_json(v: &Value, notion: &NotionName) -> Result<Attr, TelosError> {
     let obj = as_object(v, "a notion attr")?;
     check_unknown_keys(obj, &["name", "type", "values", "target"], "notion attr")?;
     let name = FieldName::new(as_str(required(obj, "name", "notion attr")?, "name")?)?;
     let ty_word = as_str(required(obj, "type", "notion attr")?, "type")?;
-    let ty = attr_type_from_json(ty_word, obj)?;
+    let ty = attr_type_from_json(ty_word, obj, notion, &name)?;
     Ok(Attr { name, ty })
 }
 
-fn attr_type_from_json(word: &str, obj: &Map<String, Value>) -> Result<AttrType, TelosError> {
+/// The hint an enum symbol refused at staging carries: the grammar of what
+/// `enum(...)` accepts in a `.tel` file, since the symbol is written there
+/// verbatim. A caller that only ever sees JSON has no other way to learn
+/// that a symbol is an identifier of the mini-language, not free text.
+const ENUM_SYMBOL_HINT: &str = "an enum symbol is ASCII lower-kebab-case, exactly what a `.tel` \
+file accepts inside `enum(...)`: a lowercase letter, then lowercase letters or digits, segments \
+joined by single `-` (`playing`, `x-wins`)";
+
+/// Types one attribute declaration. The symbols of an `enum` are the one
+/// part of a declaration this boundary checks lexically: they are emitted
+/// bare into the change file and read back by the parser as `lower-ident`s,
+/// so a symbol spelled any other way (`X`) would be accepted here, written,
+/// and then break every later parse of the change -- with no command left
+/// to repair or abandon it. `FieldName`'s grammar is exactly that of a
+/// `lower-ident`, so the same predicate serves both.
+fn attr_type_from_json(
+    word: &str,
+    obj: &Map<String, Value>,
+    notion: &NotionName,
+    attr: &FieldName,
+) -> Result<AttrType, TelosError> {
     match word {
         "string" => Ok(AttrType::String),
         "int" => Ok(AttrType::Int),
@@ -164,7 +189,17 @@ fn attr_type_from_json(word: &str, obj: &Map<String, Value>) -> Result<AttrType,
             }
             let symbols = values
                 .iter()
-                .map(|item| Ok(as_str(item, "values")?.to_string()))
+                .map(|item| {
+                    let symbol = as_str(item, "values")?;
+                    if !is_lower_kebab(symbol) {
+                        return Err(shape_err(format!(
+                            "attribute `{notion}.{attr}` has type `enum`, but `{symbol}` is not \
+                             an enum symbol; symbols are lower-kebab-case like `x-wins`"
+                        ))
+                        .hint(ENUM_SYMBOL_HINT));
+                    }
+                    Ok(symbol.to_string())
+                })
                 .collect::<Result<Vec<_>, TelosError>>()?;
             Ok(AttrType::Enum(symbols))
         }
@@ -650,7 +685,9 @@ fn instance_step_from_json(
 /// exists to check it against; this boundary only ever needs to decide,
 /// from the JSON value alone, which `Literal` variant it becomes.
 ///
-/// The one lexeme this boundary does check is a `decimal`'s. The string
+/// The one lexeme this boundary checks in a `fields` value is a `decimal`'s
+/// (an enum's declared symbols get the same treatment in
+/// [`attr_type_from_json`], for the same reason). The string
 /// is stored verbatim, emitted verbatim into the change file, and read
 /// back by the lexer -- so anything but a `decimal-lit` would come back as
 /// a different variant (`"2"` as an `Int` the semantic pass rejects at
@@ -1154,6 +1191,79 @@ mod tests {
             "attrs": [ {"name": "state", "type": "enum", "values": []} ]
         });
         assert!(notion_from_json(&json).is_err());
+    }
+
+    /// An enum symbol is written bare into the change file and read back by
+    /// the parser as a `lower-ident`: `X` would be accepted here, emitted as
+    /// `enum(playing, X, o, draw)`, and make the whole change unparseable
+    /// for every later command (#29). The boundary refuses it, naming the
+    /// attribute, the value and the accepted spelling.
+    #[test]
+    fn notion_from_json_rejects_enum_symbol_that_is_not_lower_kebab_naming_the_attribute() {
+        let json = serde_json::json!({
+            "name": "Board", "kind": "entity", "def": "x",
+            "attrs": [ {"name": "outcome", "type": "enum",
+                        "values": ["playing", "X", "o", "draw"]} ]
+        });
+        let err = notion_from_json(&json).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TelosParseError);
+        assert_eq!(
+            err.message,
+            "payload: attribute `Board.outcome` has type `enum`, but `X` is not an enum \
+             symbol; symbols are lower-kebab-case like `x-wins`"
+        );
+        assert_eq!(
+            err.hint.as_deref(),
+            Some(
+                "an enum symbol is ASCII lower-kebab-case, exactly what a `.tel` file \
+                 accepts inside `enum(...)`: a lowercase letter, then lowercase letters or \
+                 digits, segments joined by single `-` (`playing`, `x-wins`)"
+            )
+        );
+    }
+
+    /// What the boundary accepts as an enum symbol always lexes back as a
+    /// single `LowerIdent` token covering the whole string -- the round-trip
+    /// invariant the check exists for. The relation is inclusion, not
+    /// equality: the lexer also tolerates `_` inside a segment, which the
+    /// documented `lower-ident` grammar does not, so a refused symbol may
+    /// still lex while an accepted one always does.
+    #[test]
+    fn is_lower_kebab_accepts_only_what_lexes_as_one_lower_ident_token() {
+        let cases = [
+            ("playing", true),
+            ("x-wins", true),
+            ("o", true),
+            ("a1", true),
+            ("v2-final", true),
+            ("X", false),
+            ("Draw", false),
+            ("x_wins", false),
+            ("-x", false),
+            ("x-", false),
+            ("x--wins", false),
+            ("1x", false),
+            ("x wins", false),
+            ("x.y", false),
+            ("", false),
+            ("\u{E9}", false),
+            ("x\n", false),
+        ];
+        for (symbol, expected) in cases {
+            assert_eq!(is_lower_kebab(symbol), expected, "{symbol:?}");
+            if expected {
+                let toks = lex(symbol).unwrap_or_else(|d| panic!("{symbol:?} does not lex: {d:?}"));
+                assert!(
+                    matches!(
+                        toks.as_slice(),
+                        [first, eof]
+                            if first.kind == TokKind::LowerIdent(symbol.to_string())
+                                && eof.kind == TokKind::Eof
+                    ),
+                    "{symbol:?} does not lex as one `LowerIdent`: {toks:?}"
+                );
+            }
+        }
     }
 
     #[test]

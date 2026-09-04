@@ -10,9 +10,10 @@
 
 use serde_json::{Value, json};
 
+use telos_core::ids::ChangeId;
 use telos_core::state::{Coverage, ProjectStateKind, StateReport, coverage, drift_token};
 
-use crate::commands::{Ctx, project, require_sealed_integrity};
+use crate::commands::{Ctx, Project, project, require_sealed_integrity};
 use crate::envelope::{CmdResult, Outcome};
 
 /// A [`Coverage`] with every counter at zero -- what `status` reports when
@@ -40,6 +41,7 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         &project.state.drift,
     )?;
     let evidence = project.lock.proof_evidence.as_str();
+    let unparseable = unparseable_change_ids(&project);
     let report = project.state;
 
     let cov = project
@@ -56,13 +58,24 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         Value::Null
     };
     // One state, one suggestion: drift is more urgent than `changing`, and a
-    // changing project's single next step is to inspect what is open.
+    // changing project's single next step is to inspect what is open. The
+    // one addition is per change, not per state: a change whose file does
+    // not parse can only be cleared by `abandon` (the workflow forbids
+    // repairing the file by hand), so that command is spelled out for it --
+    // otherwise `status` sends the caller to `change list`, which reports
+    // the same obligation and suggests nothing, a loop with no way out.
     let next_actions = match report.state {
         ProjectStateKind::Drifted => vec![
             format!("telos adopt --expected-state {token}"),
             format!("telos revert --expected-state {token}"),
         ],
-        ProjectStateKind::Changing => vec!["telos change list".to_string()],
+        ProjectStateKind::Changing => std::iter::once("telos change list".to_string())
+            .chain(
+                unparseable
+                    .iter()
+                    .map(|id| format!("telos change abandon {id}")),
+            )
+            .collect(),
         ProjectStateKind::Coherent => Vec::new(),
     };
 
@@ -79,6 +92,20 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         human: human_summary(&report, drifted, cov, &token, evidence),
         next_actions,
     })
+}
+
+/// The ids of the open changes whose file did not parse, ascending: every
+/// id the best-effort scan reported ([`Project::changes`]) that has no
+/// parsed twin in [`Project::parsed`] -- which is `scan_changes`'s own
+/// definition of an unparseable file, read back off the two halves it
+/// produced in one pass rather than re-scanning the store.
+fn unparseable_change_ids(project: &Project) -> Vec<ChangeId> {
+    project
+        .changes
+        .iter()
+        .map(|info| info.id)
+        .filter(|id| !project.parsed.iter().any(|change| change.id == *id))
+        .collect()
 }
 
 /// A compact, terse human-readable summary: the state, the drifted paths

@@ -229,7 +229,7 @@ fn open_change_infos_treats_an_unparseable_file_as_a_best_effort_open_change() {
     assert!(infos[0].claims.is_empty());
     assert_eq!(
         infos[0].obligations,
-        vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()]
+        vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()]
     );
 }
 
@@ -257,7 +257,7 @@ fn open_change_infos_treats_invalid_utf8_bytes_as_a_best_effort_open_change() {
     assert!(infos[0].claims.is_empty());
     assert_eq!(
         infos[0].obligations,
-        vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()]
+        vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()]
     );
 }
 
@@ -325,7 +325,7 @@ fn scan_changes_keeps_an_unparseable_file_as_an_info_stub_and_out_of_parsed() {
     assert!(scan.infos[1].claims.is_empty());
     assert_eq!(
         scan.infos[1].obligations,
-        vec!["repair telos/changes/CHG-0002.tel (unparseable)".to_string()]
+        vec!["abandon (telos/changes/CHG-0002.tel is unparseable)".to_string()]
     );
 }
 

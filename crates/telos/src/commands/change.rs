@@ -12,7 +12,8 @@
 //!   change or freezing its digest both stage a review against the sealed
 //!   base, so both need that base to still be the sealed one; `list`,
 //!   `abandon` and `diff` read, or clean up, and a drifted project is
-//!   exactly when a caller needs them most.
+//!   exactly when a caller needs them most. `abandon` does not even read:
+//!   an unparseable change file is one it must still be able to delete.
 
 use clap::Subcommand;
 use serde_json::{Value, json};
@@ -174,14 +175,20 @@ fn list(ctx: &Ctx) -> CmdResult {
 
 // --- change abandon ---------------------------------------------------------
 
-/// Deletes a change's file, after reading it once.
+/// Deletes a change's file, without reading it.
 ///
-/// The read is not decoration: it is what turns an id the store does not
-/// hold into [`read_change`]'s “unknown change `CHG-9999`” (with its
-/// nearest-id hint) *before* anything is deleted, and what refuses to
-/// silently drop a file whose id was mistyped. Not gated on drift: a
-/// change is abandonable whatever the working tree looks like -- it is one
-/// of the two ways out of a mess, not more mutation of the spec.
+/// Abandoning means throwing the change away, and nothing about that
+/// decision depends on the file's content -- so the file is deliberately
+/// *not* parsed first. A change whose file no longer parses (a truncated
+/// write, a bad merge of `telos/changes/`) is exactly the one this command
+/// must still be able to remove: `status` and `change list` already report
+/// it best-effort with an `abandon` obligation, and this is the only
+/// command that can clear that obligation without the hand edit the
+/// workflow forbids. An id the store does not hold is still refused, by
+/// [`delete_change`]'s own “unknown change `CHG-9999`” (with its nearest-id
+/// hint), never a silent no-op. Not gated on drift: a change is
+/// abandonable whatever the working tree looks like -- it is one of the
+/// two ways out of a mess, not more mutation of the spec.
 fn abandon(ctx: &Ctx, id: &str) -> CmdResult {
     // The argument is validated before anything is discovered, the same
     // order `show` uses: a malformed id is the caller's mistake, and saying
@@ -189,7 +196,6 @@ fn abandon(ctx: &Ctx, id: &str) -> CmdResult {
     let id = parse_change_id(id)?;
     let ws = Workspace::discover(&ctx.cwd)?;
 
-    read_change(&ws, id)?;
     delete_change(&ws, id)?;
 
     Ok(Outcome {

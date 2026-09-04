@@ -172,17 +172,19 @@ pub fn scan_changes(ws: &Workspace) -> Result<ChangeScan, TelosError> {
 /// A change file that fails to parse is not an error here: it is reported
 /// as an [`OpenChangeInfo`] of its own, `status: Open`, no claim (an
 /// unparsable file's ops cannot be trusted enough to claim anything on its
-/// behalf), and the single obligation `repair telos/changes/CHG-NNNN.tel
-/// (unparseable)` -- so a corrupted change file still keeps the project's
+/// behalf), and the single obligation `abandon (telos/changes/CHG-NNNN.tel
+/// is unparseable)` -- so a corrupted change file still keeps the project's
 /// state answerable (`compute_state`) instead of blocking every command
-/// that needs to know what is open. `id` in that case comes from the file
-/// name [`list_change_ids`] already validated, not from the unreadable
-/// content.
+/// that needs to know what is open. The obligation names `abandon` because
+/// it is the one command that clears it: the workflow forbids repairing
+/// the file by hand, and [`delete_change`] does not need the file to parse.
+/// `id` in that case comes from the file name [`list_change_ids`] already
+/// validated, not from the unreadable content.
 ///
 /// "Fails to parse" is read broadly here, on purpose: bytes that are not
 /// valid UTF-8 (a truncated write, binary corruption) can never reach
 /// [`parse_change_file`] (it takes `&str`) and are exactly the kind of
-/// on-disk damage this scan exists to survive, so they get the same repair
+/// on-disk damage this scan exists to survive, so they get the same `abandon`
 /// obligation as a syntax error rather than aborting the whole scan -- the
 /// same is true of any other I/O failure reading an individual file (a
 /// permission error, say) once its id has already been confirmed present
@@ -239,13 +241,15 @@ fn read_scanned(ws: &Workspace, id: ChangeId) -> Scanned {
 
 /// The best-effort [`OpenChangeInfo`] for a change file that could not be
 /// read as canonical `.tel` source at all -- invalid UTF-8, a parse
-/// failure, or any other per-file I/O error.
+/// failure, or any other per-file I/O error. Its one obligation names the
+/// way out, `telos change abandon <id>`, rather than a repair the workflow
+/// does not allow.
 fn unparseable_info(id: ChangeId) -> OpenChangeInfo {
     OpenChangeInfo {
         id,
         status: ChangeStatus::Open,
         claims: BTreeSet::new(),
-        obligations: vec![format!("repair telos/changes/{id}.tel (unparseable)")],
+        obligations: vec![format!("abandon (telos/changes/{id}.tel is unparseable)")],
     }
 }
 
@@ -365,7 +369,9 @@ mod tests {
                 id: ChangeId(1),
                 status: ChangeStatus::Open,
                 claims: BTreeSet::new(),
-                obligations: vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()],
+                obligations: vec![
+                    "abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()
+                ],
             }
         );
     }

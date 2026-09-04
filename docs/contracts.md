@@ -253,7 +253,7 @@ reconcile (from the effective configuration), and `--full` all write
   (an unclaimed drift outranks it — see `drift` below). It is produced by
   `change open` or `adopt` while their transactions remain open.
 - `changes` — open changes, best-effort (an unparseable change file still
-  appears, with `status: "open"` and a repair obligation, rather than
+  appears, with `status: "open"` and an `abandon` obligation, rather than
   blocking `status`). Contains one item per open change:
   `{"id": "CHG-0007", "status": "implementing", "obligations": ["..."]}`.
   `obligations` is the frozen, status-keyed list of what remains — see the
@@ -285,7 +285,10 @@ reconcile (from the effective configuration), and `--full` all write
 `next_actions` is
 `["telos adopt --expected-state sha256:...", "telos revert --expected-state sha256:..."]`
 when `state` is `"drifted"`, using the exact same `drift.token` in both;
-`["telos change list"]` when `state` is `"changing"`; `[]` when `"coherent"`.
+`["telos change list"]` when `state` is `"changing"`, followed by one
+`telos change abandon CHG-NNNN` per open change whose file does not parse
+(ascending by id) — the one command that can clear that change's obligation
+without a hand edit; `[]` when `"coherent"`.
 
 ## `check [--sealed]`
 
@@ -597,7 +600,9 @@ status-keyed list of what remains before a change is done
 A change file that fails to parse at all is a different, best-effort case
 (`open_change_infos`, not `Change::obligations`): it still gets an entry,
 `status: "open"`, empty `claims`, and the one-item obligations list
-`["repair telos/changes/CHG-NNNN.tel (unparseable)"]`.
+`["abandon (telos/changes/CHG-NNNN.tel is unparseable)"]` — `abandon`
+because it is the one command that clears it: the file is never repaired by
+hand, and `change abandon` does not need it to parse.
 
 ### `change open <motivation>`
 
@@ -612,7 +617,7 @@ another is already in flight, as long as nothing is unclaimed drift.
 ### `change list`
 
 Every change the store holds, best-effort (an unparseable change file still
-gets an entry — `status: "open"`, empty claims, the repair obligation of
+gets an entry — `status: "open"`, empty claims, the `abandon` obligation of
 the "Obligations" subsection above — rather than blocking the listing).
 Never gated on drift or on anything else: cleanup and inspection stay
 available in every project state.
@@ -622,10 +627,14 @@ available in every project state.
 
 ### `change abandon <id>`
 
-Reads the change first (so a mistyped id gets `` unknown change `CHG-9999`
-``, never a silent no-op), then deletes its file. Not gated on drift —
-abandoning is one of the two ways out of a mess, not more mutation of the
-spec.
+Deletes the change's file without reading it: abandoning means throwing
+the change away, and nothing about that decision depends on the file's
+content — so a change whose file no longer parses (a truncated write, a bad
+merge of `telos/changes/`) is abandoned like any other, instead of
+`TELOS_PARSE_ERROR` blocking the one command that can clear its obligation.
+A mistyped id still gets `` unknown change `CHG-9999` `` (from the delete
+itself), never a silent no-op. Not gated on drift — abandoning is one of the
+two ways out of a mess, not more mutation of the spec.
 
 `result`: `{"id": "CHG-0001", "status": "abandoned"}`. `next_actions`: `[]`.
 

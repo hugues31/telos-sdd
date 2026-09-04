@@ -476,7 +476,7 @@ fn compute_state_is_drifted_listing_only_the_path_no_open_change_claims() {
 }
 
 #[test]
-fn compute_state_reports_an_unparseable_change_file_as_changing_with_a_repair_obligation() {
+fn compute_state_reports_an_unparseable_change_file_as_changing_with_an_abandon_obligation() {
     let tmp = corpus_repo();
     let (ws, lock, git) = discover_and_seal(tmp.path());
 
@@ -497,14 +497,14 @@ fn compute_state_reports_an_unparseable_change_file_as_changing_with_a_repair_ob
         vec![ChangeSummary {
             id: ChangeId(1),
             status: "open".to_string(),
-            obligations: vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()],
+            obligations: vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()],
         }]
     );
 }
 
 /// Same shape as the test above, but the file is not even valid UTF-8 --
 /// bytes `parse_change_file` (`&str`-only) can never be offered. This must
-/// still reach `compute_state` as a `Changing` report with the repair
+/// still reach `compute_state` as a `Changing` report with the `abandon`
 /// obligation, never as an `Err`: `open_change_infos` is best-effort per
 /// A truncated write or binary corruption is exactly the on-disk
 /// damage that guarantee exists to survive.
@@ -530,7 +530,7 @@ fn compute_state_reports_invalid_utf8_change_bytes_as_changing_never_an_error() 
         vec![ChangeSummary {
             id: ChangeId(1),
             status: "open".to_string(),
-            obligations: vec!["repair telos/changes/CHG-0001.tel (unparseable)".to_string()],
+            obligations: vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()],
         }]
     );
 }

@@ -207,6 +207,41 @@ fn status_json_with_an_open_change_reports_the_changing_state() {
     );
 }
 
+/// A change whose file does not parse keeps `status` answerable (its entry
+/// is best-effort, `open`, with the one obligation naming the way out), and
+/// `next_actions` spells that way out: `telos change abandon <id>` is the
+/// only command that can clear the obligation without a hand edit, so an
+/// agent reading the envelope finds it there rather than looping on
+/// `telos change list`.
+#[test]
+fn status_points_at_abandon_for_an_unparseable_change() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    fs::write(tmp.path().join(CHG_0001), "@@@ not a change @@@\n").unwrap();
+
+    let out = telos(tmp.path(), &["status", "--json"]).output().unwrap();
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}",
+        out.status
+    );
+    let envelope = json_stdout(&out);
+    assert_eq!(envelope["result"]["state"], json!("changing"));
+    assert_eq!(
+        envelope["result"]["changes"],
+        json!([{
+            "id": "CHG-0001",
+            "status": "open",
+            "obligations": ["abandon (telos/changes/CHG-0001.tel is unparseable)"]
+        }])
+    );
+    assert_eq!(
+        envelope["next_actions"],
+        json!(["telos change list", "telos change abandon CHG-0001"])
+    );
+}
+
 // --- change abandon ------------------------------------------------------
 
 #[test]
@@ -300,6 +335,39 @@ fn change_abandon_of_an_unknown_id_reports_the_store_error() {
     assert_eq!(envelope["error"]["hint"], json!("closest is CHG-0001"));
 }
 
+/// Abandoning means throwing the change away, so nothing about it depends
+/// on the file's content: a change whose file no longer parses -- a
+/// truncated write, a bad merge of `telos/changes/` -- is deleted like any
+/// other, instead of the parse failure blocking the one command that can
+/// clear its obligation.
+#[test]
+fn change_abandon_deletes_an_unparseable_change_file() {
+    let tmp = with_fixture();
+    open_change(tmp.path(), MOTIVATION);
+    fs::write(tmp.path().join(CHG_0001), "@@@ not a change @@@\n").unwrap();
+
+    let out = telos(tmp.path(), &["change", "abandon", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?} -- {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        json_stdout(&out)["result"],
+        json!({ "id": "CHG-0001", "status": "abandoned" })
+    );
+    assert!(
+        !tmp.path().join(CHG_0001).exists(),
+        "the unparseable change file must be gone"
+    );
+    let out = telos(tmp.path(), &["status", "--json"]).output().unwrap();
+    assert_eq!(json_stdout(&out)["result"]["state"], json!("coherent"));
+}
+
 // --- change list ---------------------------------------------------------
 
 #[test]
@@ -380,7 +448,7 @@ fn change_list_human_mode_prints_one_line_per_change() {
 
 /// An unparseable change file does not take `change list` down with it: the
 /// entry is still reported with an empty motivation (there is
-/// nothing trustworthy to read) and the repair obligation.
+/// nothing trustworthy to read) and the `abandon` obligation.
 #[test]
 fn change_list_is_best_effort_on_an_unparseable_change_file() {
     let tmp = with_fixture();
@@ -403,7 +471,7 @@ fn change_list_is_best_effort_on_an_unparseable_change_file() {
                 "id": "CHG-0001",
                 "status": "open",
                 "motivation": "",
-                "obligations": ["repair telos/changes/CHG-0001.tel (unparseable)"]
+                "obligations": ["abandon (telos/changes/CHG-0001.tel is unparseable)"]
             }]
         })
     );

@@ -79,14 +79,18 @@ launches the loopback-only view in your default web browser.
 
 ## See it in action
 
-[Telos Tamagotchi](https://github.com/hugues31/telos-tamagotchi) shows five
-complete change cycles in a small Python application. Browse its
-[exported specification](https://hugues31.github.io/telos-tamagotchi/) or
-replay the repository history.
+[Telos Tic-tac-toe](https://github.com/hugues31/telos-tictactoe) is a
+tic-tac-toe game in Python, playable in the terminal and in a window, built
+from six plain-text prompts given to a coding agent: four bounded contexts,
+ten intents, a context map, an architecture constraint with an executable
+check, and a hand edit of sealed code caught as drift. Browse its
+[exported specification](https://hugues31.github.io/telos-tictactoe/),
+check out the tag of any prompt, or replay the prompts against a Telos
+release with its agent runner.
 
 <p align="center">
-  <a href="https://hugues31.github.io/telos-tamagotchi/">
-    <img src="https://raw.githubusercontent.com/hugues31/telos-tamagotchi/main/docs/demo.gif" alt="Browsing the sealed Telos Tamagotchi specification" width="840">
+  <a href="https://hugues31.github.io/telos-tictactoe/">
+    <img src="https://raw.githubusercontent.com/hugues31/telos-tictactoe/main/docs/demo.gif" alt="Browsing the sealed Telos Tic-tac-toe specification" width="840">
   </a>
 </p>
 
@@ -156,8 +160,8 @@ production-file boundaries deterministically.
 
 - [CLI contracts](docs/contracts.md): schemas, errors, and safety boundaries.
 - [Billing demo](demo/billing): the complete reconstruction protocol.
-- [Telos Tamagotchi](https://github.com/hugues31/telos-tamagotchi): a replayable
-  Python example.
+- [Telos Tic-tac-toe](https://github.com/hugues31/telos-tictactoe): a Python
+  example built from prompts, replayable against any Telos release.
 - [Releases](https://github.com/hugues31/telos-sdd/releases): prebuilt archives.
 
 Git must be available on `PATH`. Generated CI also requires a published Telos

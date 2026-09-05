@@ -1394,3 +1394,114 @@ fn init_ci_keeps_the_frozen_init_envelope_and_exact_collision_error() {
     assert_eq!(fs::read_to_string(workflow).unwrap(), "owned\n");
     assert!(!collision.path().join("telos").exists());
 }
+
+/// Execute the published JSON itself: adding owners or prerequisites in the
+/// test harness would hide exactly the documentation drift this guards.
+#[test]
+fn documented_creation_bootstrap_and_edit_result_keys_are_executable() {
+    let doc = include_str!("../../../docs/contracts.md");
+    let expected =
+        json_code_block_after(doc, "`add`/`edit` result (the IDs below are illustrative):");
+    let keys = expected
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let tmp = repo();
+    telos(tmp.path(), &["init"]).assert().success();
+    telos(tmp.path(), &["change", "open", "Settle invoices"])
+        .assert()
+        .success();
+    for (kind, marker, expected_id, edit_key) in [
+        ("context", "**`add context`**:", "billing", "billing"),
+        (
+            "capability",
+            "**`add capability`**:",
+            "billing/settlement",
+            "billing/settlement",
+        ),
+        (
+            "notion",
+            "**`add notion` prerequisite: `Customer`**:",
+            "billing/Customer",
+            "billing/Customer",
+        ),
+        (
+            "notion",
+            "**`add notion`**:",
+            "billing/Invoice",
+            "billing/Invoice",
+        ),
+        (
+            "notion",
+            "**`add notion` prerequisite: `PaymentReceived`**:",
+            "billing/PaymentReceived",
+            "billing/PaymentReceived",
+        ),
+        (
+            "intent",
+            "**`add intent`** (no `id`",
+            "INT-0001",
+            "INT-0001",
+        ),
+        (
+            "constraint",
+            "**`add constraint`**:",
+            "CON-0001",
+            "CON-0001",
+        ),
+    ] {
+        let payload = json_code_block_after(doc, marker);
+        let out = telos(tmp.path(), &["add", kind, "--change", "CHG-0001", "--json"])
+            .write_stdin(payload.to_string())
+            .output()
+            .unwrap();
+        let result = envelope(&out);
+        assert_eq!(result["ok"], true, "{kind}: {result:?}");
+        assert_eq!(result["result"]["id"], expected_id);
+        assert_eq!(
+            result["result"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            keys
+        );
+        if kind == "intent" {
+            assert_eq!(result["result"]["scenario_ids"], json!(["SCN-0001"]));
+        } else {
+            assert_eq!(result["result"]["scenario_ids"], json!([]));
+        }
+        // Strategic entities require full payloads; tactical edits preserve
+        // absent fields. Neither kind changes the documented response shape.
+        let edit_payload = if matches!(kind, "context" | "capability") {
+            payload.to_string()
+        } else {
+            "{}".to_string()
+        };
+        let out = telos(
+            tmp.path(),
+            &["edit", kind, edit_key, "--change", "CHG-0001", "--json"],
+        )
+        .write_stdin(edit_payload)
+        .output()
+        .unwrap();
+        let result = envelope(&out);
+        assert_eq!(result["ok"], true, "edit {kind}: {result:?}");
+        assert_eq!(
+            result["result"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            keys
+        );
+    }
+    let pack = telos(tmp.path(), &["pack", "INT-0001", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(envelope(&pack)["ok"], true);
+}

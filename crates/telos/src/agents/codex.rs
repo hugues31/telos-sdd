@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use super::assets::SKILLS;
 use super::{
     PlannedWrite, merge_command_hook, merge_owned_block, planned_json, planned_merged_text,
@@ -16,6 +18,8 @@ For every Telos project request, invoke the `telos` skill before reading or edit
 \n\
 Do not rely on the generated Codex guard or rules until setup is reviewed and trusted. Open `/hooks`, review and trust the repository `.codex` layer, and verify the exact `telos agent-guard --host codex` hook before proceeding. Until that review and trust is complete, treat `.codex/hooks.json` and `.codex/rules/telos.rules` as inactive.\n\
 <!-- telos-sdd:end -->";
+
+pub(super) const RTK_RULES: &str = include_str!("../../assets/codex-rtk.rules");
 
 const RULES_BLOCK: &str = r#"# telos-sdd:start
 # The guard derives current repository context through supported hook messages;
@@ -73,7 +77,10 @@ pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
         &rules.value,
         "# telos-sdd:start",
         "# telos-sdd:end",
-        RULES_BLOCK,
+        &RULES_BLOCK.replace(
+            "# telos-sdd:end",
+            &format!("{}# telos-sdd:end", RTK_RULES.replace("\r\n", "\n")),
+        ),
     )?;
     writes.push(planned_merged_text(
         ".codex/rules/telos.rules",
@@ -81,4 +88,20 @@ pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
         rules.initial,
     ));
     Ok(writes)
+}
+
+/// A new guard must not assume an older installation has the RTK prompts.
+/// Recognize only our shipped block; custom rules must use the direct route.
+pub(super) fn rtk_rules_installed(root: &Path) -> bool {
+    let Ok(root) = SafeRoot::open(root) else {
+        return false;
+    };
+    let Ok(Some(bytes)) = root.read_optional(Path::new(".codex/rules/telos.rules")) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    text.replace("\r\n", "\n")
+        .contains(&RTK_RULES.replace("\r\n", "\n"))
 }

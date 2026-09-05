@@ -625,7 +625,13 @@ fn guard_round_two_codex_denies_human_actions_not_covered_by_native_rules() {
             out["hookSpecificOutput"]["permissionDecisionReason"]
                 .as_str()
                 .unwrap()
-                .contains("current decision context"),
+                .contains(
+                    if command.starts_with("rtk ") || command == "telos --json adopt" {
+                        "current decision context"
+                    } else {
+                        "native prompt rules"
+                    }
+                ),
             "{command}"
         );
     }
@@ -1054,7 +1060,13 @@ fn guard_denies_unbound_or_noncanonical_human_actions() {
                 out["hookSpecificOutput"]["permissionDecisionReason"]
                     .as_str()
                     .expect("denial reason")
-                    .contains("current decision context"),
+                    .contains(
+                        if command.starts_with("command ") || command.ends_with(';') {
+                            "native prompt rules"
+                        } else {
+                            "current decision context"
+                        }
+                    ),
                 "{host}: {command}: {out:#}"
             );
         }
@@ -1275,7 +1287,7 @@ fn codex_guard_never_returns_ask_and_rules_own_native_prompts() {
     ] {
         assert!(rules.contains(pattern), "missing rule {pattern}");
     }
-    assert_eq!(rules.matches("decision = \"prompt\"").count(), 3);
+    assert_eq!(rules.matches("decision = \"prompt\"").count(), 9);
     assert!(rules.contains("--expected-digest"));
     for argv in [
         &[
@@ -1466,4 +1478,150 @@ fn structurally_invalid_host_hooks_abort_before_partial_initialization() {
         assert!(!tmp.path().join("telos").exists());
         assert!(!tmp.path().join(".gitattributes").exists());
     }
+}
+
+#[test]
+fn rtk_human_actions_require_exact_tokens_and_installed_native_prompts() {
+    let tmp = repo();
+    telos(tmp.path(), &["init", "--agents", "codex"])
+        .assert()
+        .success();
+    stage_drafted_config_change(tmp.path(), &["codex"]);
+    fs::write(tmp.path().join("telos/constraints/CON-0900.tel"),
+        "constraint CON-0900 in project quality \"Prompt-time drift\" {\n  rule \"Prompt-time drift.\"\n}\n").unwrap();
+    let digest = current_change_digest(tmp.path());
+    let token = current_drift_token(tmp.path());
+    let rules = read(tmp.path(), ".codex/rules/telos.rules");
+    let change_before = read(tmp.path(), "telos/changes/CHG-0001.tel");
+    for prefix in ["telos", "rtk telos", "rtk proxy telos"] {
+        for action in [
+            format!("change approve CHG-0001 --expected-digest {digest}"),
+            format!("adopt --expected-state {token}"),
+            format!("revert --expected-state {token}"),
+        ] {
+            let command = format!("{prefix} {action}");
+            let out = hook(
+                tmp.path(),
+                "codex",
+                json!({
+                    "cwd": tmp.path(), "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                }),
+            );
+            assert!(
+                out["hookSpecificOutput"]
+                    .get("permissionDecision")
+                    .is_none(),
+                "{command}: {out}"
+            );
+            assert!(out["hookSpecificOutput"]["additionalContext"].is_string());
+            assert_eq!(
+                rendered_rule_decision_for_shell(&rules, &command),
+                Some("prompt"),
+                "{command}"
+            );
+        }
+        for action in [
+            "change approve CHG-0001".to_string(),
+            format!(
+                "change approve CHG-0001 --expected-digest sha256:{}",
+                "0".repeat(64)
+            ),
+            "adopt".to_string(),
+            "revert".to_string(),
+            format!("adopt --expected-state sha256:{}", "0".repeat(64)),
+            format!("revert --expected-state sha256:{}", "0".repeat(64)),
+        ] {
+            assert_eq!(
+                bash_decision(tmp.path(), "codex", &format!("{prefix} {action}")),
+                "deny"
+            );
+        }
+    }
+    for prefix in [
+        "command rtk telos",
+        "rtk rtk telos",
+        "rtk command telos",
+        "rtk --unknown telos",
+        "unknown-wrapper telos",
+    ] {
+        let command = format!("{prefix} change approve CHG-0001 --expected-digest {digest}");
+        assert_eq!(
+            bash_decision(tmp.path(), "codex", &command),
+            "deny",
+            "{command}"
+        );
+    }
+    for command in [
+        format!("rtk telos change approve CHG-0001 --expected-digest {digest};"),
+        format!("rtk proxy telos change approve CHG-0001 --expected-digest {digest} && echo done"),
+        format!("bash -c \"rtk telos change approve CHG-0001 --expected-digest {digest}\""),
+    ] {
+        assert_eq!(
+            bash_decision(tmp.path(), "codex", &command),
+            "deny",
+            "{command}"
+        );
+    }
+    assert_eq!(
+        read(tmp.path(), "telos/changes/CHG-0001.tel"),
+        change_before
+    );
+}
+
+#[test]
+fn upgrading_the_guard_cannot_enable_rtk_actions_under_old_or_missing_rules() {
+    let tmp = repo();
+    telos(tmp.path(), &["init", "--agents", "codex"])
+        .assert()
+        .success();
+    stage_drafted_config_change(tmp.path(), &["codex"]);
+    let digest = current_change_digest(tmp.path());
+    let rules = read(tmp.path(), ".codex/rules/telos.rules");
+    let block = include_str!("../assets/codex-rtk.rules").replace("\r\n", "\n");
+    for stale in [
+        rules.replace(&block, ""),
+        rules.replace("decision = \"prompt\"", "decision = \"allow\""),
+        String::new(),
+    ] {
+        fs::write(tmp.path().join(".codex/rules/telos.rules"), stale).unwrap();
+        for prefix in ["rtk telos", "rtk proxy telos"] {
+            let command = format!("{prefix} change approve CHG-0001 --expected-digest {digest}");
+            let out = hook(
+                tmp.path(),
+                "codex",
+                json!({
+                    "cwd": tmp.path(), "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                }),
+            );
+            assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "deny");
+            assert!(
+                out["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("RTK native prompt rules are missing or outdated"),
+                "{out}"
+            );
+        }
+    }
+    // A Windows checkout has the same rules despite its line endings.
+    fs::write(
+        tmp.path().join(".codex/rules/telos.rules"),
+        rules.replace("\r\n", "\n").replace('\n', "\r\n"),
+    )
+    .unwrap();
+    let out = hook(
+        tmp.path(),
+        "codex",
+        json!({
+            "cwd": tmp.path(), "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": format!("rtk proxy telos change approve CHG-0001 --expected-digest {digest}")},
+        }),
+    );
+    assert!(
+        out["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
 }

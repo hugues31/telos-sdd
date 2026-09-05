@@ -1,0 +1,37 @@
+# Telos RTK native prompts: keep this block intact for guard verification.
+
+prefix_rule(
+    pattern = ["rtk", "telos", "change", "approve"],
+    decision = "prompt",
+    justification = "Review the exact Telos digest or drift token before this RTK-wrapped human action",
+)
+
+prefix_rule(
+    pattern = ["rtk", "telos", "adopt"],
+    decision = "prompt",
+    justification = "Review the exact Telos digest or drift token before this RTK-wrapped human action",
+)
+
+prefix_rule(
+    pattern = ["rtk", "telos", "revert"],
+    decision = "prompt",
+    justification = "Review the exact Telos digest or drift token before this RTK-wrapped human action",
+)
+
+prefix_rule(
+    pattern = ["rtk", "proxy", "telos", "change", "approve"],
+    decision = "prompt",
+    justification = "Review the exact Telos digest or drift token before this RTK-wrapped human action",
+)
+
+prefix_rule(
+    pattern = ["rtk", "proxy", "telos", "adopt"],
+    decision = "prompt",
+    justification = "Review the exact Telos digest or drift token before this RTK-wrapped human action",
+)
+
+prefix_rule(
+    pattern = ["rtk", "proxy", "telos", "revert"],
+    decision = "prompt",
+    justification = "Review the exact Telos digest or drift token before this RTK-wrapped human action",
+)

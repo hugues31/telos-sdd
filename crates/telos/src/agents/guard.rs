@@ -42,6 +42,7 @@ pub struct DecisionContext {
 struct SimpleCommand {
     argv: Vec<String>,
     native_rule_covered: bool,
+    requires_rtk_rules: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +168,13 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
             return deny_manual_write();
         }
 
+        if commands.iter().any(|command| {
+            is_human_action_attempt(command)
+                && (!command.native_rule_covered
+                    || command.argv.first().map(String::as_str) != Some("telos"))
+        }) {
+            return deny_unsupported_action();
+        }
         let action = match human_action(&commands) {
             Ok(action) => action,
             Err(()) => return deny_unbound_action(),
@@ -186,13 +194,12 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
                     context: Some(context),
                 };
             }
-            if commands.iter().any(|command| !command.native_rule_covered) {
+            if commands.iter().any(|command| command.requires_rtk_rules)
+                && !super::codex::rtk_rules_installed(&root)
+            {
                 return GuardDecision {
                     decision: Decision::Deny,
-                    reason: format!(
-                        "Codex native rules cannot prompt for this wrapped or noncanonical action; retry direct canonical command `{}`",
-                        action.name()
-                    ),
+                    reason: "Telos RTK native prompt rules are missing or outdated; install the shipped codex-rtk.rules block in .codex/rules/telos.rules and review/trust the repository rules before retrying".into(),
                     context: None,
                 };
             }
@@ -370,6 +377,11 @@ fn expand_command(
         return Ok(());
     }
 
+    let canonical_rtk = !inherited_wrapper
+        && (matches!(tokens,
+        [rtk, telos, ..] if rtk == "rtk" && telos == "telos")
+            || matches!(tokens, [rtk, proxy, telos, ..]
+            if rtk == "rtk" && proxy == "proxy" && telos == "telos"));
     let mut command = tokens;
     let mut wrappers = 0;
     let mut wrapped = inherited_wrapper;
@@ -382,6 +394,9 @@ fn expand_command(
             Some("rtk") => {
                 wrapped = true;
                 command = &command[1..];
+                if command.first().map(String::as_str) == Some("proxy") {
+                    command = &command[1..];
+                }
             }
             Some("command") => {
                 wrapped = true;
@@ -435,7 +450,8 @@ fn expand_command(
 
     commands.push(SimpleCommand {
         argv: command.to_vec(),
-        native_rule_covered: !wrapped,
+        native_rule_covered: !wrapped || canonical_rtk,
+        requires_rtk_rules: canonical_rtk,
     });
     Ok(())
 }
@@ -953,17 +969,15 @@ fn human_action(commands: &[SimpleCommand]) -> Result<Option<HumanAction>, ()> {
 }
 
 fn is_human_action_attempt(command: &SimpleCommand) -> bool {
-    command
-        .argv
-        .first()
-        .is_some_and(|program| program_name(program) == "telos")
-        && (command.argv.windows(2).any(
-            |words| matches!(words, [first, second] if first == "change" && second == "approve"),
-        ) || command
-            .argv
-            .iter()
-            .skip(1)
-            .any(|word| matches!(word.as_str(), "adopt" | "revert")))
+    // Recognize an attempted Telos decision even behind an unknown wrapper;
+    // only the canonical spellings may reach native prompting.
+    command.argv.iter().enumerate().any(|(index, program)| {
+        program_name(program) == "telos" && {
+            let arguments = &command.argv[index + 1..];
+            arguments.windows(2).any(|words| matches!(words, [first, second] if first == "change" && second == "approve"))
+                || arguments.iter().any(|word| matches!(word.as_str(), "adopt" | "revert"))
+        }
+    })
 }
 
 fn decision_context(action: &HumanAction, cwd: &Path) -> Result<DecisionContext, ()> {
@@ -1028,6 +1042,14 @@ fn deny_opaque_inline_eval() -> GuardDecision {
         decision: Decision::Deny,
         reason: "Inline interpreter evaluation is not analyzable by the Telos guard; run a reviewed script file instead"
             .into(),
+        context: None,
+    }
+}
+
+fn deny_unsupported_action() -> GuardDecision {
+    GuardDecision {
+        decision: Decision::Deny,
+        reason: "Telos native prompt rules do not cover this wrapper or compound command; use a direct canonical `telos ...` command, or a single `rtk telos ...` or `rtk proxy telos ...` command".into(),
         context: None,
     }
 }

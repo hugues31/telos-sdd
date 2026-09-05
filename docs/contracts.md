@@ -1158,6 +1158,23 @@ Until that review and trust is complete, `.codex/hooks.json` and
 refuses direct agent writes to the repository `telos/` tree and accepts only
 CLI-mediated mutations. Generated Codex rules request native human
 confirmation for `telos change approve`, `telos adopt`, and `telos revert`.
+Fresh Codex integrations also install native `prompt` rules for the exact
+`rtk telos ...` and `rtk proxy telos ...` spellings of those three actions.
+These wrappers preserve the same required digest/state token and human
+prompt; other wrappers, wrapper options, nesting and compound commands are
+refused with an explicit native-rule-coverage diagnostic.
+
+For an existing installation, updating the binary alone does **not** enable
+RTK decisions: the guard requires the intact shipped
+[`codex-rtk.rules`](../crates/telos/assets/codex-rtk.rules) block in
+`.codex/rules/telos.rules`. Copy that block into the existing Telos-owned
+section without removing unrelated rules, then review/trust the repository
+rules as above. Missing/outdated blocks are refused explicitly. Do not rerun
+`init` on an already initialized project or relax prompting to `allow`.
+Until the block is installed and active, projects that mandate RTK need an
+explicit project-instruction exception for the three direct human-action
+commands. Other project commands can continue using RTK.
+
 Before approval, the challenger presents `change diff`’s `result.digest` and
 passes that exact value as `--expected-digest`; before adopt/revert, the router
 presents the relevant drift paths/token and passes the exact `--expected-state`.

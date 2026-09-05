@@ -740,6 +740,17 @@ drift rather than silently becoming part of the successful seal.
 Only once gate 11 passes does anything reach disk: the spec `.tel` files
 (through the emitter, in staged order), then the canonical folded per-context
 `bindings.tel` files, then `telos.lock`, then the change file's deletion.
+If ordinary reconciliation returns an error during publication, it restores
+all files it attempted to write or remove to their pre-call bytes, including
+the prior lock and any moved/deleted spec files. Newly created files, including
+journal-derived bindings, are removed. The change is deleted last and remains
+open on failure, so the same reviewed delta can be retried after fixing the
+cause. Restoration does not require a writable Git object store. The original
+error code/message are retained; if restoration itself fails, the error hint
+names every path requiring recovery. This is returned-error rollback, not
+crash durability: process termination/power loss still require Git recovery;
+empty directories and unreachable Git objects may remain.
+
 `counters.toml` is never touched by reconcile — every id a transaction spends
 was already persisted when the op was staged. Journal records are digest-inert:
 they move an approved change to `implementing` but do not stale its approval.

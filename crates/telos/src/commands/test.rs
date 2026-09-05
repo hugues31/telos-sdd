@@ -38,13 +38,14 @@
 //!   green; the run line says so (`exit-status`) and so does the seal.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 
 use serde_json::{Value, json};
 
 use telos_core::changes::write_change;
 use telos_core::config::TestCfg;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::exec::{ProofVerdict, run_proof};
+use telos_core::exec::{ProofRun, ProofVerdict, run_proof};
 use telos_core::ids::{ChangeId, RepoPath, ScenarioId};
 use telos_core::model::{
     Change, ChangeStatus, Evidence, JournalEntry, StagedOp, TelFile, TelosModel, TestRef, TestRun,
@@ -63,21 +64,27 @@ use crate::envelope::{CmdResult, Outcome};
 /// `telos test`, both shapes. clap guarantees exactly one of `scenario` and
 /// `all` is present (`required_unless_present` / `conflicts_with`), so the
 /// dispatch below never has to answer for the other two combinations.
-pub fn run(ctx: &Ctx, scenario: Option<&str>, all: bool, file: Option<&str>) -> CmdResult {
+pub fn run(
+    ctx: &Ctx,
+    scenario: Option<&str>,
+    all: bool,
+    file: Option<&str>,
+    diagnostics: bool,
+) -> CmdResult {
     let project = project(ctx)?;
     let file = file.map(RepoPath::parse_outside_telos).transpose()?;
 
     if all {
-        return every(&project, file.as_ref());
+        return every(&project, file.as_ref(), diagnostics);
     }
     let scenario = scenario.expect("clap requires a scenario unless --all is given");
-    one(&project, scenario, file.as_ref())
+    one(&project, scenario, file.as_ref(), diagnostics)
 }
 
 // --- the single-scenario flow -----------------------------------------------
 
 /// `telos test SCN-0108`: the eight steps of the module doc, once.
-fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
+fn one(project: &Project, arg: &str, file: Option<&RepoPath>, diagnostics: bool) -> CmdResult {
     let scenario = parse_scenario_id(arg)?;
     require_known(project, scenario)?;
 
@@ -89,7 +96,7 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
     require_no_foreign_drift(project, std::slice::from_ref(&test.path))?;
 
     let mut change = owner.clone();
-    let run = journal_run(project, &mut change, scenario, &test, &runner)?;
+    let run = journal_run(project, &mut change, scenario, &test, &runner, diagnostics)?;
 
     Ok(Outcome {
         result: run_result(&run),
@@ -123,7 +130,7 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>) -> CmdResult {
 /// `--file` applies to every target when given, which only makes sense for
 /// a batch that really does live in one file; it exists here because the
 /// flag is the command's, not the single-scenario shape's.
-fn every(project: &Project, file: Option<&RepoPath>) -> CmdResult {
+fn every(project: &Project, file: Option<&RepoPath>, diagnostics: bool) -> CmdResult {
     let targets = required_runs(project)?;
     if targets.is_empty() {
         return Err(TelosError::new(
@@ -163,7 +170,14 @@ fn every(project: &Project, file: Option<&RepoPath>) -> CmdResult {
         let change = owners
             .get_mut(&owner)
             .expect("every target's owner came from the same scan");
-        runs.push(journal_run(project, change, scenario, &test, &runner)?);
+        runs.push(journal_run(
+            project,
+            change,
+            scenario,
+            &test,
+            &runner,
+            diagnostics,
+        )?);
     }
 
     let human: Vec<String> = runs.iter().map(human_line).collect();
@@ -379,6 +393,7 @@ fn journal_run(
     scenario: ScenarioId,
     test: &TestRef,
     runner: &TestCfg,
+    diagnostics: bool,
 ) -> Result<RunReport, TelosError> {
     let filter = test
         .name
@@ -392,6 +407,9 @@ fn journal_run(
         )
     })?;
     let execution = run_proof(runner, &filter, &project.ws.repo_root)?;
+    if diagnostics {
+        print_diagnostics(scenario, &execution);
+    }
     let command = execution.command.clone();
 
     let after = project.git.blob_oids(std::slice::from_ref(&test.path))?;
@@ -439,6 +457,17 @@ fn journal_run(
         evidence,
         executed,
     })
+}
+
+/// A diagnostic sink never changes proof classification or journal admission.
+/// Print before post-run validation so even a refused run remains diagnosable.
+fn print_diagnostics(scenario: ScenarioId, execution: &ProofRun) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "runner diagnostics for {scenario}\ncommand: {}\nexit status: {}\nstdout:\n{}\nstderr:\n{}",
+        execution.command, execution.status, execution.stdout, execution.stderr
+    );
 }
 
 /// The frozen `TELOS_TEST_NOT_EXECUTED` for a run that proved nothing: the

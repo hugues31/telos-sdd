@@ -486,7 +486,7 @@ fn published_contract_freezes_the_agent_workflow_surface() {
 
     for required in [
         "`pack <INT-id|SCN-id>`",
-        "`test <SCN-id|--all> [--file <path>]`",
+        "`test <SCN-id|--all> [--file <path>] [--diagnostics]`",
         "`bind <path> <INT-id>`",
         "`open → drafted → approved → implementing → reconciled`",
         "journal records are digest-inert",

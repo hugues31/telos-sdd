@@ -430,7 +430,7 @@ implements by path; proves by `(scenario, test)`; neighbours by
 `(relation, id, direction)`. Neighbours are only one-hop `refines`,
 `requires`, or `excludes` intent edges.
 
-## `test <SCN-id|--all> [--file <path>]`
+## `test <SCN-id|--all> [--file <path>] [--diagnostics]`
 
 Runs the configured `[test] cmd` and appends an immutable witness journal
 record to the approved or implementing change whose staged intent owns the
@@ -441,6 +441,18 @@ reading cannot distinguish a zero-test run from green, and the run line, the
 seal and the result say so (`exit-status`). With `[test] report` configured
 the verdict is the report's — see "Report-backed evidence" below — and a run
 that proves nothing is `TELOS_TEST_NOT_EXECUTED` with no journal line.
+
+`--diagnostics` prints the scenario, substituted runner command, exit status,
+and captured stdout/stderr to **stderr** after each run, including runs refused
+for missing/empty/invalid reports and genuine assertion failures. A signal is
+reported as exit status `-1`. It applies to individual scenarios and `--all`;
+use `telos test SCN-0108 --diagnostics --json 2>runner.log` to keep a log of
+that invocation. Output is buffered until the runner exits, not streamed live.
+It is not persisted automatically, and diagnostics from an earlier invocation
+cannot be recovered unless captured then. Invalid UTF-8 is displayed lossily.
+Diagnostics do not change witness classification, journal admission, result
+keys, error messages or hints. Machine-readable stdout remains one JSON
+envelope. Without the flag, runner output stays suppressed as before.
 
 Before the process starts, Telos hashes the selected proof file. It re-hashes
 it after the process exits and journals only when the OID is unchanged; a

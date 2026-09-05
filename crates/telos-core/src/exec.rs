@@ -232,6 +232,9 @@ pub fn substitute_placeholders(cmd: &str, filter: &str, report: &str) -> String 
 /// for. Built by [`run_proof`]; read through [`ProofRun::verdict`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofRun {
+    /// Captured runner output for opt-in diagnostics, never used as evidence.
+    pub stdout: String,
+    pub stderr: String,
     /// The template with `{filter}` and `{report}` literally substituted --
     /// diagnostic display, not a shell-replay contract.
     pub command: String,
@@ -339,7 +342,7 @@ pub fn run_proof(test: &TestCfg, filter: &str, repo_root: &Path) -> Result<Proof
                 format!("failed to spawn the test runner displayed as `{command}`: {e}"),
             )
         })?;
-    let status = run_result(output).status;
+    let output = run_result(output);
 
     let evidence = match (report, report_file) {
         (Some(path), Some(file)) => ProofEvidence::Report {
@@ -350,7 +353,9 @@ pub fn run_proof(test: &TestCfg, filter: &str, repo_root: &Path) -> Result<Proof
     };
     Ok(ProofRun {
         command,
-        status,
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
         evidence,
     })
 }
@@ -497,6 +502,8 @@ mod run_proof_tests {
     fn report_run(parsed: Result<Report, NotExecuted>, status: i32) -> ProofRun {
         ProofRun {
             command: "runner".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
             status,
             evidence: ProofEvidence::Report {
                 path: RepoPath::new("telos-report.xml"),
@@ -509,6 +516,8 @@ mod run_proof_tests {
     fn exit_status_evidence_reads_zero_as_green_and_anything_else_as_red() {
         let green = ProofRun {
             command: "runner".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
             status: 0,
             evidence: ProofEvidence::ExitStatus,
         };

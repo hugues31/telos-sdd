@@ -414,6 +414,117 @@ fn test_all_stops_at_the_first_unexecuted_scenario_and_keeps_earlier_runs() {
     assert!(change.contains("status implementing"), "{change}");
 }
 
+// --- opt-in runner diagnostics --------------------------------------------
+
+fn diagnostic_runner(root: &Path, report_exit: i32) {
+    let script = root.join(if cfg!(windows) {
+        "fake-runner.bat"
+    } else {
+        "fake-runner"
+    });
+    let source = fs::read_to_string(&script).unwrap();
+    let source = if cfg!(windows) {
+        source.replace("@echo off\r\n", "@echo off\r\necho runner stdout marker\r\necho compiler or assertion detail 1>&2\r\n")
+            .replace("exit /b 0", &format!("exit /b {report_exit}"))
+    } else {
+        source
+            .replace(
+                "#!/bin/sh\n",
+                "#!/bin/sh\necho runner stdout marker\necho compiler or assertion detail >&2\n",
+            )
+            .replace("exit 0", &format!("exit {report_exit}"))
+    };
+    fs::write(script, source).unwrap();
+}
+
+#[test]
+fn opt_in_diagnostics_preserve_report_verdicts_and_json_for_all_run_outcomes() {
+    for outcome in ["missing", "empty", "failed", "passed"] {
+        let tmp = approved_with_report();
+        diagnostic_runner(tmp.path(), if outcome == "passed" { 0 } else { 42 });
+        match outcome {
+            "missing" => fs::remove_file(tmp.path().join(REPORT_FIXTURE)).unwrap(),
+            "empty" => write_report_fixture(tmp.path(), &junit_report(&[])),
+            verdict => write_report_fixture(tmp.path(), &junit_report(&[(TEST_FN, verdict)])),
+        }
+        let quiet = telos(tmp.path(), &["test", SCN, "--json"])
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&quiet.stderr).contains("compiler or assertion detail"));
+        let before = change_file(tmp.path());
+        let verbose = telos(tmp.path(), &["test", SCN, "--diagnostics", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(json_stdout(&verbose), json_stdout(&quiet), "{outcome}");
+        assert_eq!(verbose.status.code(), quiet.status.code());
+        let diagnostics = String::from_utf8_lossy(&verbose.stderr);
+        assert!(
+            diagnostics.contains(&format!("runner diagnostics for {SCN}")),
+            "{diagnostics}"
+        );
+        assert!(diagnostics.contains(&format!("command: {}", display(TEST_FN))));
+        let status = match outcome {
+            "missing" => 101,
+            "passed" => 0,
+            _ => 42,
+        };
+        assert!(
+            diagnostics.contains(&format!("exit status: {status}")),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("runner stdout marker"),
+            "{diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("compiler or assertion detail"),
+            "{diagnostics}"
+        );
+        assert!(!String::from_utf8_lossy(&verbose.stdout).contains("runner stdout marker"));
+        if matches!(outcome, "missing" | "empty") {
+            assert_eq!(
+                json_stdout(&verbose)["error"]["code"],
+                "TELOS_TEST_NOT_EXECUTED"
+            );
+            assert_eq!(change_file(tmp.path()), before);
+        } else {
+            assert_eq!(
+                json_stdout(&verbose)["result"]["witness"],
+                if outcome == "failed" { "red" } else { "green" }
+            );
+            assert_eq!(json_stdout(&verbose)["result"]["executed"], 1);
+        }
+    }
+}
+
+#[test]
+fn diagnostics_also_identify_each_run_in_test_all() {
+    let tmp = with_report_fixture("strict");
+    open_change(tmp.path());
+    stage_new_scenarios(tmp.path(), 2);
+    approve(tmp.path());
+    append_test_fns(tmp.path(), &[TEST_FN, "scn_0109_x"]);
+    diagnostic_runner(tmp.path(), 0);
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[(TEST_FN, "passed"), ("scn_0109_x", "passed")]),
+    );
+    let out = telos(tmp.path(), &["test", "--all", "--diagnostics", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        json_stdout(&out)["result"]["runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let diagnostic = String::from_utf8_lossy(&out.stderr);
+    assert!(diagnostic.contains("runner diagnostics for SCN-0108"));
+    assert!(diagnostic.contains("runner diagnostics for SCN-0109"));
+}
+
 // --- reconcile ------------------------------------------------------------
 
 /// Red then green through the report, on the same bytes.

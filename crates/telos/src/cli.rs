@@ -189,6 +189,9 @@ enum Command {
         /// `scn_NNNN` naming convention.
         #[arg(long, value_name = "PATH")]
         file: Option<String>,
+        /// Print the runner command, exit status and captured output to stderr.
+        #[arg(long)]
+        diagnostics: bool,
     },
     /// Record that a code file implements an intent, journalled into the
     /// change that owns it.
@@ -351,7 +354,14 @@ fn execute(command: &Command) -> CmdResult {
             scenario,
             all,
             file,
-        } => commands::test::run(&ctx()?, scenario.as_deref(), *all, file.as_deref()),
+            diagnostics,
+        } => commands::test::run(
+            &ctx()?,
+            scenario.as_deref(),
+            *all,
+            file.as_deref(),
+            *diagnostics,
+        ),
         Command::Bind { path, intent } => commands::bind::run(&ctx()?, path, intent),
     }
 }

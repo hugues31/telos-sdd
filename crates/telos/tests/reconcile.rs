@@ -2330,3 +2330,96 @@ fn rebinding_a_pair_the_sealed_file_already_holds_leaves_it_unchanged() {
     );
     assert_eq!(read(tmp.path(), BINDINGS), sealed);
 }
+
+// Publication can fail after every semantic/proof gate has passed. The old
+// seal, the approved change and all touched spec bytes must survive a retry.
+#[cfg(unix)]
+fn assert_publication_failure_rolls_back(blocked: &str) {
+    let tmp = approved_three_op_change();
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::write(tmp.path().join("src/invoice.rs"), "// implementation\n").unwrap();
+    telos(tmp.path(), &["bind", "src/invoice.rs", "INT-0001"])
+        .assert()
+        .success();
+    let before_lock = read(tmp.path(), LOCK);
+    let before_change = read(tmp.path(), CHG_0001);
+    let before_diff = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
+    let context_path = "telos/contexts/billing/context.tel";
+    let before_context = read(tmp.path(), context_path);
+    let blocked_path = tmp.path().join(blocked);
+    let mut paths = vec![blocked_path.clone()];
+    if blocked == ".git/objects" {
+        paths.extend(
+            fs::read_dir(&blocked_path)
+                .unwrap()
+                .map(|entry| entry.unwrap().path()),
+        );
+    }
+    let original = paths
+        .iter()
+        .map(|path| {
+            let permissions = fs::metadata(path).unwrap().permissions();
+            (path.clone(), permissions)
+        })
+        .collect::<Vec<_>>();
+    for (path, permissions) in &original {
+        let mut readonly = permissions.clone();
+        readonly.set_mode(permissions.mode() & !0o222);
+        fs::set_permissions(path, readonly).unwrap();
+    }
+    // Restore permissions before asserting, so TempDir can always clean up.
+    let result = reconcile(tmp.path());
+    for (path, permissions) in &original {
+        fs::set_permissions(path, permissions.clone()).unwrap();
+    }
+    assert_eq!(result["ok"], false, "{blocked}: {result}");
+    if blocked == ".git/objects" {
+        assert_eq!(result["error"]["code"], "TELOS_GIT_ERROR");
+    }
+    assert_eq!(read(tmp.path(), LOCK), before_lock);
+    assert_eq!(read(tmp.path(), CHG_0001), before_change);
+    assert_eq!(read(tmp.path(), context_path), before_context);
+    assert!(
+        !tmp.path()
+            .join("telos/contexts/billing/bindings.tel")
+            .exists()
+    );
+    assert!(
+        !tmp.path()
+            .join("telos/contexts/billing/notions/Invoice.tel")
+            .exists()
+    );
+    assert!(
+        !tmp.path()
+            .join("telos/contexts/billing/capabilities/settlement/intents/INT-0001.tel")
+            .exists()
+    );
+    assert_eq!(
+        run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]),
+        before_diff
+    );
+    assert_eq!(
+        run_json(tmp.path(), &["status", "--json"])["result"]["state"],
+        "changing"
+    );
+    reconcile_ok(tmp.path());
+    telos(tmp.path(), &["check", "--sealed"]).assert().success();
+}
+
+#[cfg(unix)]
+#[test]
+fn git_storage_failure_rolls_back_generated_bindings_and_delta() {
+    assert_publication_failure_rolls_back(".git/objects");
+}
+
+#[cfg(unix)]
+#[test]
+fn lock_write_failure_rolls_back_generated_bindings_and_delta() {
+    assert_publication_failure_rolls_back("telos/telos.lock");
+}
+
+#[cfg(unix)]
+#[test]
+fn change_deletion_failure_also_restores_the_previous_lock() {
+    assert_publication_failure_rolls_back("telos/changes");
+}

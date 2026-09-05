@@ -111,7 +111,7 @@
 //! seals that drift, because `--full`'s answer to “is this tree provable?”
 //! is computed over the tree, not over anybody's claims.
 //!
-//! # Atomicity, and what stands in for a rollback
+//! # Failure rollback
 //!
 //! Not one byte is written before gate 11 has passed. After that, the write
 //! order is fixed: the ops' spec `.tel` files, then `telos/bindings.tel`
@@ -126,11 +126,16 @@
 //! paths above, which are the one place where “what is really there” is not
 //! this transaction's to record.
 //!
-//! There is no hand-rolled rollback. If the process dies between two of
-//! those writes the working tree is left half-applied, and the recovery
-//! mechanism is git: the committed state is the checkpoint, `git checkout`
-//! is the undo. Building a journal here would duplicate, worse, a
-//! transaction log the project already has.
+//! Ordinary reconciliation snapshots each touched file before its first mutation.
+//! An error during publication restores its original bytes (or removes a newly
+//! created file), including the old lock if publication reached it. The change
+//! file is deleted last, so a failed publication remains retryable. Restoration
+//! uses the same capability-anchored, no-follow filesystem as publication and
+//! does not depend on Git being writable. If restoration itself fails, the
+//! original error is retained and its hint names every unrestored path.
+//! This is rollback for returned errors, not crash durability: process death or
+//! power loss can still require recovery from Git. Empty created directories
+//! and unreachable Git objects may remain after a rollback.
 //!
 //! `counters.toml` is not touched: every id this transaction spends was
 //! allocated and persisted when the op was staged, so there is nothing
@@ -202,8 +207,8 @@ pub struct ReconcileOutcome {
 /// paths whose drift another open change claims -- see the module docs.
 ///
 /// On `Ok` the spec tree, `telos.lock` and `telos/changes/` have all moved.
-/// On `Err` nothing has been written at all: every gate runs before the
-/// first byte.
+/// Gates refuse before any write. Publication errors restore the touched files
+/// to their pre-call bytes; rollback failures are explicitly named in the hint.
 pub fn reconcile_change(
     ws: &Workspace,
     git: &GitRepo,
@@ -237,27 +242,35 @@ pub fn reconcile_change(
     let tests_run = run_tests(&effective_ws, &model, &impacted)?;
     require_unchanged_snapshot(ws, git, &proven)?;
 
-    // --- write phase: everything above passed, so and only so, write. ---
-    for op in &change.ops {
-        apply_op(ws, op)?;
-    }
-    write_bindings(ws, &model)?;
-    let spec_paths = ws.spec_files()?;
-    let spec = git.blob_oids(&spec_paths)?;
-    require_complete_map("specification", &spec_paths, &spec)?;
-    require_code_snapshot(git, &proven.code)?;
-    let publication_spec = spec.clone();
-    let mut fresh = lock_from_maps(
-        spec,
-        proven.code.clone(),
-        Some(change.id),
-        effective_ws.config.test.evidence(),
-    );
-    carry_over(&mut fresh, lock, &carried);
-    store_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
-    fresh.write_to_workspace(ws)?;
-    require_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
-    delete_change(ws, change.id)?;
+    let mut writes = ReconcileWrites::new(ws)?;
+    let publication = (|| {
+        // --- write phase: everything above passed, so and only so, write. ---
+        for op in &change.ops {
+            apply_op(&mut writes, op)?;
+        }
+        write_bindings(&mut writes, &model)?;
+        let spec_paths = ws.spec_files()?;
+        let spec = git.blob_oids(&spec_paths)?;
+        require_complete_map("specification", &spec_paths, &spec)?;
+        require_code_snapshot(git, &proven.code)?;
+        let publication_spec = spec.clone();
+        let mut fresh = lock_from_maps(
+            spec,
+            proven.code.clone(),
+            Some(change.id),
+            effective_ws.config.test.evidence(),
+        );
+        carry_over(&mut fresh, lock, &carried);
+        store_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
+        writes.write(
+            &RepoPath::new("telos/telos.lock"),
+            fresh.render().as_bytes(),
+        )?;
+        require_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
+        delete_change(ws, change.id)?;
+        Ok(fresh)
+    })();
+    let fresh = publication.map_err(|error| writes.rollback(error))?;
 
     Ok(ReconcileOutcome {
         ops_applied: change.ops.len() as u32,
@@ -1491,6 +1504,70 @@ fn test_failed(target: &str, command: &str) -> TelosError {
 
 // --- the writes ---------------------------------------------------------
 
+/// Originals for the files ordinary reconciliation actually attempts to mutate.
+/// Snapshot bytes, not Git blobs: the pre-call tree may contain adopted edits,
+/// and rollback must preserve those exact bytes, including their line endings.
+struct ReconcileWrites {
+    fs: RepoFs,
+    before: BTreeMap<RepoPath, Option<Vec<u8>>>,
+}
+
+impl ReconcileWrites {
+    fn new(ws: &Workspace) -> Result<Self, TelosError> {
+        Ok(Self {
+            fs: RepoFs::open(&ws.repo_root)?,
+            before: BTreeMap::new(),
+        })
+    }
+
+    fn remember(&mut self, path: &RepoPath) -> Result<(), TelosError> {
+        if !self.before.contains_key(path) {
+            self.before
+                .insert(path.clone(), self.fs.read_optional(path)?);
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, path: &RepoPath, bytes: &[u8]) -> Result<(), TelosError> {
+        self.remember(path)?;
+        self.fs.write(path, bytes)
+    }
+
+    fn remove_file(&mut self, path: &RepoPath) -> Result<(), TelosError> {
+        self.remember(path)?;
+        self.fs.remove_file(path)
+    }
+
+    fn rollback(self, mut error: TelosError) -> TelosError {
+        let mut failed = Vec::new();
+        for (path, before) in self.before.iter().rev() {
+            // A refused write often left the original intact. Do not try to
+            // rewrite it (e.g. an unwritable lock); restore other paths anyway.
+            if self.fs.read_optional(path).ok().as_ref() == Some(before) {
+                continue;
+            }
+            let restored = match before {
+                Some(bytes) => self.fs.write(path, bytes),
+                None => self.fs.remove_file(path),
+            };
+            if restored.is_err() {
+                failed.push(path.to_string());
+            }
+        }
+        if !failed.is_empty() {
+            let recovery = format!(
+                "reconcile rollback could not restore [{}]; restore access and recover these paths from the pre-reconcile state before retrying",
+                failed.join(", ")
+            );
+            error.hint = Some(match error.hint {
+                Some(hint) => format!("{hint}; {recovery}"),
+                None => recovery,
+            });
+        }
+        error
+    }
+}
+
 /// Writes one op's target: the entity's canonical bytes for `add`/`edit`,
 /// deletion for `remove`, nothing for `accept` (the bytes are already what
 /// they must be -- gate 4 just proved it; the seal is what changes).
@@ -1502,8 +1579,7 @@ fn test_failed(target: &str, command: &str) -> TelosError {
 ///
 /// A `remove` whose file is already absent is not an error: an earlier op of
 /// this very change may have been the only reason it would have existed.
-fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
-    let repo_fs = RepoFs::open(&ws.repo_root)?;
+fn apply_op(repo_fs: &mut ReconcileWrites, op: &StagedOp) -> Result<(), TelosError> {
     let path = op.target_path();
 
     let content = match op {
@@ -1595,8 +1671,7 @@ fn apply_op(ws: &Workspace, op: &StagedOp) -> Result<(), TelosError> {
 /// there would add a spec file -- and a lock entry -- that nothing asked
 /// for. (`telos init` creates the file empty, so this only ever spares a
 /// tree that was assembled by hand.)
-fn write_bindings(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> {
-    let repo_fs = RepoFs::open(&ws.repo_root)?;
+fn write_bindings(repo_fs: &mut ReconcileWrites, model: &TelosModel) -> Result<(), TelosError> {
     if model.bindings.len() != model.binding_contexts.len() {
         return Err(TelosError::new(
             ErrorCode::TelosIntegrityViolation,
@@ -1615,7 +1690,7 @@ fn write_bindings(ws: &Workspace, model: &TelosModel) -> Result<(), TelosError> 
     for context in model.contexts.keys() {
         let path = context_bindings_path(context);
         let bindings = by_context.remove(context).unwrap_or_default();
-        if bindings.is_empty() && repo_fs.read_optional(&path)?.is_none() {
+        if bindings.is_empty() && repo_fs.fs.read_optional(&path)?.is_none() {
             continue;
         }
         let content = emit_file(&TelFile::ContextBindings {
@@ -1927,5 +2002,60 @@ mod tests {
             sealed_by: fresh.sealed_by,
             ..previous.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn rollback_restores_original_bytes_and_deletions_across_repeated_ops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = RepoPath::new("telos/original.tel");
+        let added = RepoPath::new("telos/new.tel");
+        fs::create_dir_all(tmp.path().join("telos")).unwrap();
+        fs::write(tmp.path().join(original.as_str()), b"adopted bytes\r\n").unwrap();
+        let mut writes = ReconcileWrites {
+            fs: RepoFs::open(tmp.path()).unwrap(),
+            before: BTreeMap::new(),
+        };
+        writes.write(&original, b"intermediate").unwrap();
+        writes.remove_file(&original).unwrap();
+        writes.write(&added, b"first").unwrap();
+        writes.write(&added, b"second").unwrap();
+        let error = writes.rollback(TelosError::new(
+            ErrorCode::TelosGitError,
+            "original failure",
+        ));
+        assert_eq!(error.code, ErrorCode::TelosGitError);
+        assert_eq!(error.message, "original failure");
+        assert_eq!(error.hint, None);
+        assert_eq!(
+            fs::read(tmp.path().join(original.as_str())).unwrap(),
+            b"adopted bytes\r\n"
+        );
+        assert!(!tmp.path().join(added.as_str()).exists());
+    }
+
+    #[test]
+    fn rollback_names_unrestored_paths_without_losing_the_original_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = RepoPath::new("telos/file.tel");
+        let mut writes = ReconcileWrites {
+            fs: RepoFs::open(tmp.path()).unwrap(),
+            before: BTreeMap::new(),
+        };
+        writes.write(&path, b"new").unwrap();
+        fs::remove_file(tmp.path().join(path.as_str())).unwrap();
+        fs::create_dir(tmp.path().join(path.as_str())).unwrap();
+        let error = writes.rollback(TelosError::new(
+            ErrorCode::TelosGitError,
+            "original failure",
+        ));
+        assert_eq!(error.code, ErrorCode::TelosGitError);
+        assert_eq!(error.message, "original failure");
+        assert!(error.hint.unwrap().contains("telos/file.tel"));
     }
 }

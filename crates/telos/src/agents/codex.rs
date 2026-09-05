@@ -77,7 +77,10 @@ pub fn plan(root: &SafeRoot) -> Result<Vec<PlannedWrite>, TelosError> {
         &rules.value,
         "# telos-sdd:start",
         "# telos-sdd:end",
-        &RULES_BLOCK.replace("# telos-sdd:end", &format!("{RTK_RULES}# telos-sdd:end")),
+        &RULES_BLOCK.replace(
+            "# telos-sdd:end",
+            &format!("{}# telos-sdd:end", RTK_RULES.replace("\r\n", "\n")),
+        ),
     )?;
     writes.push(planned_merged_text(
         ".codex/rules/telos.rules",
@@ -99,5 +102,6 @@ pub(super) fn rtk_rules_installed(root: &Path) -> bool {
     let Ok(text) = std::str::from_utf8(&bytes) else {
         return false;
     };
-    text.replace("\r\n", "\n").contains(RTK_RULES)
+    text.replace("\r\n", "\n")
+        .contains(&RTK_RULES.replace("\r\n", "\n"))
 }

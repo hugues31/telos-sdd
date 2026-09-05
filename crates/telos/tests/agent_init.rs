@@ -1578,9 +1578,9 @@ fn upgrading_the_guard_cannot_enable_rtk_actions_under_old_or_missing_rules() {
     stage_drafted_config_change(tmp.path(), &["codex"]);
     let digest = current_change_digest(tmp.path());
     let rules = read(tmp.path(), ".codex/rules/telos.rules");
-    let block = include_str!("../assets/codex-rtk.rules");
+    let block = include_str!("../assets/codex-rtk.rules").replace("\r\n", "\n");
     for stale in [
-        rules.replace(block, ""),
+        rules.replace(&block, ""),
         rules.replace("decision = \"prompt\"", "decision = \"allow\""),
         String::new(),
     ] {
@@ -1608,7 +1608,7 @@ fn upgrading_the_guard_cannot_enable_rtk_actions_under_old_or_missing_rules() {
     // A Windows checkout has the same rules despite its line endings.
     fs::write(
         tmp.path().join(".codex/rules/telos.rules"),
-        rules.replace('\n', "\r\n"),
+        rules.replace("\r\n", "\n").replace('\n', "\r\n"),
     )
     .unwrap();
     let out = hook(

@@ -830,3 +830,92 @@ fn rebuild_status_runs_a_shared_target_once_and_judges_it_per_scenario() {
         json!(display("tests/billing.rs"))
     );
 }
+
+/// Both new scenarios use one frozen file. The journal may interleave their
+/// independent red/green cycles; gate 8 judges each pair on those exact bytes.
+#[test]
+fn grouped_reds_then_grouped_greens_reconcile_on_one_frozen_file() {
+    let tmp = with_report_fixture("strict");
+    open_change(tmp.path());
+    assert_eq!(
+        stage_new_scenarios(tmp.path(), 2),
+        vec![SCN.to_string(), "SCN-0109".to_string()]
+    );
+    approve(tmp.path());
+    append_test_fns(tmp.path(), &[TEST_FN, "scn_0109_x"]);
+    let proof_bytes = fs::read(tmp.path().join(BILLING_TEST)).unwrap();
+    for verdict in ["failed", "passed"] {
+        write_report_fixture(
+            tmp.path(),
+            &junit_report(&[(TEST_FN, verdict), ("scn_0109_x", verdict)]),
+        );
+        for scenario in [SCN, "SCN-0109"] {
+            let out = telos(tmp.path(), &["test", scenario, "--json"])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", stderr(&out));
+            let result = json_stdout(&out)["result"].clone();
+            assert_eq!(
+                result["witness"],
+                if verdict == "failed" { "red" } else { "green" }
+            );
+            assert_eq!(result["evidence"], "report");
+            assert_eq!(result["executed"], 1);
+        }
+    }
+    assert_eq!(
+        fs::read(tmp.path().join(BILLING_TEST)).unwrap(),
+        proof_bytes
+    );
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[
+            ("scn_0091_issued_invoice_is_open", "passed"),
+            ("scn_0107_full_payment_settles_the_invoice", "passed"),
+            (TEST_FN, "passed"),
+            ("scn_0109_x", "passed"),
+        ]),
+    );
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(json_stdout(&out)["result"]["witness_warnings"], json!([]));
+    telos(tmp.path(), &["check", "--sealed"]).assert().success();
+}
+
+#[test]
+fn adding_a_grouped_test_after_the_first_red_invalidates_the_shared_file() {
+    let tmp = with_report_fixture("strict");
+    open_change(tmp.path());
+    stage_new_scenarios(tmp.path(), 2);
+    approve(tmp.path());
+    append_test_fns(tmp.path(), &[TEST_FN]);
+    write_report_fixture(tmp.path(), &junit_report(&[(TEST_FN, "failed")]));
+    telos(tmp.path(), &["test", SCN, "--json"])
+        .assert()
+        .success();
+    append_test_fns(tmp.path(), &["scn_0109_x"]);
+    write_report_fixture(tmp.path(), &junit_report(&[("scn_0109_x", "failed")]));
+    telos(tmp.path(), &["test", "SCN-0109", "--json"])
+        .assert()
+        .success();
+    write_report_fixture(
+        tmp.path(),
+        &junit_report(&[(TEST_FN, "passed"), ("scn_0109_x", "passed")]),
+    );
+    for scenario in [SCN, "SCN-0109"] {
+        telos(tmp.path(), &["test", scenario, "--json"])
+            .assert()
+            .success();
+    }
+    let before = fs::read(tmp.path().join("telos/telos.lock")).unwrap();
+    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(json_stdout(&out)["error"]["code"], "TELOS_TEST_SEALED");
+    assert_eq!(
+        fs::read(tmp.path().join("telos/telos.lock")).unwrap(),
+        before
+    );
+}

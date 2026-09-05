@@ -540,6 +540,24 @@ interpreter (`sh -c`, `cmd /C`, PowerShell, and equivalents). Filter controls
 remain bytes in one argument. Put any needed shell program in a dedicated
 runner script and configure that script as the direct executable.
 
+### Grouped red/green ordering
+
+The witness protocol is per scenario, not a global red-green alternation.
+Within one approved intent/change, callers may record red for several new
+scenarios, implement their common behavior once, and then record green for
+each. Every scenario must still have its own genuine red followed by green
+on identical proof-file bytes. Finish all tests in a shared file before its
+first red; adding another function later changes the sealed file too.
+Grouping does not alter the approved delta, require another approval, or
+weaken report-backed execution checks. Reconcile still re-runs impacted
+existing scenarios and requires witnesses for new/changed active scenarios.
+The generated implementer includes a two-scenario example.
+
+An already-satisfied scenario with no prior red cannot claim a strict pair.
+Report it to the challenger; any move to the existing advisory policy is a
+separately reviewed configuration change, not an automatic fallback. Never
+fabricate a failure or use full reconciliation to avoid a strict witness.
+
 ## `bind <path> <INT-id>`
 
 Records that an existing repository-relative code path implements an intent

@@ -191,6 +191,11 @@ fn status_json_with_an_open_change_reports_the_changing_state() {
                 }],
                 "drift": null,
                 "proof_evidence": "exit-status",
+                "coverage_scope": {
+                    "model": "working-tree",
+                    "includes_open_changes": false,
+                    "model_loaded": true,
+                },
                 "coverage": {
                     "notions": 4,
                     "constraints": 1,

@@ -41,10 +41,23 @@ pub fn run(ctx: &Ctx, sealed: bool) -> CmdResult {
         Ok(model) => {
             let cov = coverage(&model);
             Ok(Outcome {
-                result: json!({ "diagnostics": Vec::<Value>::new() }),
+                result: json!({
+                    "diagnostics": Vec::<Value>::new(),
+                    "scope": {
+                        "model": "working-tree",
+                        "includes_open_changes": false,
+                        "seal_verified": sealed,
+                        "tests_executed": false,
+                        "constraint_checks_executed": false,
+                    },
+                }),
                 human: format!(
-                    "check passed: {} notions, {} constraints, {} intents, {} scenarios",
-                    cov.notions, cov.constraints, cov.intents_total, cov.scenarios_total
+                    "check passed: {} notions, {} constraints, {} intents, {} scenarios\nscope: working-tree model on disk; open-change proposals excluded; seal {}\ntests and executable constraint checks not executed; this is not proof readiness for a pending change\ninspect proposals with `telos change diff <CHG-id>` or `telos pack <INT-id>`",
+                    cov.notions,
+                    cov.constraints,
+                    cov.intents_total,
+                    cov.scenarios_total,
+                    if sealed { "verified" } else { "not checked" }
                 ),
                 next_actions: Vec::new(),
             })

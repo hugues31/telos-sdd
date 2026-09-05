@@ -44,11 +44,9 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     let unparseable = unparseable_change_ids(&project);
     let report = project.state;
 
-    let cov = project
-        .ws
-        .load_model()
-        .map(|model| coverage(&model))
-        .unwrap_or(ZERO_COVERAGE);
+    let loaded_coverage = project.ws.load_model().map(|model| coverage(&model));
+    let model_loaded = loaded_coverage.is_ok();
+    let cov = loaded_coverage.unwrap_or(ZERO_COVERAGE);
 
     let drifted = !report.drift.is_empty();
     let drift_value = if drifted {
@@ -85,11 +83,16 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         "drift": drift_value,
         "proof_evidence": evidence,
         "coverage": cov,
+        "coverage_scope": {
+            "model": "working-tree",
+            "includes_open_changes": false,
+            "model_loaded": model_loaded,
+        },
     });
 
     Ok(Outcome {
         result,
-        human: human_summary(&report, drifted, cov, &token, evidence),
+        human: human_summary(&report, drifted, cov, &token, evidence, model_loaded),
         next_actions,
     })
 }
@@ -117,6 +120,7 @@ fn human_summary(
     cov: Coverage,
     token: &str,
     evidence: &str,
+    model_loaded: bool,
 ) -> String {
     let state_name = match report.state {
         ProjectStateKind::Coherent => "coherent",
@@ -139,6 +143,15 @@ fn human_summary(
         }
     }
     lines.push(format!("proof evidence: {evidence}"));
+    lines.push("coverage scope: working-tree model on disk; open-change proposals excluded; tests not executed".into());
+    if !model_loaded {
+        lines.push("coverage unavailable: the model on disk could not be loaded; counters below are fallback zeros".into());
+    }
+    if !report.open_changes.is_empty() {
+        lines.push(
+            "inspect proposals with `telos change diff <CHG-id>` or `telos pack <INT-id>`".into(),
+        );
+    }
     lines.push(format!(
         "coverage: {} notions, {} constraints, {}/{} intents active, {}/{} intents implemented, {}/{} scenarios proved",
         cov.notions,

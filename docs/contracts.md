@@ -17,6 +17,15 @@ Everything below is locked by a test in `crates/telos/tests/`. If this
 document and the code ever disagree, the code is the bug — but so is a
 future change to the code that isn't reflected here.
 
+## Inspection scope metadata: additive contract revision
+
+`status.result.coverage_scope` and successful `check.result.scope` are new
+required metadata in this revision. Existing result fields, counter meanings,
+error codes, and the five-key envelope remain unchanged. Consumers that
+validate the exact set of result keys must update their schemas; consumers
+should allow additional result metadata. This is an explicit extension of
+the previously frozen result schemas, not a change to validation or proof gates.
+
 ## The `--json` envelope
 
 Every command, whatever it does and however it fails, answers with exactly
@@ -236,6 +245,11 @@ reconcile (from the effective configuration), and `--full` all write
   "changes": [],
   "drift": null,
   "proof_evidence": "exit-status",
+  "coverage_scope": {
+    "model": "working-tree",
+    "includes_open_changes": false,
+    "model_loaded": true
+  },
   "coverage": {
     "notions": 4,
     "constraints": 1,
@@ -277,10 +291,18 @@ reconcile (from the effective configuration), and `--full` all write
   zero-test run from green. It reports what the seal proved, not what the
   configuration says now: the two differ only between turning the report on
   and the next reconcile.
-- `coverage` — exact counts off the loaded model, or all zeros if the spec
-  didn't parse. `scenarios_proved` counts scenarios with ≥ 1 `proves`
-  binding; `intents_implemented` counts intents with ≥ 1 `implements`
-  binding.
+- `coverage_scope` — counters inspect the current **working-tree model on
+  disk**, which may have drifted from the seal. `includes_open_changes` is
+  always `false`: proposals stored in open changes are excluded.
+  `model_loaded: false` distinguishes unavailable coverage from a genuinely
+  empty model; the counters are then fallback zeros.
+- `coverage` — exact counts off that loaded model, or all zeros if loading
+  fails. `scenarios_proved` counts scenarios with ≥ 1 `proves` binding;
+  `intents_implemented` counts intents with ≥ 1 `implements` binding.
+  These are binding counts, not fresh test results. `status` runs no tests.
+  An empty disk model can report zero intents/scenarios while an open change
+  proposes several: inspect `telos change diff <CHG-id>` and
+  `telos pack <INT-id>` (which includes the intent's owning change overlay).
 
 `next_actions` is
 `["telos adopt --expected-state sha256:...", "telos revert --expected-state sha256:..."]`
@@ -293,14 +315,38 @@ without a hand edit; `[]` when `"coherent"`.
 ## `check [--sealed]`
 
 Parses the spec, resolves references, validates active intents and events, and
-type-checks literals. Deletion safety and code coverage are enforced at the
-write and reconcile boundaries.
+type-checks literals in the current **working-tree model on disk**. Open-change
+proposals are excluded. Neither form executes tests or executable constraint
+checks, and success does not establish proof readiness for a pending change.
+Inspect proposals with `telos change diff <CHG-id>` and `telos pack <INT-id>`.
+Deletion safety and code coverage are enforced at the write and reconcile
+boundaries.
+
+On success, `result` is:
+
+```json
+{
+  "diagnostics": [],
+  "scope": {
+    "model": "working-tree",
+    "includes_open_changes": false,
+    "seal_verified": false,
+    "tests_executed": false,
+    "constraint_checks_executed": false
+  }
+}
+```
+
+`seal_verified` is `true` only for a successful `check --sealed`. The other
+scope fields have the values shown for either invocation. Failures retain
+`result: null` and the existing error contract.
 
 ### Without `--sealed`
 
 `check` never touches `telos.lock`. It calls `load_model`:
 
-- **All parses, all resolves**: `ok: true`, `result: {"diagnostics": []}`.
+- **All parses, all resolves**: `ok: true`, with the result above and
+  `scope.seal_verified: false`.
 - **One or more diagnostics**: `ok: false`, `result: null`, exit `1`.
   `error` is the *first* diagnostic, converted to the frozen error triple
   (`code`, `message`, `hint`).

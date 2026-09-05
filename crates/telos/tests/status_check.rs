@@ -71,6 +71,11 @@ fn status_json_on_the_sealed_fixture_matches_the_golden_envelope() {
                 "changes": [],
                 "drift": null,
                 "proof_evidence": "exit-status",
+                "coverage_scope": {
+                    "model": "working-tree",
+                    "includes_open_changes": false,
+                    "model_loaded": true,
+                },
                 "coverage": {
                     "notions": 4,
                     "constraints": 1,
@@ -201,6 +206,7 @@ fn status_on_a_corrupted_spec_file_still_reports_drifted_with_zero_coverage() {
         out.status
     );
     let envelope = json_stdout(&out);
+    assert_eq!(envelope["result"]["coverage_scope"]["model_loaded"], false);
     assert_eq!(envelope["result"]["state"], json!("drifted"));
     assert_eq!(
         envelope["result"]["coverage"],
@@ -231,7 +237,17 @@ fn check_on_the_fixture_passes() {
     );
     let envelope = json_stdout(&out);
     assert_eq!(envelope["ok"], json!(true));
-    assert_eq!(envelope["result"], json!({ "diagnostics": [] }));
+    assert_eq!(
+        envelope["result"],
+        json!({
+            "diagnostics": [],
+            "scope": {
+                "model": "working-tree", "includes_open_changes": false,
+                "seal_verified": false, "tests_executed": false,
+                "constraint_checks_executed": false,
+            },
+        })
+    );
 }
 
 #[test]
@@ -377,4 +393,95 @@ fn check_sealed_on_a_corrupted_spec_reports_drift_not_a_parse_error() {
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
     assert_eq!(envelope["error"]["code"], json!("TELOS_DRIFT_DETECTED"));
+}
+
+#[test]
+fn empty_disk_coverage_and_successful_check_do_not_claim_to_inspect_the_proposal() {
+    let tmp = common::with_empty_billing_domain();
+    telos(tmp.path(), &["change", "open", "Settle an invoice"])
+        .assert()
+        .success();
+    for (kind, payload) in [
+        (
+            "notion",
+            json!({"owner":"billing", "name":"Invoice", "kind":"entity", "def":"A bill.",
+            "attrs":[{"name":"state", "type":"enum", "values":["open", "settled"]}]}),
+        ),
+        (
+            "notion",
+            json!({"owner":"billing/settlement", "name":"PaymentReceived", "kind":"event", "def":"Payment arrived."}),
+        ),
+        (
+            "intent",
+            json!({"owner":"billing/settlement", "title":"Settle invoices", "status":"active", "telos":"Show settlement.",
+            "statement":{"template":"event-driven", "when":"PaymentReceived", "on":"Invoice", "action":"set Invoice.state = settled"},
+            "scenarios":[{"title":"Payment settles an open invoice", "given":[{"notion":"Invoice", "fields":{"state":"open"}}],
+                "when":{"notion":"PaymentReceived", "fields":{}}, "then":["Invoice.state == settled"]}]}),
+        ),
+    ] {
+        telos(tmp.path(), &["add", kind, "--change", "CHG-0001", "--json"])
+            .write_stdin(payload.to_string())
+            .assert()
+            .success();
+    }
+    let status = json_stdout(&telos(tmp.path(), &["status", "--json"]).output().unwrap());
+    assert_eq!(status["result"]["state"], "changing");
+    assert_eq!(status["result"]["coverage"]["intents_total"], 0);
+    assert_eq!(status["result"]["coverage"]["scenarios_total"], 0);
+    assert_eq!(
+        status["result"]["coverage_scope"],
+        json!({
+            "model":"working-tree", "includes_open_changes":false, "model_loaded":true,
+        })
+    );
+    let checked = json_stdout(&telos(tmp.path(), &["check", "--json"]).output().unwrap());
+    assert_eq!(checked["ok"], true);
+    assert_eq!(checked["result"]["diagnostics"], json!([]));
+    assert_eq!(checked["result"]["scope"]["includes_open_changes"], false);
+    assert_eq!(checked["result"]["scope"]["tests_executed"], false);
+    assert_eq!(checked["result"]["scope"]["seal_verified"], false);
+    let packed = json_stdout(
+        &telos(tmp.path(), &["pack", "INT-0001", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(packed["result"]["change"], "CHG-0001");
+    assert_eq!(packed["result"]["scenarios"].as_array().unwrap().len(), 1);
+    for command in ["status", "check"] {
+        let out = telos(tmp.path(), &[command]).output().unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("working-tree model on disk"), "{text}");
+        assert!(text.contains("open-change proposals excluded"), "{text}");
+        assert!(text.contains("telos pack <INT-id>"), "{text}");
+    }
+    let sealed = json_stdout(
+        &telos(tmp.path(), &["check", "--sealed", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(sealed["error"]["code"], "TELOS_CHANGE_STATE_INVALID");
+}
+
+#[test]
+fn check_scope_distinguishes_disk_validation_from_seal_verification() {
+    let tmp = with_fixture();
+    let sealed = json_stdout(
+        &telos(tmp.path(), &["check", "--sealed", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(sealed["result"]["scope"]["seal_verified"], true);
+    let mut bytes = fs::read_to_string(tmp.path().join(INVOICE_TEL)).unwrap();
+    bytes.push('\n');
+    fs::write(tmp.path().join(INVOICE_TEL), bytes).unwrap();
+    let unsealed = json_stdout(&telos(tmp.path(), &["check", "--json"]).output().unwrap());
+    assert_eq!(unsealed["ok"], true);
+    assert_eq!(unsealed["result"]["scope"]["model"], "working-tree");
+    assert_eq!(unsealed["result"]["scope"]["seal_verified"], false);
+    let sealed = json_stdout(
+        &telos(tmp.path(), &["check", "--sealed", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(sealed["error"]["code"], "TELOS_DRIFT_DETECTED");
 }

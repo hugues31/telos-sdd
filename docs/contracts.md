@@ -17,7 +17,7 @@ Everything below is locked by a test in `crates/telos/tests/`. If this
 document and the code ever disagree, the code is the bug — but so is a
 future change to the code that isn't reflected here.
 
-## Inspection scope metadata: additive contract revision
+## Inspection scope metadata: additive contract revision in 0.14.0
 
 `status.result.coverage_scope` and successful `check.result.scope` are new
 required metadata in this revision. Existing result fields, counter meanings,
@@ -1787,9 +1787,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Telos v0.13.0
+      - name: Install Telos v0.14.0
         run: |
-          version=0.13.0
+          version=0.14.0
           asset="telos_${version}_linux_amd64.tar.gz"
           base="https://github.com/hugues31/telos-sdd/releases/download/v${version}"
           cd "$RUNNER_TEMP"
@@ -1804,8 +1804,8 @@ jobs:
 ```
 
 The downloaded release version is derived from the CLI package version.
-Shipping 0.13.0 therefore requires release `v0.13.0` to carry the
-`telos_0.13.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
+Shipping 0.14.0 therefore requires release `v0.14.0` to carry the
+`telos_0.14.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
 generated install step cannot succeed. The workflow reports a check but does
 not itself make GitHub treat it as required: repository branch protection
 must separately require job `sealed` before merges.

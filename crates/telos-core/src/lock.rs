@@ -378,7 +378,7 @@ mod tests {
             &path,
             concat!(
                 "version = 2\n",
-                "tool = \"telos 0.13.0\"\n",
+                "tool = \"telos 0.14.0\"\n",
                 "spec_digest = \"sha256:old\"\n",
                 "\n[spec]\n",
                 "\n[code]\n",
@@ -399,7 +399,7 @@ mod tests {
     fn render_writes_proof_evidence_right_after_the_digest() {
         let lock = Lock {
             version: LOCK_VERSION,
-            tool: "telos 0.13.0".to_string(),
+            tool: "telos 0.14.0".to_string(),
             sealed_by: None,
             spec_digest: Lock::compute_digest(&BTreeMap::new()),
             proof_evidence: Evidence::Report,
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(
             lock.render(),
             format!(
-                "version = 3\ntool = \"telos 0.13.0\"\nspec_digest = \"{}\"\nproof_evidence = \"report\"\n\n[spec]\n\n[code]\n",
+                "version = 3\ntool = \"telos 0.14.0\"\nspec_digest = \"{}\"\nproof_evidence = \"report\"\n\n[spec]\n\n[code]\n",
                 Lock::compute_digest(&BTreeMap::new())
             )
         );
@@ -421,11 +421,11 @@ mod tests {
         let path = temp.path().join("telos.lock");
         for (body, needle) in [
             (
-                "version = 3\ntool = \"telos 0.13.0\"\nspec_digest = \"sha256:x\"\n\n[spec]\n\n[code]\n",
+                "version = 3\ntool = \"telos 0.14.0\"\nspec_digest = \"sha256:x\"\n\n[spec]\n\n[code]\n",
                 "proof_evidence",
             ),
             (
-                "version = 3\ntool = \"telos 0.13.0\"\nspec_digest = \"sha256:x\"\nproof_evidence = \"vibes\"\n\n[spec]\n\n[code]\n",
+                "version = 3\ntool = \"telos 0.14.0\"\nspec_digest = \"sha256:x\"\nproof_evidence = \"vibes\"\n\n[spec]\n\n[code]\n",
                 "invalid `proof_evidence` value `vibes`",
             ),
         ] {

@@ -273,7 +273,7 @@ fn sample_lock() -> Lock {
 
     Lock {
         version: LOCK_VERSION,
-        tool: "telos 0.13.0".to_string(),
+        tool: "telos 0.14.0".to_string(),
         sealed_by: Some(ChangeId(7)),
         spec_digest: Lock::compute_digest(&spec),
         proof_evidence: Evidence::ExitStatus,
@@ -421,7 +421,7 @@ fn lock_read_tolerates_reformatted_toml() {
         r#"
             spec_digest = "sha256:deadbeef"
             version     = 3
-            tool = "telos 0.13.0"
+            tool = "telos 0.14.0"
             proof_evidence = "exit-status"
 
             [code]
@@ -436,7 +436,7 @@ fn lock_read_tolerates_reformatted_toml() {
     let lock = Lock::read(&path).unwrap().unwrap();
 
     assert_eq!(lock.version, 3);
-    assert_eq!(lock.tool, "telos 0.13.0");
+    assert_eq!(lock.tool, "telos 0.14.0");
     assert_eq!(lock.sealed_by, None);
     assert_eq!(lock.spec_digest, "sha256:deadbeef");
     assert_eq!(lock.proof_evidence, Evidence::ExitStatus);

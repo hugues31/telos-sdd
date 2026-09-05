@@ -848,7 +848,12 @@ change, or from any command that reads rather than mutates.
 
 ### `result` schema
 
-`add`/`edit`: `{"change": "CHG-0001", "entity": "intent", "id": "INT-0043", "owner": "billing/settlement", "scenario_ids": ["SCN-0108"], "claims": ["telos/contexts/billing/capabilities/settlement/intents/INT-0043.tel"]}`.
+`add`/`edit` result (the IDs below are illustrative):
+```json
+{"change": "CHG-0001", "entity": "intent", "id": "INT-0043", "scenario_ids": ["SCN-0108"], "claims": ["telos/contexts/billing/capabilities/settlement/intents/INT-0043.tel"]}
+```
+Ownership is required in the relevant creation payloads; it is not a separate
+field of the `add`/`edit` result. `pack` exposes structured intent ownership.
 `scenario_ids` is always present, `[]` when the op allocated none (every
 kind but `add intent`/`edit intent` growing a scenario). `claims` is the
 *whole change's* claim set with the new op counted, not just this op's own
@@ -877,17 +882,57 @@ it appends to was already allocated and persisted when it was opened.
 ### Payload schemas (`add`/`edit`)
 
 One JSON object on stdin; an unknown top-level or nested key is refused
-(`TELOS_PARSE_ERROR`, `` unknown key `x` in <kind> payload ``). `add` never
-carries an id — `intent` and `constraint` get theirs from the allocator, a
-notion's identity is its `name` field. `edit <kind> <key>` accepts the same
-keys, all optional: a key present in the payload replaces that field
+(`TELOS_PARSE_ERROR`, `` unknown key `x` in <kind> payload ``).
+Creation identity and ownership depend on the entity kind:
+
+| Entity | Identity in the creation payload | Required `owner` |
+|---|---|---|
+| context | caller supplies `id`, e.g. `billing` | none |
+| capability | caller supplies local `id`, e.g. `settlement` | context, e.g. `billing` |
+| notion | caller supplies `name`, e.g. `Invoice` | `context` or `context/capability` |
+| intent | no `id`; allocated as `INT-NNNN` | `context/capability` |
+| scenario nested in a new intent | no `id`; allocated as `SCN-NNNN` | inherited from the intent |
+| constraint | no `id`; allocated as `CON-NNNN` | `context` or `context/capability` |
+
+Owners are strings, not objects. Context/capability IDs use lower-kebab-case.
+`edit context <id>` and `edit capability <context/id>` require the complete
+creation payload, with unchanged identity/ownership. For notion, intent and
+constraint, `edit <kind> <key>` accepts the same keys, all optional: a key
+present in the payload replaces that field
 **wholesale** (a list field like `attrs`/`requires`/`scenarios` is the whole
 new list, never a delta against the old one); a key absent keeps the base
 entity's current value. `remove <kind> <key>` takes no payload.
 
+The following creation payloads form a complete bootstrap, in document order.
+Start in a fresh Git repository with `telos init` and
+`telos change open "Settle invoices"`. Pass each JSON block unchanged on stdin
+to `telos add <kind> --change CHG-0001 --json`, using the entity kind named
+above the block. Read allocated IDs from each response; this empty-project
+example allocates `INT-0001`, `SCN-0001`, and `CON-0001`. These commands only
+stage a proposal: implementation, proof configuration and approval still
+belong to the normal change workflow.
+
+**`add context`**:
+```json
+{ "id": "billing", "kind": "core", "title": "Billing",
+  "def": "Owns invoice rules." }
+```
+
+**`add capability`**:
+```json
+{ "owner": "billing", "id": "settlement", "title": "Settlement",
+  "def": "Settles invoices after payment." }
+```
+
+**`add notion` prerequisite: `Customer`**:
+```json
+{ "owner": "billing", "name": "Customer", "kind": "entity",
+  "def": "The customer receiving an invoice." }
+```
+
 **`add notion`**:
 ```json
-{ "name": "Invoice", "kind": "entity",
+{ "owner": "billing", "name": "Invoice", "kind": "entity",
   "def": "A bill issued to a Customer for delivered work.",
   "attrs": [ {"name": "state", "type": "enum", "values": ["open", "settled"]},
              {"name": "balance", "type": "money"},
@@ -905,15 +950,22 @@ refused at staging, so `add` never writes a change it cannot read back:
 enum symbol; symbols are lower-kebab-case like `x-wins` `` — the one
 shape error whose `hint` is set, naming the accepted grammar.
 
+**`add notion` prerequisite: `PaymentReceived`**:
+```json
+{ "owner": "billing/settlement", "name": "PaymentReceived", "kind": "event",
+  "def": "A payment received for an invoice.",
+  "attrs": [ {"name": "amount", "type": "money"} ] }
+```
+
 **`add intent`** (no `id` on the intent or on any scenario — every id is
 allocated and reported back in `result`; steps carry their state under
 `fields`):
 ```json
-{ "title": "Invoices can be settled", "status": "active",
+{ "owner": "billing/settlement", "title": "Invoices can be settled", "status": "active",
   "telos": "Customers must see immediately that their debt is cleared.",
   "statement": { "template": "event-driven", "when": "PaymentReceived",
                  "on": "Invoice", "action": "set Invoice.state = settled" },
-  "refines": [], "requires": ["INT-0017"], "excludes": [],
+  "refines": [], "requires": [], "excludes": [],
   "scenarios": [
     { "title": "a full payment settles the invoice",
       "given": [ {"notion": "Invoice", "fields": {"state": "open", "balance": "120.00 EUR"}} ],
@@ -951,15 +1003,17 @@ but `2` is not a decimal of the form `120.50`; a whole number is written
 
 **`add constraint`**:
 ```json
-{ "kind": "architecture", "title": "Hexagonal boundaries",
+{ "owner": "billing", "kind": "architecture", "title": "Hexagonal boundaries",
   "rule": {"text": "Domain code must not import adapter modules."},
   "scope": "global", "check": "scripts/check-imports.sh --layer domain" }
 ```
 `rule` is `{"text": …}` **or** `{"expr": "Invoice.balance >= 0"}`; `scope`
-is `"global"` or an array of intent ids; `check` is optional.
+is `"global"` or an array of intent ids; `check` is optional. The sample
+check script must be supplied by the project before reconciliation.
 
-**`edit`**: same keys as the matching `add`, all optional, each replacing
-its field wholesale when present. In `scenarios`, an entry carrying an
+**`edit`**: context and capability require the full matching `add` payload.
+For notion, intent and constraint, keys are optional, each replacing its
+field wholesale when present; omitted ownership is retained. In `scenarios`, an entry carrying an
 `"id": "SCN-0107"` replaces that scenario in place; an entry with no `id`
 is newly allocated; a scenario of the base absent from the new list is
 dropped. `"check": null` on a constraint explicitly clears it (an absent

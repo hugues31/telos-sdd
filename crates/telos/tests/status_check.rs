@@ -30,10 +30,7 @@ fn json_stdout(out: &std::process::Output) -> Value {
 /// The `telos/contexts/billing/notions/Invoice.tel` path, repeated across several tests.
 const INVOICE_TEL: &str = "telos/contexts/billing/notions/Invoice.tel";
 
-/// The exact `TELOS_DRIFT_DETECTED` hint `check --sealed` reports, frozen
-/// by `docs/contracts.md`.
-const DRIFT_HINT: &str = "run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert`";
-
+/// Build a synthetic incomplete seal for domain proof diagnostics.
 fn legacy_incomplete_seal() -> tempfile::TempDir {
     let tmp = unsealed_fixture();
     let ws = Workspace::discover(tmp.path()).unwrap();
@@ -43,6 +40,7 @@ fn legacy_incomplete_seal() -> tempfile::TempDir {
         .unwrap()
         .write(&ws.lock_path())
         .unwrap();
+    telos_core::plans::ledger::bootstrap(tmp.path()).unwrap();
     tmp
 }
 
@@ -61,12 +59,19 @@ fn status_json_on_the_sealed_fixture_matches_the_golden_envelope() {
         "expected exit 0, got {:?}",
         out.status
     );
+    assert!(
+        json_stdout(&out)["result"]["plans"]
+            .as_array()
+            .is_some_and(|p| !p.is_empty())
+    );
     assert_eq!(
         json_stdout(&out),
         json!({
             "ok": true,
             "command": "status",
             "result": {
+                "plans": json_stdout(&out)["result"]["plans"],
+                "governance": {"state":"managed","changes":[]},
                 "state": "coherent",
                 "changes": [],
                 "drift": null,
@@ -338,8 +343,11 @@ fn check_sealed_on_a_drifted_fixture_reports_telos_drift_detected() {
 
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
-    assert_eq!(envelope["error"]["code"], json!("TELOS_DRIFT_DETECTED"));
-    assert_eq!(envelope["error"]["hint"], json!(DRIFT_HINT));
+    assert_eq!(envelope["error"]["code"], json!("TELOS_UNPLANNED_CHANGE"));
+    assert_eq!(
+        envelope["error"]["hint"],
+        json!("restore unrelated changes or approve a plan revision covering these paths")
+    );
 }
 
 // --- workspace/git root guard ---------------------------------------------
@@ -392,7 +400,7 @@ fn check_sealed_on_a_corrupted_spec_reports_drift_not_a_parse_error() {
 
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
-    assert_eq!(envelope["error"]["code"], json!("TELOS_DRIFT_DETECTED"));
+    assert_eq!(envelope["error"]["code"], json!("TELOS_UNPLANNED_CHANGE"));
 }
 
 #[test]
@@ -419,10 +427,19 @@ fn empty_disk_coverage_and_successful_check_do_not_claim_to_inspect_the_proposal
                 "when":{"notion":"PaymentReceived", "fields":{}}, "then":["Invoice.state == settled"]}]}),
         ),
     ] {
-        telos(tmp.path(), &["add", kind, "--change", "CHG-0001", "--json"])
-            .write_stdin(payload.to_string())
-            .assert()
-            .success();
+        telos(
+            tmp.path(),
+            &[
+                "add",
+                kind,
+                "--change",
+                "CHG-00000000-0000-0000-0000-000000000001",
+                "--json",
+            ],
+        )
+        .write_stdin(payload.to_string())
+        .assert()
+        .success();
     }
     let status = json_stdout(&telos(tmp.path(), &["status", "--json"]).output().unwrap());
     assert_eq!(status["result"]["state"], "changing");
@@ -445,7 +462,10 @@ fn empty_disk_coverage_and_successful_check_do_not_claim_to_inspect_the_proposal
             .output()
             .unwrap(),
     );
-    assert_eq!(packed["result"]["change"], "CHG-0001");
+    assert_eq!(
+        packed["result"]["change"],
+        "CHG-00000000-0000-0000-0000-000000000001"
+    );
     assert_eq!(packed["result"]["scenarios"].as_array().unwrap().len(), 1);
     for command in ["status", "check"] {
         let out = telos(tmp.path(), &[command]).output().unwrap();
@@ -483,5 +503,5 @@ fn check_scope_distinguishes_disk_validation_from_seal_verification() {
             .output()
             .unwrap(),
     );
-    assert_eq!(sealed["error"]["code"], "TELOS_DRIFT_DETECTED");
+    assert_eq!(sealed["error"]["code"], "TELOS_UNPLANNED_CHANGE");
 }

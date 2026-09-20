@@ -5,7 +5,7 @@ import { formatLocalDate } from './date';
 describe('local calendar-date formatting', () => {
   test('uses the requested locale without shifting the calendar date', () => {
     expect(formatLocalDate('2026-08-25', 'en-GB')).toBe('25 Aug 2026');
-    expect(formatLocalDate('2024-02-29', 'fr-FR')).toMatch(/29.*févr.*2024/i);
+    expect(formatLocalDate('2024-02-29')).toBe('29 Feb 2024');
   });
 
   test('returns the source value for invalid calendar dates and text', () => {

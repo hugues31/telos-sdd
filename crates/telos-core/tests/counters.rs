@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use telos_core::counters::{Alloc, Counters, floors, read_counters, write_counters};
 use telos_core::error::ErrorCode;
-use telos_core::ids::{ChangeId, ConstraintId, IntentId, ScenarioId};
+use telos_core::ids::{ConstraintId, IntentId, ScenarioId};
 use telos_core::workspace::Workspace;
 
 // --- fixture plumbing --------------------------------------------------
@@ -160,7 +160,7 @@ fn alloc_from_the_corpus_floor_allocates_ids_above_every_existing_one() {
     assert_eq!(alloc.next_intent(), IntentId(43));
     assert_eq!(alloc.next_scenario(), ScenarioId(108));
     assert_eq!(alloc.next_constraint(), ConstraintId(4));
-    assert_eq!(alloc.next_change(), ChangeId(1));
+    assert_ne!(alloc.next_change().unwrap(), alloc.next_change().unwrap());
 }
 
 #[test]

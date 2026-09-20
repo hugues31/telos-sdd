@@ -12,7 +12,7 @@
 //! Key order in the output is struct field order (`serde_json` preserves
 //! it), so the envelope is also stable enough to diff.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use telos_core::error::{ErrorCode, TelosError};
@@ -72,7 +72,7 @@ impl Envelope {
 /// What a command returns when it succeeds: the same information twice, once
 /// for machines (`result`) and once for humans (`human`), plus what to
 /// suggest doing next.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Outcome {
     pub result: Value,
     /// The human-mode text, without its trailing newline.

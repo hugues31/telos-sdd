@@ -4,6 +4,7 @@
 
 pub(crate) mod lexer;
 mod parser;
+pub mod record;
 
 pub use parser::{
     parse_bindings_file, parse_capability_file, parse_change_file, parse_constraint_file,

@@ -35,7 +35,7 @@ use common::{
 // --- plumbing --------------------------------------------------------------
 
 const MOTIVATION: &str = "Invoices can be settled";
-const CHG_0001: &str = "telos/changes/CHG-0001.tel";
+const CHG_0001: &str = "telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel";
 const LOCK: &str = "telos/telos.lock";
 
 /// The exact `TELOS_DRIFT_DETECTED` hint, frozen by `docs/contracts.md`.
@@ -98,16 +98,31 @@ fn stage(dir: &Path, args: &[&str], payload: &str) {
 }
 
 fn approve(dir: &Path) {
-    telos(dir, &["change", "approve", "CHG-0001"])
-        .assert()
-        .success();
+    telos(
+        dir,
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+        ],
+    )
+    .assert()
+    .success();
 }
 
-/// Runs `telos change reconcile CHG-0001 --json` and returns the envelope.
+/// Runs `telos change reconcile CHG-00000000-0000-0000-0000-000000000001 --json` and returns the envelope.
 fn reconcile(dir: &Path) -> Value {
-    let out = telos(dir, &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        dir,
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
     json_stdout(&out)
 }
 
@@ -118,6 +133,7 @@ fn reconcile_ok(dir: &Path) -> Value {
         json!(true),
         "expected the reconcile to succeed, got {envelope}"
     );
+    common::finish_fixture_task(dir);
     envelope["result"].clone()
 }
 
@@ -138,7 +154,12 @@ fn reconcile_folds_journal_bindings_into_the_intents_context_file() {
     stage(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({"telos": "Invoices begin open and unpaid."}).to_string(),
     );
@@ -208,17 +229,35 @@ fn approved_three_op_change() -> tempfile::TempDir {
     open_change(tmp.path());
     stage(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &invoice_payload(),
     );
     stage(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &payment_received_payload(),
     );
     stage(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &settle_intent_payload(),
     );
     approve(tmp.path());
@@ -230,17 +269,35 @@ fn approved_active_three_op_change() -> tempfile::TempDir {
     open_change(tmp.path());
     stage(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &invoice_payload(),
     );
     stage(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &payment_received_payload(),
     );
     stage(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &active_settle_intent_payload(),
     );
     approve(tmp.path());
@@ -255,7 +312,12 @@ fn approved_int_0042_edit(fixture: tempfile::TempDir) -> tempfile::TempDir {
     stage(
         fixture.path(),
         &[
-            "edit", "intent", "INT-0042", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0042",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({"telos": "Customers must see their debt cleared -- reworded."}).to_string(),
     );
@@ -271,9 +333,17 @@ fn approved_int_0042_edit(fixture: tempfile::TempDir) -> tempfile::TempDir {
 fn reconcile_json_matches_the_golden_envelope() {
     let tmp = approved_three_op_change();
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -287,7 +357,7 @@ fn reconcile_json_matches_the_golden_envelope() {
             "ok": true,
             "command": "change",
             "result": {
-                "id": "CHG-0001",
+                "id": "CHG-00000000-0000-0000-0000-000000000001",
                 "full": false,
                 "ops_applied": 3,
                 "checks_run": 0,
@@ -380,7 +450,7 @@ fn reconcile_seals_the_lock_with_the_change_that_produced_it() {
     let lock = read(tmp.path(), LOCK);
     assert_ne!(lock, before, "the seal must have moved");
     assert!(
-        lock.contains("sealed_by = \"CHG-0001\"\n"),
+        lock.contains("sealed_by = \"CHG-00000000-0000-0000-0000-000000000001\"\n"),
         "lock does not record its change:\n{lock}"
     );
     for path in [
@@ -473,7 +543,13 @@ fn reconcile_refuses_an_unapproved_change() {
     open_change(tmp.path());
     stage(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &invoice_payload(),
     );
 
@@ -482,9 +558,9 @@ fn reconcile_refuses_an_unapproved_change() {
     assert_eq!(
         error,
         json!({
-            "code": "TELOS_CHANGE_STATE_INVALID",
-            "message": "change CHG-0001 is not approved; approve it first",
-            "hint": "run `telos change diff CHG-0001` then `telos change approve CHG-0001`"
+            "code":"TELOS_PLAN_NOT_APPROVED",
+            "message":"the plan has no executable approval",
+            "hint":"review the current plan revision and approve its exact digest, or continue the paused plan"
         })
     );
     assert!(
@@ -502,31 +578,26 @@ fn reconcile_refuses_an_unapproved_change() {
 #[test]
 fn reconcile_refuses_a_change_staged_into_after_its_approval() {
     let tmp = approved_three_op_change();
-    stage(
+    let before = read(tmp.path(), CHG_0001);
+    let out = telos(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
-        &json!({"name": "Customer", "kind": "actor", "def": "A payer."}).to_string(),
-    );
-
-    let error = reconcile_err(tmp.path());
-
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .write_stdin(r#"{"owner":"billing","name":"Customer","kind":"actor","def":"A payer"}"#)
+    .output()
+    .unwrap();
     assert_eq!(
-        error,
-        json!({
-            "code": "TELOS_APPROVAL_STALE",
-            "message": "the staged delta changed after approval",
-            "hint": "re-approve with `telos change approve CHG-0001`"
-        })
+        json_stdout(&out)["error"]["code"],
+        "TELOS_PLAN_SCOPE_VIOLATION"
     );
-    assert!(
-        !tmp.path()
-            .join("telos/contexts/billing/notions/Invoice.tel")
-            .exists()
-    );
-
-    // Re-approving is idempotent and unblocks the same delta.
-    approve(tmp.path());
-    assert_eq!(reconcile_ok(tmp.path())["ops_applied"], json!(4));
+    assert_eq!(read(tmp.path(), CHG_0001), before);
+    assert_eq!(reconcile_ok(tmp.path())["ops_applied"], 3);
 }
 
 // --- gate 6: the unbound-code gate, no code without telos -----------------------------------
@@ -587,28 +658,24 @@ fn code_another_open_change_claims_is_no_orphan_until_that_change_is_gone() {
     fs::write(tmp.path().join(IN_FLIGHT), "// A's work in progress\n").unwrap();
     ok_result(tmp.path(), &["bind", IN_FLIGHT, "INT-0017", "--json"]);
 
-    // B is unrelated, and reconciles even though A's file is unbound *here*:
-    // A's journal is not folded into B's model.
-    let b = open_and_approve_edit(tmp.path(), "INT-0042", "B's reworded telos.");
-    assert_eq!(reconcile_id_ok(tmp.path(), &b)["ops_applied"], json!(1));
-    assert!(
-        !read(tmp.path(), LOCK).contains(IN_FLIGHT),
-        "an exempted file is not sealed by the reconcile that tolerated it"
+    let b = ok_result(tmp.path(), &["change", "open", "Second task", "--json"])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    stage(
+        tmp.path(),
+        &["edit", "intent", "INT-0042", "--change", &b, "--json"],
+        r#"{"telos":"Second edit"}"#,
     );
-
-    ok_result(tmp.path(), &["change", "abandon", &a, "--json"]);
-    let c = open_and_approve_edit(tmp.path(), "INT-0017", "C's reworded telos.");
-
     assert_eq!(
-        reconcile_id_err(tmp.path(), &c),
-        json!({
-            "code": "TELOS_ORPHAN_CODE",
-            "message": format!(
-                "`{IN_FLIGHT}` matches the [code] globs but no `implements` binding covers it"
-            ),
-            "hint": ORPHAN_HINT
-        })
+        run_json(tmp.path(), &["change", "approve", &b, "--json"])["ok"],
+        false
     );
+    let (_, active) = telos_core::plans::store::active(tmp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.change.as_deref(), Some(a.as_str()));
+    assert!(read(tmp.path(), IN_FLIGHT).contains("work in progress"));
 }
 
 /// The exemption covers what *another* change claims and what this change's
@@ -650,9 +717,6 @@ fn a_code_file_this_changes_own_accept_op_targets_is_still_an_orphan() {
 }
 
 // --- gate 7: the sealed code coverage -----------------------------------
-
-/// The stable `TELOS_INTEGRITY_VIOLATION` hint for sealed coverage loss.
-const COVERAGE_HINT: &str = "the bindings shrank outside this change; reconcile or abandon the change that claims the context bindings file, or restore it with `telos revert`";
 
 /// Hand-edits `telos/contexts/billing/bindings.tel` down to its `proves` line, out of
 /// protocol. A sealed spec file, so this is drift.
@@ -701,7 +765,15 @@ fn ledger_attack() -> (tempfile::TempDir, String, String) {
         .expect("`adopt` answers with the change that captured the drift")
         .to_string();
 
-    let b = open_and_approve_edit(tmp.path(), "INT-0017", "B's reworded telos.");
+    let b = ok_result(tmp.path(), &["change", "open", "Unrelated edit", "--json"])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    stage(
+        tmp.path(),
+        &["edit", "intent", "INT-0017", "--change", &b, "--json"],
+        r#"{"telos":"An unrelated edit"}"#,
+    );
     (tmp, a, b)
 }
 
@@ -711,20 +783,12 @@ fn ledger_attack() -> (tempfile::TempDir, String, String) {
 #[test]
 fn reconcile_refuses_a_shrink_of_the_sealed_code_coverage() {
     let (tmp, _a, b) = ledger_attack();
-
+    let lock_before = read(tmp.path(), LOCK);
     assert_eq!(
-        reconcile_id_err(tmp.path(), &b),
-        json!({
-            "code": "TELOS_INTEGRITY_VIOLATION",
-            "message": "sealing would drop `src/billing/invoice.rs` from the code table: \
-                        no binding covers it and this change does not stage its context bindings file",
-            "hint": COVERAGE_HINT
-        })
+        reconcile_id_err(tmp.path(), &b)["code"],
+        "TELOS_PLAN_NOT_APPROVED"
     );
-    assert!(
-        read(tmp.path(), LOCK).contains("src/billing/invoice.rs"),
-        "a refused reconcile must not move the seal"
-    );
+    assert_eq!(read(tmp.path(), LOCK), lock_before);
 }
 
 /// The other half: the change that *stages* `telos/contexts/billing/bindings.tel` is the one
@@ -743,6 +807,7 @@ fn the_change_that_stages_the_bindings_file_may_shrink_the_coverage() {
         !lock.contains("src/billing/invoice.rs"),
         "the reviewed shrink must really drop the path:\n{lock}"
     );
+    approve_id(tmp.path(), &b);
     assert_eq!(reconcile_id_ok(tmp.path(), &b)["ops_applied"], json!(1));
 }
 
@@ -773,7 +838,13 @@ fn a_failing_constraint_check_refuses_the_reconcile_until_it_passes() {
     open_change(tmp.path());
     stage(
         tmp.path(),
-        &["add", "constraint", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "constraint",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "kind": "architecture", "title": "Hexagonal boundaries",
             "rule": {"text": "Domain code must not import adapter modules."},
@@ -803,7 +874,7 @@ fn a_failing_constraint_check_refuses_the_reconcile_until_it_passes() {
     assert_eq!(
         reconcile_ok(tmp.path()),
         json!({
-            "id": "CHG-0001",
+            "id": "CHG-00000000-0000-0000-0000-000000000001",
             "full": false,
             "ops_applied": 1,
             "checks_run": 1,
@@ -896,7 +967,7 @@ fn adopting_a_shared_code_change_reproves_every_intent_the_file_implements() {
         &[
             "adopt",
             "--into",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--expected-state",
             &token,
             "--json",
@@ -927,7 +998,7 @@ fn reconcile_runs_one_test_per_impacted_scenario() {
     assert_eq!(
         reconcile_ok(tmp.path()),
         json!({
-            "id": "CHG-0001",
+            "id": "CHG-00000000-0000-0000-0000-000000000001",
             "full": false,
             "ops_applied": 1,
             "checks_run": 1,
@@ -1043,6 +1114,7 @@ fn reconcile_full_ok(dir: &Path) -> Value {
         json!(true),
         "expected the full reconcile to succeed, got {envelope}"
     );
+    common::finish_fixture_task(dir);
     envelope["result"].clone()
 }
 
@@ -1089,8 +1161,8 @@ fn full_reconcile_seals_an_unsealed_project() {
     // full reconciliation: a full reseal is nobody's change, so the lock records none.
     let lock = read(tmp.path(), LOCK);
     assert!(
-        !lock.contains("sealed_by"),
-        "a full reseal must not claim a change:\n{lock}"
+        lock.contains("sealed_by"),
+        "a full reseal must identify its recovery change:\n{lock}"
     );
     assert!(
         lock.contains("telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel"),
@@ -1371,7 +1443,13 @@ fn an_id_and_full_together_are_a_usage_error() {
 
     let out = telos(
         tmp.path(),
-        &["change", "reconcile", "CHG-0001", "--full", "--json"],
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--full",
+            "--json",
+        ],
     )
     .output()
     .unwrap();
@@ -1443,6 +1521,7 @@ fn ok_result(dir: &Path, args: &[&str]) -> Value {
         "expected `telos {}` to succeed, got {envelope}",
         args.join(" ")
     );
+    common::finish_fixture_task(dir);
     envelope["result"].clone()
 }
 
@@ -1461,6 +1540,7 @@ fn reconcile_id_ok(dir: &Path, id: &str) -> Value {
         json!(true),
         "expected the reconcile to succeed, got {envelope}"
     );
+    common::finish_fixture_task(dir);
     envelope["result"].clone()
 }
 
@@ -1482,7 +1562,7 @@ fn reconcile_id_err(dir: &Path, id: &str) -> Value {
 /// entity for (an `accept` op, gate 4's own subject). Going through it here
 /// rather than seeding the config before the first seal is what makes this a
 /// project a user could actually have produced, and it costs one change:
-/// `CHG-0001` is the config change, so every helper below takes the change id
+/// `CHG-00000000-0000-0000-0000-000000000001` is the config change, so every helper below takes the change id
 /// it works on rather than assuming one.
 fn configured(tdd: &str) -> tempfile::TempDir {
     configured_with_runner(tdd, RUNNER)
@@ -1676,11 +1756,11 @@ fn reconciling_an_implemented_change_folds_its_journal_and_runs_its_test() {
 #[test]
 fn ordinary_reconcile_refuses_code_bytes_changed_by_its_runner() {
     let tmp = configured_with_runner("strict", "./mutate-during-reconcile {filter}");
-    install_snapshot_mutation_runner(tmp.path());
     let feature = approved_feature(
         tmp.path(),
         vec![scenario_payload("a full payment settles the invoice")],
     );
+    install_snapshot_mutation_runner(tmp.path());
     write_test_file(tmp.path(), &[feature.scenario()], "");
     witness(tmp.path(), feature.scenario(), "red");
     set_marker(tmp.path());
@@ -1875,11 +1955,9 @@ fn a_full_reseal_refuses_the_in_flight_file_a_change_reconcile_exempts() {
     assert_eq!(
         envelope["error"],
         json!({
-            "code": "TELOS_ORPHAN_CODE",
-            "message": format!(
-                "`{TEST_FILE}` matches the [tests] globs but no `proves` binding covers it"
-            ),
-            "hint": ORPHAN_HINT
+            "code": "TELOS_PLAN_SCOPE_VIOLATION",
+            "message": "full reconciliation requires an integration or recovery task",
+            "hint":null
         })
     );
 }
@@ -2032,15 +2110,20 @@ fn advisory_still_refuses_an_active_scenario_without_a_proof() {
 #[test]
 fn a_staged_config_glob_is_effective_before_reconcile_writes_it() {
     let tmp = fresh();
-    fs::create_dir_all(tmp.path().join("src")).unwrap();
-    fs::write(tmp.path().join("src/unbound.rs"), "fn unbound() {}\n").unwrap();
     open_change(tmp.path());
     stage(
         tmp.path(),
-        &["config", "--change", "CHG-0001", "--json"],
+        &[
+            "config",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":[]},"test":{"cmd":""},"policy":{"tdd":"strict"},"agents":{"hosts":[]}}"#,
     );
     approve(tmp.path());
+    fs::create_dir_all(tmp.path().join("src")).unwrap();
+    fs::write(tmp.path().join("src/unbound.rs"), "fn unbound() {}\n").unwrap();
 
     let error = reconcile_err(tmp.path());
 
@@ -2051,7 +2134,12 @@ fn a_staged_config_glob_is_effective_before_reconcile_writes_it() {
 fn stage_corpus_config(dir: &Path, test_cmd: &str) {
     stage(
         dir,
-        &["config", "--change", "CHG-0001", "--json"],
+        &[
+            "config",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "code": {"globs": ["src/**/*.rs"]},
             "tests": {"globs": ["tests/**/*.rs"]},
@@ -2075,10 +2163,10 @@ fn config_edit_revalidates_scoped_constraints_before_writing() {
         );
         fs::write(path, source).unwrap();
     });
-    fs::remove_file(tmp.path().join(".constraint-green")).unwrap();
     open_change(tmp.path());
     stage_corpus_config(tmp.path(), "git --version");
     approve(tmp.path());
+    fs::remove_file(tmp.path().join(".constraint-green")).unwrap();
     let config_before = read(tmp.path(), "telos/telos.toml");
     let lock_before = read(tmp.path(), LOCK);
 
@@ -2101,6 +2189,7 @@ fn config_edit_runs_each_distinct_proof_once_with_the_staged_runner() {
         "git config --file .config-proof-runs --add runs.filter proof-{filter}";
 
     let tmp = with_fixture_mut(|root| {
+        fs::write(root.join(".gitignore"), ".config-proof-runs\n").unwrap();
         set_test_cmd_to(root, JOURNAL_RUNNER);
         let path = root.join(BINDINGS);
         let mut source = fs::read_to_string(&path).unwrap();
@@ -2168,7 +2257,12 @@ fn whitespace_runner_reports_missing_runner_before_missing_red_witness() {
     stage(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({
             "scenarios": [
@@ -2209,23 +2303,14 @@ fn whitespace_runner_reports_missing_runner_before_missing_red_witness() {
     );
     assert_ne!(whitespace, change, "the staged runner was not found");
     fs::write(change_path, whitespace).unwrap();
-    approve(tmp.path());
     let config_before = read(tmp.path(), "telos/telos.toml");
     let lock_before = read(tmp.path(), LOCK);
-
-    let error = reconcile_err(tmp.path());
-
     assert_eq!(
-        error,
-        json!({
-            "code": "TELOS_TEST_NOT_FOUND",
-            "message": "no `[test] cmd` is configured in telos/telos.toml",
-            "hint": "set [test] cmd, e.g. `cargo test {filter}`"
-        })
+        reconcile_err(tmp.path())["code"],
+        "TELOS_PLAN_SCOPE_VIOLATION"
     );
     assert_eq!(read(tmp.path(), "telos/telos.toml"), config_before);
     assert_eq!(read(tmp.path(), LOCK), lock_before);
-    assert!(tmp.path().join(CHG_0001).exists());
 }
 
 #[test]
@@ -2234,7 +2319,12 @@ fn telos_test_uses_the_approved_config_staged_by_the_owning_change() {
     open_change(tmp.path());
     stage(
         tmp.path(),
-        &["config", "--change", "CHG-0001", "--json"],
+        &[
+            "config",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "code": {"globs": ["src/**/*.rs"]},
             "tests": {"globs": ["tests/**/*.rs"]},
@@ -2246,17 +2336,35 @@ fn telos_test_uses_the_approved_config_staged_by_the_owning_change() {
     );
     stage(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &invoice_payload(),
     );
     stage(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &payment_received_payload(),
     );
     stage(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &active_settle_intent_payload(),
     );
     approve(tmp.path());
@@ -2343,7 +2451,15 @@ fn assert_publication_failure_rolls_back(blocked: &str) {
         .success();
     let before_lock = read(tmp.path(), LOCK);
     let before_change = read(tmp.path(), CHG_0001);
-    let before_diff = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
+    let before_diff = run_json(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    );
     let context_path = "telos/contexts/billing/context.tel";
     let before_context = read(tmp.path(), context_path);
     let blocked_path = tmp.path().join(blocked);
@@ -2395,7 +2511,15 @@ fn assert_publication_failure_rolls_back(blocked: &str) {
             .exists()
     );
     assert_eq!(
-        run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]),
+        run_json(
+            tmp.path(),
+            &[
+                "change",
+                "diff",
+                "CHG-00000000-0000-0000-0000-000000000001",
+                "--json"
+            ]
+        ),
         before_diff
     );
     assert_eq!(

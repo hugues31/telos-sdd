@@ -10,6 +10,7 @@ import {
 const snapshot = (version: string): TelosPayload => ({
   meta: { version, build_date: '2026-08-21', mode: 'live' },
   snapshot: {
+    plans: [], history: [], unplanned: [],
     dashboard: { state: 'coherent', drift: [], open_changes: [] },
     coverage: {
       notions: 0,

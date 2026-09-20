@@ -25,7 +25,6 @@
 
 use serde_json::json;
 
-use telos_core::adopt::revert;
 use telos_core::changes::scan_changes;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::state::{compute_state, drift_token};
@@ -36,6 +35,26 @@ use crate::envelope::{CmdResult, Outcome};
 pub fn run(ctx: &Ctx, expected_state: Option<&str>) -> CmdResult {
     let project = project(ctx)?;
     require_drift(&project, "revert")?;
+    let (plan, task) =
+        telos_core::plans::store::active(&project.ws.repo_root)?.ok_or_else(|| {
+            TelosError::new(
+                ErrorCode::TelosPlanRequired,
+                "revert requires an approved recovery task",
+            )
+        })?;
+    telos_core::plans::store::require_approved(&plan)?;
+    if task.definition.kind != telos_core::plans::model::TaskKind::Recovery {
+        return Err(TelosError::new(
+            ErrorCode::TelosPlanScopeViolation,
+            "revert requires a recovery task",
+        ));
+    }
+    telos_core::plans::ledger::require_scope(
+        &project.ws.repo_root,
+        &plan,
+        &task.definition,
+        &telos_core::inventory::capture(&project.ws.repo_root)?,
+    )?;
     let current = drift_token(
         &project.ws,
         &project.git,
@@ -53,12 +72,20 @@ pub fn run(ctx: &Ctx, expected_state: Option<&str>) -> CmdResult {
         return Err(stale_state());
     }
 
-    let outcome = revert(
-        &project.ws,
-        &project.git,
-        &project.lock,
-        &project.state.drift,
-    )?;
+    let ledger = telos_core::plans::ledger::verify(&project.ws.repo_root)?;
+    let delta = telos_core::inventory::restore(&project.ws.repo_root, &ledger.current)?;
+    let outcome = telos_core::adopt::RevertOutcome {
+        restored: delta
+            .iter()
+            .filter(|f| f.after.is_some())
+            .map(|f| telos_core::ids::RepoPath::new(&f.path))
+            .collect(),
+        deleted: delta
+            .iter()
+            .filter(|f| f.after.is_none())
+            .map(|f| telos_core::ids::RepoPath::new(&f.path))
+            .collect(),
+    };
 
     let human = format!(
         "restored {} path(s), deleted {}",

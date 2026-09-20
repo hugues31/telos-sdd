@@ -840,7 +840,7 @@ pub(crate) mod fixtures {
     /// `entity-decl` nests the `notion-file` / `intent-file` grammar verbatim,
     /// so the notion kind and intent title remain mandatory. The values used
     /// here come from `crates/telos-core/tests/corpus/billing`.
-    pub(crate) const CHANGE_EXAMPLE: &str = r#"change CHG-0007 "Invoices can be settled" {
+    pub(crate) const CHANGE_EXAMPLE: &str = r#"change CHG-00000000-0000-0000-0000-000000000007 "Invoices can be settled" {
   status approved
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
@@ -953,7 +953,7 @@ pub(crate) mod fixtures {
     /// `parse_change_file` reads back into `implementing_change()`.
     ///
     /// The journal grammar nests nothing, so the emitted bytes are direct.
-    pub(crate) const JOURNAL_EXAMPLE: &str = r#"change CHG-0001 "Invoices can be settled" {
+    pub(crate) const JOURNAL_EXAMPLE: &str = r#"change CHG-00000000-0000-0000-0000-000000000001 "Invoices can be settled" {
   status implementing
   digest "sha256:9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"
 
@@ -1410,14 +1410,14 @@ mod tests {
     /// drift gate, so the refusal belongs where files become models.
     #[test]
     fn no_journal_line_can_name_a_path_under_telos() {
-        let path = RepoPath::new("telos/changes/CHG-0001.tel");
+        let path = RepoPath::new("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel");
         for line in [
             "  bind \"telos/bindings.tel\" -> INT-0001",
             "  run  SCN-0001 green \"telos/bindings.tel\" \"cafe\"",
             "  run  SCN-0001 red \"telos/intents/INT-0001.tel::scn_0001\" \"cafe\"",
         ] {
             let src = format!(
-                "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
                  {line}\n}}\n",
                 "0".repeat(64)
             );

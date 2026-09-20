@@ -37,6 +37,7 @@ fn stage(ctx: &Ctx, change: &str, raw: &str) -> CmdResult {
     let project = project(ctx)?;
     require_no_unclaimed_drift(&project)?;
     let mut change = read_change(&project.ws, id)?;
+    telos_core::plans::actions::require_change_contract(&project.ws.repo_root, &change, false)?;
     let path = RepoPath::new(MAP_PATH);
     let map = parse_context_map_file(&path, raw).map_err(diagnostics_to_error)?;
     let op = StagedOp::EditContextMap(map.clone());

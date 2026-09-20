@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import HistoryPanel from '../components/HistoryPanel.vue';
 // Route: /intent/:id. Rust projects display-ready canonical fragments for
 // the statement and scenarios, so this page can show complete behavior
 // without parsing or reconstructing the .tel grammar in the frontend.
@@ -91,6 +92,7 @@ function relationLabel(relation: IntentRelation, direction: RelationDirection): 
 <template>
   <section class="page intent-detail">
     <template v-if="intent">
+      <HistoryPanel v-if="intent" :target="intent.id" />
       <RouterLink to="/intents" class="intent-detail__back">← All intents</RouterLink>
       <div class="intent-detail__heading">
         <div>

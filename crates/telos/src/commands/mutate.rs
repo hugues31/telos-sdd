@@ -21,28 +21,17 @@
 //!    referential deletion safety and whether the target exists at all), **then the whole spec
 //!    the delta describes is validated** ([`validate_ops_idempotent`]) --
 //!    every reference, every literal.
-//! 6. **Only then does anything reach the disk**, change file first,
-//!    `counters.toml` second.
+//! 6. Publish the delta and any allocated counters in one durable transaction.
 //!
-//! Step 6 is why steps 1-5 allocate ids freely: an id burnt by a payload
-//! that turns out to be invalid is never persisted, because
-//! [`write_counters`] runs *after* [`write_change`] and both run only on the
-//! success path. A refused mutation leaves the change byte-for-byte as it
-//! was.
-//!
-//! **No status gate.** Staging is allowed on `open` (which becomes
-//! `drafted`), on `drafted`, and on an already-approved change too. The last
-//! case is deliberate: nothing is lost -- the approval's digest stays,
-//! [`Change::is_stale`] turns true, `change diff` reports `stale: true`, and
-//! `reconcile` refuses with `TELOS_APPROVAL_STALE`. Refusing here
-//! instead would only move the same conversation earlier while making the
-//! natural "review, adjust, re-approve" loop impossible.
+//! Staging requires an editable draft plan revision. An executing approved
+//! task has an immutable delta; changing it requires pausing, revising and
+//! approving the owning plan. Validation refusals preserve the prepared change.
 
 use clap::ValueEnum;
 use serde_json::{Value, json};
 
-use telos_core::changes::{read_change, write_change};
-use telos_core::counters::{Alloc, write_counters};
+use telos_core::changes::{read_change, write_change_with_counters};
+use telos_core::counters::Alloc;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::ids::{
     CapabilityId, CapabilityRef, ChangeId, ConstraintId, ContextId, EntityRef, IntentId, NotionRef,
@@ -352,6 +341,7 @@ impl Staging {
         require_no_unclaimed_drift(&project)?;
 
         let change = read_change(&project.ws, id)?;
+        telos_core::plans::actions::require_change_contract(&project.ws.repo_root, &change, false)?;
         let base = parse_base(&project.ws).map_err(diagnostics_to_error)?;
         // The change's *own* earlier ops are replayed idempotently: a change
         // `adopt` produced describes a tree that already shows them,
@@ -479,7 +469,7 @@ impl Staging {
         self.change.ops.push(op);
         // the change lifecycle: the first staged op is what takes a change out of `open`.
         // Every other status is left exactly as it was -- see the module
-        // docs on why staging into an approved change is allowed.
+        // draft staging leaves an existing status unchanged.
         if self.change.status == ChangeStatus::Open {
             self.change.status = ChangeStatus::Drafted;
         }
@@ -487,14 +477,11 @@ impl Staging {
         validate_ops_idempotent(&self.project.ws, &self.change.ops)
             .map_err(diagnostics_to_error)?;
 
-        write_change(&self.project.ws, &self.change)?;
-        // Only an op that minted an id has a counter to persist; the others
-        // never built an allocator, and re-persisting an unchanged
-        // `counters.toml` would be a write for nothing. Nothing is lost by
-        // skipping it: the next allocation rescans the floors anyway.
-        if let Some(alloc) = &self.alloc {
-            write_counters(&self.project.ws, &alloc.counters())?;
-        }
+        write_change_with_counters(
+            &self.project.ws,
+            &self.change,
+            self.alloc.as_ref().map(Alloc::counters).as_ref(),
+        )?;
 
         let id = self.change.id;
         let mut result = json!({ "change": id, "entity": entity, "id": key });

@@ -3,7 +3,7 @@
 //! `TelosError` and `Diagnostic` are the two error representations built
 //! on top of it.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ids::RepoPath;
 
@@ -12,7 +12,7 @@ use crate::ids::RepoPath;
 /// Serializes to `SCREAMING_SNAKE_CASE` (e.g. `TelosDriftDetected` becomes
 /// `"TELOS_DRIFT_DETECTED"`). This is a frozen external contract consumed by
 /// agent tooling: variants are never renamed or removed, only added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     // Core public error codes.
@@ -53,11 +53,23 @@ pub enum ErrorCode {
     /// scenario, or every such testcase was skipped -- or a sealed witness was
     /// taken by exit status while a report is configured.
     TelosTestNotExecuted,
+    TelosPlanRequired,
+    TelosPlanNotApproved,
+    TelosPlanScopeViolation,
+    TelosPlanDependencyUnmet,
+    TelosPlanValidationFailed,
+    TelosPlanVersionStale,
+    TelosRequestIdConflict,
+    TelosUnplannedChange,
+    TelosRecoveryRequired,
+    TelosRecoveryConflict,
+    TelosHistoryConflict,
+    TelosWorkspaceBusy,
 }
 
 /// A non-localized engine error: a code, a human-readable message, and an
 /// optional actionable hint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelosError {
     pub code: ErrorCode,
     pub message: String,
@@ -121,7 +133,7 @@ mod tests {
     #[test]
     fn error_code_serialization_is_frozen() -> Result<(), serde_json::Error> {
         // One assertion per variant -- this list IS the freeze. The public
-        // contract enumerates eighteen identifiers; every one is checked here.
+        // contract enumerates these identifiers; every one is checked here.
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosDriftDetected)?,
             "\"TELOS_DRIFT_DETECTED\""
@@ -201,6 +213,54 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ErrorCode::TelosTestNotExecuted)?,
             "\"TELOS_TEST_NOT_EXECUTED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosPlanRequired)?,
+            "\"TELOS_PLAN_REQUIRED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosPlanNotApproved)?,
+            "\"TELOS_PLAN_NOT_APPROVED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosPlanScopeViolation)?,
+            "\"TELOS_PLAN_SCOPE_VIOLATION\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosPlanDependencyUnmet)?,
+            "\"TELOS_PLAN_DEPENDENCY_UNMET\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosPlanValidationFailed)?,
+            "\"TELOS_PLAN_VALIDATION_FAILED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosPlanVersionStale)?,
+            "\"TELOS_PLAN_VERSION_STALE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosRequestIdConflict)?,
+            "\"TELOS_REQUEST_ID_CONFLICT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosUnplannedChange)?,
+            "\"TELOS_UNPLANNED_CHANGE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosRecoveryRequired)?,
+            "\"TELOS_RECOVERY_REQUIRED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosRecoveryConflict)?,
+            "\"TELOS_RECOVERY_CONFLICT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosHistoryConflict)?,
+            "\"TELOS_HISTORY_CONFLICT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::TelosWorkspaceBusy)?,
+            "\"TELOS_WORKSPACE_BUSY\""
         );
         Ok(())
     }

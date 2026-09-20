@@ -7,11 +7,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
-use telos_core::changes::{read_change, scan_changes};
-use telos_core::git::GitRepo;
-use telos_core::ids::ChangeId;
-use telos_core::lock::Lock;
-use telos_core::state::compute_state;
 use telos_core::workspace::Workspace;
 
 use super::AgentHost;
@@ -47,9 +42,7 @@ struct SimpleCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HumanAction {
-    Approve(ChangeId, String),
-    Adopt(String),
-    Revert(String),
+    Approve(String, String),
 }
 
 /// Reads one official hook event from stdin and prints the host's structured
@@ -133,7 +126,7 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
         {
             return deny_manual_write();
         }
-        return allow("Source-code edit is outside the repository telos/ tree");
+        return authorize_paths(&input_paths(input), &cwd, &root);
     }
 
     if tool == "apply_patch" {
@@ -148,7 +141,7 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
         {
             return deny_manual_write();
         }
-        return allow("Patch does not target the repository telos/ tree");
+        return authorize_paths(&patch_paths(patch), &cwd, &root);
     }
 
     if tool == "bash" {
@@ -210,7 +203,14 @@ pub fn decide(host: AgentHost, tool_name: &str, input: &Value, cwd: &Path) -> Gu
             };
         }
 
-        return allow("Command does not directly mutate the repository telos/ tree");
+        if commands.iter().all(|command| {
+            command.argv.first().is_some_and(|p| {
+                program_name(p) == "telos" || is_proven_read_only(program_name(p), &command.argv)
+            })
+        }) {
+            return allow("Read-only command or Telos-governed operation");
+        }
+        return authorize_paths(&[], &cwd, &root);
     }
 
     allow("Tool is outside the Telos guard policy")
@@ -815,7 +815,7 @@ fn argument_requires_denial(argument: &str, cwd: &Path, root: &Path) -> bool {
 fn is_proven_read_only(program: &str, command: &[String]) -> bool {
     match program {
         "cat" | "head" | "tail" | "less" | "more" | "rg" | "grep" | "ls" | "stat" | "wc"
-        | "file" | "diff" | "cmp" | "echo" | "printf" => true,
+        | "file" | "diff" | "cmp" | "echo" | "printf" | "pwd" | "cd" => true,
         "find" => !command.iter().any(|argument| {
             matches!(
                 argument.as_str(),
@@ -902,122 +902,113 @@ fn is_read_only_git_subcommand(subcommand: &str) -> bool {
 
 impl HumanAction {
     fn name(&self) -> &'static str {
-        match self {
-            Self::Approve(_, _) => "telos change approve",
-            Self::Adopt(_) => "telos adopt",
-            Self::Revert(_) => "telos revert",
-        }
+        "telos plan approve"
     }
 }
 
-/// Recognizes the direct command forms the generated Codex native rules can
-/// prompt for. Every other attempted human action is denied: presenting a
-/// prompt without a bound current repository context would be unsafe.
 fn human_action(commands: &[SimpleCommand]) -> Result<Option<HumanAction>, ()> {
-    let Some(command) = commands.first() else {
+    if !commands.iter().any(is_human_action_attempt) {
         return Ok(None);
-    };
-    if commands.len() != 1 {
-        return if commands.iter().any(is_human_action_attempt) {
-            Err(())
-        } else {
-            Ok(None)
-        };
     }
-    if !command.native_rule_covered {
-        return if is_human_action_attempt(command) {
-            Err(())
-        } else {
-            Ok(None)
-        };
+    if commands.len() != 1 || !commands[0].native_rule_covered {
+        return Err(());
     }
-
-    match command.argv.as_slice() {
-        [program, change, approve, id, flag, digest]
-            if program == "telos" && change == "change" && approve == "approve" =>
+    let argv: Vec<_> = commands[0]
+        .argv
+        .iter()
+        .filter(|arg| arg.as_str() != "--json")
+        .collect();
+    match argv.as_slice() {
+        [program, plan, approve, id, flag, digest]
+            if program.as_str() == "telos"
+                && plan.as_str() == "plan"
+                && approve.as_str() == "approve"
+                && flag.as_str() == "--expected-digest" =>
         {
-            if flag != "--expected-digest" {
-                return Err(());
-            }
-            id.parse::<ChangeId>()
-                .map(|id| HumanAction::Approve(id, digest.clone()))
-                .map(Some)
-                .map_err(|_| ())
+            telos_core::work::validate_id("PLN", id).map_err(|_| ())?;
+            Ok(Some(HumanAction::Approve((*id).clone(), (*digest).clone())))
         }
-        [program, action, flag, token]
-            if program == "telos" && action == "adopt" && flag == "--expected-state" =>
-        {
-            Ok(Some(HumanAction::Adopt(token.clone())))
-        }
-        [program, action, into_flag, id, state_flag, token]
-            if program == "telos"
-                && action == "adopt"
-                && into_flag == "--into"
-                && state_flag == "--expected-state" =>
-        {
-            id.parse::<ChangeId>().map_err(|_| ())?;
-            Ok(Some(HumanAction::Adopt(token.clone())))
-        }
-        [program, action, flag, token]
-            if program == "telos" && action == "revert" && flag == "--expected-state" =>
-        {
-            Ok(Some(HumanAction::Revert(token.clone())))
-        }
-        _ if is_human_action_attempt(command) => Err(()),
-        _ => Ok(None),
+        _ => Err(()),
     }
 }
 
 fn is_human_action_attempt(command: &SimpleCommand) -> bool {
-    // Recognize an attempted Telos decision even behind an unknown wrapper;
-    // only the canonical spellings may reach native prompting.
     command.argv.iter().enumerate().any(|(index, program)| {
-        program_name(program) == "telos" && {
-            let arguments = &command.argv[index + 1..];
-            arguments.windows(2).any(|words| matches!(words, [first, second] if first == "change" && second == "approve"))
-                || arguments.iter().any(|word| matches!(word.as_str(), "adopt" | "revert"))
-        }
+        program_name(program) == "telos"
+            && command.argv[index + 1..].windows(2).any(
+                |words| matches!(words, [first, second] if first == "plan" && second == "approve"),
+            )
     })
 }
 
 fn decision_context(action: &HumanAction, cwd: &Path) -> Result<DecisionContext, ()> {
-    let workspace = Workspace::discover(cwd).map_err(|_| ())?;
-    let text = match action {
-        HumanAction::Approve(id, expected) => {
-            let change = read_change(&workspace, *id).map_err(|_| ())?;
-            let digest = change.ops_digest();
-            if digest != expected.as_str() {
-                return Err(());
-            }
-            format!("change {id} digest {digest}; token-bound command confirmed")
-        }
-        HumanAction::Adopt(expected) | HumanAction::Revert(expected) => {
-            let lock = Lock::read(&workspace.lock_path())
-                .map_err(|_| ())?
-                .ok_or(())?;
-            let git = GitRepo::discover(cwd).map_err(|_| ())?;
-            let changes = scan_changes(&workspace).map_err(|_| ())?;
-            let state = compute_state(&workspace, &lock, &git, &changes.infos).map_err(|_| ())?;
-            let token = telos_core::state::drift_token(&workspace, &git, &lock, &state.drift)
-                .map_err(|_| ())?;
-            if token != expected.as_str() {
-                return Err(());
-            }
-            let paths = state
-                .drift
-                .iter()
-                .map(|entry| entry.path.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "{} drift paths [{}]; sealed spec digest {}",
-                action.name(),
-                paths,
-                lock.spec_digest
+    let ws = Workspace::discover(cwd).map_err(|_| ())?;
+    let HumanAction::Approve(id, expected) = action;
+    let plan = telos_core::plans::store::read(&ws.repo_root, id).map_err(|_| ())?;
+    let digest = plan.definition_digest().map_err(|_| ())?;
+    telos_core::plans::model::validate_definition(&plan.revision().definition, true)
+        .map_err(|_| ())?;
+    if &digest != expected {
+        return Err(());
+    }
+    Ok(DecisionContext {
+        text: format!(
+            "Plan {id}, revision {}, digest {digest}; scope [{}]. Approval authorizes its tasks without additional change prompts.",
+            plan.revision().number,
+            plan.revision().definition.scope.join(", ")
+        ),
+    })
+}
+
+fn authorize_paths(paths: &[&str], cwd: &Path, root: &Path) -> GuardDecision {
+    let check = || -> Result<(), telos_core::error::TelosError> {
+        let (plan, task) = telos_core::plans::store::active(root)?.ok_or_else(|| {
+            telos_core::error::TelosError::new(
+                telos_core::error::ErrorCode::TelosPlanRequired,
+                "start an approved plan task before modifying repository files",
             )
+        })?;
+        telos_core::plans::store::require_approved(&plan)?;
+        if task.state != telos_core::plans::model::TaskState::InProgress {
+            return Err(telos_core::error::TelosError::new(
+                telos_core::error::ErrorCode::TelosPlanRequired,
+                "the current task is blocked",
+            ));
         }
+        for path in paths {
+            let absolute = lexical_normalize(&cwd.join(path));
+            let relative = absolute
+                .strip_prefix(root)
+                .ok()
+                .and_then(|p| p.to_str())
+                .unwrap_or("")
+                .replace('\\', "/");
+            if relative.is_empty()
+                || !telos_core::plans::model::matches_path(
+                    &plan.revision().definition.scope,
+                    &relative,
+                )
+                || !telos_core::plans::model::matches_path(
+                    &task.definition.allowed_paths,
+                    &relative,
+                )
+            {
+                return Err(telos_core::error::TelosError::new(
+                    telos_core::error::ErrorCode::TelosPlanScopeViolation,
+                    format!("`{path}` is outside the approved task scope"),
+                ));
+            }
+        }
+        Ok(())
     };
-    Ok(DecisionContext { text })
+    match check() {
+        Ok(()) => allow("The approved plan task covers this operation"),
+        Err(error) => GuardDecision {
+            decision: Decision::Deny,
+            reason: error.message,
+            context: None,
+        },
+    }
 }
 
 fn deny_manual_write() -> GuardDecision {

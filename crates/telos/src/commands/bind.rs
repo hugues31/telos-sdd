@@ -68,6 +68,7 @@ pub fn run(ctx: &Ctx, path: &str, intent: &str) -> CmdResult {
 
     let owner = owner_of(&project.parsed, intent).ok_or_else(|| no_owner(intent))?;
     require_approved(owner)?;
+    telos_core::plans::actions::require_change_contract(&project.ws.repo_root, owner, true)?;
 
     require_exists(&project, &path)?;
     require_no_foreign_drift(&project, std::slice::from_ref(&path))?;

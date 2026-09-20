@@ -91,6 +91,31 @@ pub fn run(ctx: &Ctx, hosts: &[AgentHost], ci: Option<CiProvider>) -> CmdResult 
     run_with_agent_renderer(ctx, hosts, ci, agents::render)
 }
 
+/// Explicit bootstrap for a copied, current-format specification corpus.
+/// Existing implementation is observed at initialization, never backdated.
+pub fn from_spec(ctx: &Ctx) -> CmdResult {
+    let ws = Workspace::discover(&ctx.cwd)?;
+    let git = GitRepo::discover(&ctx.cwd)?;
+    let _writer = telos_core::transaction::Writer::acquire(&ws.repo_root)?;
+    if ws.repo_root.join(telos_core::plans::ledger::PATH).exists() {
+        telos_core::plans::ledger::require_clean(&ws.repo_root)?;
+    } else {
+        if !telos_core::changes::list_change_ids(&ws)?.is_empty() {
+            return Err(TelosError::new(
+                ErrorCode::TelosChangeStateInvalid,
+                "a specification bootstrap cannot discard open changes",
+            ));
+        }
+        telos_core::reconcile::reconcile_full(&ws, &git)?;
+        telos_core::plans::ledger::bootstrap(&ws.repo_root)?;
+    }
+    Ok(Outcome {
+        result: json!({"root":"telos","sealed":true,"observed":true}),
+        human: "initialized native plans from the observed specification".into(),
+        next_actions: vec!["telos plan open <title>".into()],
+    })
+}
+
 fn run_with_agent_renderer<F>(
     ctx: &Ctx,
     hosts: &[AgentHost],
@@ -247,6 +272,9 @@ where
     ci::render(&ci_plan)?;
     validate_resume_core(&safe_root, &root, &git, &integrating_marker)?;
     validate_marker_exact(&safe_root, &integrating_marker_bytes)?;
+    if !root.join(telos_core::plans::ledger::PATH).exists() {
+        telos_core::plans::ledger::bootstrap(&root)?;
+    }
     safe_root
         .remove_file_if_matches(Path::new(INIT_MARKER_PATH), &integrating_marker_bytes)
         .map_err(|error| marker_error("remove", error))?;
@@ -598,6 +626,8 @@ fn validate_telos_tree(safe_root: &SafeRoot, resuming: bool) -> Result<(), Telos
         };
         match name {
             "contexts" | "constraints" | "changes" if is_directory => {}
+            "plans" | "history" | ".runtime" if resuming && is_directory => {}
+            "ledger.tel" | ".gitignore" if resuming && !is_directory => {}
             "telos.toml" | "context-map.tel" | "telos.lock" if resuming && !is_directory => {}
             _ => return Err(invalid(&path)),
         }

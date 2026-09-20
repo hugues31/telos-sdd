@@ -2,25 +2,15 @@
 //! lifecycle of a staged transaction, from the empty change to the seal that
 //! closes it.
 //!
-//! Two rules shape every function here:
-//!
-//! - **The store writes, never this module.** A change file's bytes come
-//!   from [`write_change`] (hence from `emit_change`), its content from
-//!   [`read_change`] (hence from `parse_change_file`), and its deletion from
-//!   [`delete_change`]. Nothing here formats or decodes a change itself.
-//! - **`open` and `approve` are gated, `diff` is not.** Opening a
-//!   change or freezing its digest both stage a review against the sealed
-//!   base, so both need that base to still be the sealed one; `list`,
-//!   `abandon` and `diff` read, or clean up, and a drifted project is
-//!   exactly when a caller needs them most. `abandon` does not even read:
-//!   an unparseable change file is one it must still be able to delete.
+//! Changes are prepared and executed by plan tasks. Store serializers own
+//! their bytes; native plan approval authorizes their exact specification delta.
+//! Reconciliation retains a receipt and abandonment retains the raw draft.
 
 use clap::Subcommand;
 use serde_json::{Value, json};
 
-use telos_core::changes::{delete_change, open_change_infos, read_change, write_change};
+use telos_core::changes::{open_change_infos, read_change, write_change};
 use telos_core::config::Config;
-use telos_core::counters::write_counters;
 use telos_core::error::{ErrorCode, TelosError};
 use telos_core::git::GitRepo;
 use telos_core::ids::ChangeId;
@@ -29,7 +19,7 @@ use telos_core::overlay::{apply_config_ops, op_before_after, parse_base};
 use telos_core::reconcile::{reconcile_change, reconcile_full};
 use telos_core::workspace::Workspace;
 
-use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_no_unclaimed_drift};
+use crate::commands::{Ctx, diagnostics_to_error, project, require_no_unclaimed_drift};
 use crate::envelope::{CmdResult, Outcome};
 
 /// The six verbs of `change`: `open`, `list`, `abandon`, `diff`, `approve`
@@ -41,23 +31,27 @@ pub enum ChangeCommand {
     Open {
         /// Why this change exists, in one sentence.
         motivation: String,
+        #[arg(long)]
+        plan: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
     },
     /// List every change the project currently holds.
     List,
     /// Abandon a change, deleting its file.
     Abandon {
-        /// The change to abandon (`CHG-0001`).
+        /// The change to abandon (`CHG-00000000-0000-0000-0000-000000000001`).
         id: String,
     },
     /// Report a change's staged ops against the sealed base, one before/
     /// after pair per op.
     Diff {
-        /// The change to inspect (`CHG-0001`).
+        /// The change to inspect (`CHG-00000000-0000-0000-0000-000000000001`).
         id: String,
     },
     /// Freeze a change's ops digest, approving it for reconcile.
     Approve {
-        /// The change to approve (`CHG-0001`).
+        /// The change to approve (`CHG-00000000-0000-0000-0000-000000000001`).
         id: String,
         /// Require the exact digest displayed by `telos change diff`.
         #[arg(long, value_name = "SHA256")]
@@ -66,7 +60,7 @@ pub enum ChangeCommand {
     /// Apply an approved change (write its spec files, reseal, close it),
     /// or reseal the whole project with `--full`.
     Reconcile {
-        /// The change to reconcile (`CHG-0001`).
+        /// The change to reconcile (`CHG-00000000-0000-0000-0000-000000000001`).
         #[arg(required_unless_present = "full", conflicts_with = "full")]
         id: Option<String>,
         /// Re-prove the whole project and reseal it, ignoring the current
@@ -78,7 +72,39 @@ pub enum ChangeCommand {
 
 pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
     match command {
-        ChangeCommand::Open { motivation } => open(ctx, motivation),
+        ChangeCommand::Open {
+            motivation: _,
+            plan,
+            task,
+        } => {
+            let ws = Workspace::discover(&ctx.cwd)?;
+            let project = project(ctx)?;
+            require_no_unclaimed_drift(&project)?;
+            let (Some(plan), Some(task)) = (plan, task) else {
+                return Err(TelosError::new(
+                    ErrorCode::TelosPlanRequired,
+                    "change open requires --plan and --task",
+                ));
+            };
+            let mut counters = crate::commands::allocator(&ws, &project.lock)?.counters();
+            counters.change += 1;
+            let result = telos_core::plans::actions::prepare(
+                &ws.repo_root,
+                plan,
+                task,
+                &telos_core::work::new_id("REQ")?,
+                None,
+            )?;
+            let id = result["result"]["change"]
+                .as_str()
+                .expect("prepared change");
+            telos_core::counters::write_counters(&ws, &counters)?;
+            Ok(Outcome {
+                result: json!({"id":id,"status":"open","plan":plan,"task":task}),
+                human: format!("opened {id}"),
+                next_actions: vec![],
+            })
+        }
         ChangeCommand::List => list(ctx),
         ChangeCommand::Abandon { id } => abandon(ctx, id),
         ChangeCommand::Diff { id } => diff(ctx, id),
@@ -94,40 +120,6 @@ pub fn run(ctx: &Ctx, command: &ChangeCommand) -> CmdResult {
 }
 
 // --- change open ------------------------------------------------------------
-
-/// Allocates the next change id, writes the empty change, persists the
-/// counters.
-///
-/// The two writes use the same order as reconcile --
-/// the change file first, `counters.toml` last -- and it is the safe one:
-/// should the process die between them, the next allocation rescans the
-/// floors, sees `CHG-0001` on disk, and starts past it anyway. The
-/// reverse order would leave a counter claiming an id that no file backs,
-/// which is harmless too, but only by luck rather than by design.
-fn open(ctx: &Ctx, motivation: &str) -> CmdResult {
-    let project = project(ctx)?;
-    require_no_unclaimed_drift(&project)?;
-
-    let mut alloc = allocator(&project.ws, &project.lock)?;
-    let id = alloc.next_change();
-
-    let change = Change {
-        id,
-        motivation: motivation.to_string(),
-        status: ChangeStatus::Open,
-        approved_digest: None,
-        ops: Vec::new(),
-        journal: Vec::new(),
-    };
-    write_change(&project.ws, &change)?;
-    write_counters(&project.ws, &alloc.counters())?;
-
-    Ok(Outcome {
-        result: json!({ "id": id, "status": ChangeStatus::Open.as_str() }),
-        human: format!("opened {id}"),
-        next_actions: vec![format!("telos add intent --change {id}")],
-    })
-}
 
 // --- change list ------------------------------------------------------------
 
@@ -175,20 +167,8 @@ fn list(ctx: &Ctx) -> CmdResult {
 
 // --- change abandon ---------------------------------------------------------
 
-/// Deletes a change's file, without reading it.
-///
-/// Abandoning means throwing the change away, and nothing about that
-/// decision depends on the file's content -- so the file is deliberately
-/// *not* parsed first. A change whose file no longer parses (a truncated
-/// write, a bad merge of `telos/changes/`) is exactly the one this command
-/// must still be able to remove: `status` and `change list` already report
-/// it best-effort with an `abandon` obligation, and this is the only
-/// command that can clear that obligation without the hand edit the
-/// workflow forbids. An id the store does not hold is still refused, by
-/// [`delete_change`]'s own “unknown change `CHG-9999`” (with its nearest-id
-/// hint), never a silent no-op. Not gated on drift: a change is
-/// abandonable whatever the working tree looks like -- it is one of the
-/// two ways out of a mess, not more mutation of the spec.
+/// Retain the raw prepared delta in its plan journal and release its claims.
+/// Applied or dirty work must first be reconciled or restored under its owner.
 fn abandon(ctx: &Ctx, id: &str) -> CmdResult {
     // The argument is validated before anything is discovered, the same
     // order `show` uses: a malformed id is the caller's mistake, and saying
@@ -196,7 +176,11 @@ fn abandon(ctx: &Ctx, id: &str) -> CmdResult {
     let id = parse_change_id(id)?;
     let ws = Workspace::discover(&ctx.cwd)?;
 
-    delete_change(&ws, id)?;
+    telos_core::plans::actions::abandon(
+        &ws.repo_root,
+        &id.to_string(),
+        &telos_core::work::new_id("REQ")?,
+    )?;
 
     Ok(Outcome {
         result: json!({ "id": id, "status": ChangeStatus::Abandoned.as_str() }),
@@ -269,7 +253,7 @@ fn diff(ctx: &Ctx, id: &str) -> CmdResult {
             "ops": ops,
         }),
         human: human.join("\n\n"),
-        next_actions: diff_next_actions(&change, stale),
+        next_actions: diff_next_actions(&ws.repo_root, &change, stale),
     })
 }
 
@@ -289,62 +273,35 @@ fn op_human(n: usize, op: &StagedOp, before: &Option<String>, after: &Option<Str
     )
 }
 
-/// `change diff`'s `next_actions`: what to do about the state it just
-/// reported.
-///
-/// `open` and `drafted` both still need review; `open` cannot normally reach
-/// here with staged ops, but covering it keeps the result total. An approved
-/// or implementing change whose digest still matches is ready for reconcile.
-/// If ops were staged after approval, the digest changed and a fresh approval
-/// is required. Re-approving an unchanged change is idempotent.
-fn diff_next_actions(change: &Change, stale: bool) -> Vec<String> {
-    match change.status {
-        ChangeStatus::Open | ChangeStatus::Drafted => {
-            vec![format!(
-                "telos change approve {} --expected-digest {}",
-                change.id,
-                change.ops_digest()
-            )]
-        }
-        ChangeStatus::Approved | ChangeStatus::Implementing if stale => {
-            vec![format!(
-                "telos change approve {} --expected-digest {}",
-                change.id,
-                change.ops_digest()
-            )]
-        }
-        ChangeStatus::Approved | ChangeStatus::Implementing => {
-            vec![format!("telos change reconcile {}", change.id)]
-        }
-        // Unreachable in practice -- an abandoned change's file is gone, so
-        // `read_change` above would already have refused with `unknown
-        // change`. Covered for exhaustiveness, not for a real caller.
-        ChangeStatus::Abandoned => Vec::new(),
+/// Draft deltas must enter the owning plan revision before human approval.
+fn diff_next_actions(root: &std::path::Path, change: &Change, stale: bool) -> Vec<String> {
+    if matches!(
+        change.status,
+        ChangeStatus::Approved | ChangeStatus::Implementing
+    ) && !stale
+    {
+        return vec![format!("telos change reconcile {}", change.id)];
     }
+    let Ok((plan, task)) = telos_core::plans::store::for_change(root, &change.id.to_string())
+    else {
+        return vec!["telos plan list".into()];
+    };
+    if stale {
+        return vec![
+            format!("telos plan resume {}", plan.id),
+            format!("telos plan diff {}", plan.id),
+        ];
+    }
+    vec![
+        format!("telos plan task import {} {}", plan.id, task.definition.id),
+        format!("telos plan diff {}", plan.id),
+    ]
 }
 
 // --- change approve ----------------------------------------------------------
 
-/// Freezes `change`'s ops digest: the review a `reconcile` will later
-/// check its base against.
-///
-/// Gated on drift, like `open`: approving is a judgement about the
-/// staged delta *against the sealed base*, and that judgement is void if
-/// the base is no longer the sealed one. Requires at least one staged op --
-/// there is nothing to approve otherwise, and an `open` change (zero ops)
-/// can never pass this, so `approve` only ever moves a change out of
-/// `drafted` or re-confirms one already `approved`/`implementing`. Approval
-/// is idempotent and recalculates the digest every time.
-///
-/// An `implementing` change that is re-approved *stays* `implementing`. Two
-/// reasons, and either alone would settle it. The grammar's: a change with a
-/// journal must be `implementing` (`parse_change_file`), so writing
-/// `approved` over one would produce a file nothing can read back. The
-/// protocol's: the journal is evidence that implementation has begun, and
-/// re-reviewing the delta does not un-begin it. What the re-approval does
-/// move is the digest -- the freshly staged ops are what was just reviewed
-/// -- while the witnesses already recorded stay judged by the reconcile's
-/// own per-scenario, per-oid gate, never by the digest.
+/// Confirm the exact delta already authorized by the executing plan task.
+/// This compatibility-shaped command grants no independent approval authority.
 fn approve(ctx: &Ctx, id: &str, expected_digest: Option<&str>) -> CmdResult {
     let id = parse_change_id(id)?;
     let project = project(ctx)?;
@@ -361,11 +318,12 @@ fn approve(ctx: &Ctx, id: &str, expected_digest: Option<&str>) -> CmdResult {
         )
         .hint("stage operations with telos add|edit|remove first"));
     }
+    telos_core::plans::actions::require_change_contract(&project.ws.repo_root, &change, true)?;
     let effective = apply_config_ops(&project.ws.config, &change.ops);
     Config::validate_transition(&project.ws.config, &effective)?;
 
     // Re-read at the mutation boundary. The optional argument is retained
-    // for deliberate interactive-human compatibility, but even that route
+    // for exact-delta confirmation, and that route
     // binds itself to the digest first observed above rather than silently
     // approving a delta saved while validation was in progress.
     let mut change = read_change(&project.ws, id)?;
@@ -418,6 +376,7 @@ fn reconcile(ctx: &Ctx, id: &str) -> CmdResult {
     let id = parse_change_id(id)?;
     let project = project(ctx)?;
     let change = read_change(&project.ws, id)?;
+    telos_core::plans::actions::require_change_contract(&project.ws.repo_root, &change, true)?;
 
     let outcome = reconcile_change(
         &project.ws,
@@ -479,6 +438,23 @@ fn reconcile_full_project(ctx: &Ctx) -> CmdResult {
     let ws = Workspace::discover(&ctx.cwd)?;
     let git = GitRepo::discover(&ctx.cwd)?;
 
+    let (plan, task) = telos_core::plans::store::active(&ws.repo_root)?.ok_or_else(|| {
+        TelosError::new(
+            ErrorCode::TelosPlanRequired,
+            "full reconciliation requires an active integration or recovery plan task",
+        )
+    })?;
+    telos_core::plans::store::require_approved(&plan)?;
+    if !matches!(
+        task.definition.kind,
+        telos_core::plans::model::TaskKind::Integration
+            | telos_core::plans::model::TaskKind::Recovery
+    ) {
+        return Err(TelosError::new(
+            ErrorCode::TelosPlanScopeViolation,
+            "full reconciliation requires an integration or recovery task",
+        ));
+    }
     let outcome = reconcile_full(&ws, &git)?;
 
     Ok(Outcome {

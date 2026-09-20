@@ -30,12 +30,11 @@ fn json_stdout(out: &std::process::Output) -> Value {
 const MOTIVATION: &str = "Invoices can be settled";
 
 /// The first change's file, relative to the repository root.
-const CHG_0001: &str = "telos/changes/CHG-0001.tel";
+const CHG_0001: &str = "telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel";
 
 /// The bytes `telos change open` must leave at [`CHG_0001`]: a change with
 /// no op yet, in the canonical form `emit_change` defines.
-const CANONICAL_OPEN_CHANGE: &str =
-    "change CHG-0001 \"Invoices can be settled\" {\n  status open\n}\n";
+const CANONICAL_OPEN_CHANGE: &str = "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n  status open\n}\n";
 
 /// The `telos/contexts/billing/notions/Invoice.tel` path, drifted by several tests.
 const INVOICE_TEL: &str = "telos/contexts/billing/notions/Invoice.tel";
@@ -96,9 +95,9 @@ fn change_open_json_matches_the_golden_envelope() {
         json!({
             "ok": true,
             "command": "change",
-            "result": { "id": "CHG-0001", "status": "open" },
+            "result": { "id": "CHG-00000000-0000-0000-0000-000000000001", "status": "open", "plan": json_stdout(&out)["result"]["plan"], "task":"TSK-001" },
             "error": null,
-            "next_actions": ["telos add intent --change CHG-0001"]
+            "next_actions": []
         })
     );
 }
@@ -137,8 +136,14 @@ fn change_open_persists_the_counters_at_the_corpus_floors() {
 fn a_second_change_open_allocates_the_next_id() {
     let tmp = with_fixture();
 
-    assert_eq!(open_change(tmp.path(), MOTIVATION), "CHG-0001");
-    assert_eq!(open_change(tmp.path(), "another motivation"), "CHG-0002");
+    assert_eq!(
+        open_change(tmp.path(), MOTIVATION),
+        "CHG-00000000-0000-0000-0000-000000000001"
+    );
+    assert_eq!(
+        open_change(tmp.path(), "another motivation"),
+        "CHG-00000000-0000-0000-0000-000000000002"
+    );
 }
 
 /// The floor scan preserves allocation when `counters.toml` is not to be
@@ -153,7 +158,10 @@ fn an_unparseable_change_still_holds_the_counter_down_without_counters_toml() {
     fs::write(tmp.path().join(CHG_0001), "@@@ not a change @@@\n").unwrap();
     fs::remove_file(tmp.path().join("telos/changes/counters.toml")).unwrap();
 
-    assert_eq!(open_change(tmp.path(), "after the damage"), "CHG-0002");
+    assert_eq!(
+        open_change(tmp.path(), "after the damage"),
+        "CHG-00000000-0000-0000-0000-000000000002"
+    );
     assert_eq!(
         fs::read_to_string(tmp.path().join(CHG_0001)).unwrap(),
         "@@@ not a change @@@\n",
@@ -177,15 +185,22 @@ fn status_json_with_an_open_change_reports_the_changing_state() {
         "expected exit 0, got {:?}",
         out.status
     );
+    assert!(
+        json_stdout(&out)["result"]["plans"]
+            .as_array()
+            .is_some_and(|p| !p.is_empty())
+    );
     assert_eq!(
         json_stdout(&out),
         json!({
             "ok": true,
             "command": "status",
             "result": {
+                "plans": json_stdout(&out)["result"]["plans"],
+                "governance": {"state":"managed","changes":[]},
                 "state": "changing",
                 "changes": [{
-                    "id": "CHG-0001",
+                    "id": "CHG-00000000-0000-0000-0000-000000000001",
                     "status": "open",
                     "obligations": ["stage the delta", "approve", "reconcile"]
                 }],
@@ -236,14 +251,17 @@ fn status_points_at_abandon_for_an_unparseable_change() {
     assert_eq!(
         envelope["result"]["changes"],
         json!([{
-            "id": "CHG-0001",
+            "id": "CHG-00000000-0000-0000-0000-000000000001",
             "status": "open",
-            "obligations": ["abandon (telos/changes/CHG-0001.tel is unparseable)"]
+            "obligations": ["abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel is unparseable)"]
         }])
     );
     assert_eq!(
         envelope["next_actions"],
-        json!(["telos change list", "telos change abandon CHG-0001"])
+        json!([
+            "telos change list",
+            "telos change abandon CHG-00000000-0000-0000-0000-000000000001"
+        ])
     );
 }
 
@@ -254,9 +272,17 @@ fn change_abandon_reports_the_abandoned_id_and_deletes_the_file() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
-    let out = telos(tmp.path(), &["change", "abandon", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "abandon",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -267,7 +293,7 @@ fn change_abandon_reports_the_abandoned_id_and_deletes_the_file() {
     assert_eq!(envelope["command"], json!("change"));
     assert_eq!(
         envelope["result"],
-        json!({ "id": "CHG-0001", "status": "abandoned" })
+        json!({ "id": "CHG-00000000-0000-0000-0000-000000000001", "status": "abandoned" })
     );
     assert!(
         !tmp.path().join(CHG_0001).exists(),
@@ -309,14 +335,30 @@ fn change_abandon_of_a_malformed_id_is_a_domain_error() {
 #[test]
 fn an_abandoned_id_is_never_reused() {
     let tmp = with_fixture();
-    assert_eq!(open_change(tmp.path(), MOTIVATION), "CHG-0001");
-    assert_eq!(open_change(tmp.path(), "second"), "CHG-0002");
+    assert_eq!(
+        open_change(tmp.path(), MOTIVATION),
+        "CHG-00000000-0000-0000-0000-000000000001"
+    );
+    assert_eq!(
+        open_change(tmp.path(), "second"),
+        "CHG-00000000-0000-0000-0000-000000000002"
+    );
 
-    telos(tmp.path(), &["change", "abandon", "CHG-0001"])
-        .assert()
-        .success();
+    telos(
+        tmp.path(),
+        &[
+            "change",
+            "abandon",
+            "CHG-00000000-0000-0000-0000-000000000001",
+        ],
+    )
+    .assert()
+    .success();
 
-    assert_eq!(open_change(tmp.path(), "third"), "CHG-0003");
+    assert_eq!(
+        open_change(tmp.path(), "third"),
+        "CHG-00000000-0000-0000-0000-000000000003"
+    );
 }
 
 /// Abandoning an id the store does not hold is the change store's own
@@ -326,18 +368,26 @@ fn change_abandon_of_an_unknown_id_reports_the_store_error() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
-    let out = telos(tmp.path(), &["change", "abandon", "CHG-9999", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "abandon",
+            "CHG-00000000-0000-0000-0000-00000000270f",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
-    assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
+    assert_eq!(envelope["error"]["code"], json!("TELOS_PLAN_REQUIRED"));
     assert_eq!(
         envelope["error"]["message"],
-        json!("unknown change `CHG-9999`")
+        json!("change `CHG-00000000-0000-0000-0000-00000000270f` is not attached to a plan task")
     );
-    assert_eq!(envelope["error"]["hint"], json!("closest is CHG-0001"));
+    assert_eq!(envelope["error"]["hint"], Value::Null);
 }
 
 /// Abandoning means throwing the change away, so nothing about it depends
@@ -351,9 +401,17 @@ fn change_abandon_deletes_an_unparseable_change_file() {
     open_change(tmp.path(), MOTIVATION);
     fs::write(tmp.path().join(CHG_0001), "@@@ not a change @@@\n").unwrap();
 
-    let out = telos(tmp.path(), &["change", "abandon", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "abandon",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -363,7 +421,7 @@ fn change_abandon_deletes_an_unparseable_change_file() {
     );
     assert_eq!(
         json_stdout(&out)["result"],
-        json!({ "id": "CHG-0001", "status": "abandoned" })
+        json!({ "id": "CHG-00000000-0000-0000-0000-000000000001", "status": "abandoned" })
     );
     assert!(
         !tmp.path().join(CHG_0001).exists(),
@@ -397,13 +455,13 @@ fn change_list_json_reports_id_status_motivation_and_obligations() {
         json!({
             "changes": [
                 {
-                    "id": "CHG-0001",
+                    "id": "CHG-00000000-0000-0000-0000-000000000001",
                     "status": "open",
                     "motivation": MOTIVATION,
                     "obligations": open_obligations()
                 },
                 {
-                    "id": "CHG-0002",
+                    "id": "CHG-00000000-0000-0000-0000-000000000002",
                     "status": "open",
                     "motivation": "second motivation",
                     "obligations": open_obligations()
@@ -446,7 +504,10 @@ fn change_list_human_mode_prints_one_line_per_change() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(stdout.lines().count(), 1, "one line per change: {stdout}");
     let line = stdout.lines().next().unwrap();
-    assert!(line.contains("CHG-0001"), "line: {line}");
+    assert!(
+        line.contains("CHG-00000000-0000-0000-0000-000000000001"),
+        "line: {line}"
+    );
     assert!(line.contains("open"), "line: {line}");
     assert!(line.contains(MOTIVATION), "line: {line}");
 }
@@ -473,10 +534,10 @@ fn change_list_is_best_effort_on_an_unparseable_change_file() {
         json_stdout(&out)["result"],
         json!({
             "changes": [{
-                "id": "CHG-0001",
+                "id": "CHG-00000000-0000-0000-0000-000000000001",
                 "status": "open",
                 "motivation": "",
-                "obligations": ["abandon (telos/changes/CHG-0001.tel is unparseable)"]
+                "obligations": ["abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel is unparseable)"]
             }]
         })
     );
@@ -489,9 +550,12 @@ fn show_of_a_change_matches_the_public_result_shape() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
-    let out = telos(tmp.path(), &["show", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &["show", "CHG-00000000-0000-0000-0000-000000000001", "--json"],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -504,7 +568,7 @@ fn show_of_a_change_matches_the_public_result_shape() {
         envelope["result"],
         json!({
             "entity": {
-                "id": "CHG-0001",
+                "id": "CHG-00000000-0000-0000-0000-000000000001",
                 "status": "open",
                 "motivation": MOTIVATION,
                 "ops": []
@@ -536,16 +600,19 @@ fn show_of_a_change_reports_the_file_text_not_a_re_emission() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
-    let on_disk = "change CHG-0001 \"Invoices can be settled\" {\n    status open\n}\n";
+    let on_disk = "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n    status open\n}\n";
     assert_ne!(
         on_disk, CANONICAL_OPEN_CHANGE,
         "the point of this test is that the two differ"
     );
     fs::write(tmp.path().join(CHG_0001), on_disk).unwrap();
 
-    let out = telos(tmp.path(), &["show", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &["show", "CHG-00000000-0000-0000-0000-000000000001", "--json"],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -559,7 +626,7 @@ fn show_of_a_change_reports_the_file_text_not_a_re_emission() {
     assert_eq!(
         envelope["result"]["entity"],
         json!({
-            "id": "CHG-0001",
+            "id": "CHG-00000000-0000-0000-0000-000000000001",
             "status": "open",
             "motivation": MOTIVATION,
             "ops": []
@@ -567,7 +634,12 @@ fn show_of_a_change_reports_the_file_text_not_a_re_emission() {
     );
 
     // Human mode prints the same file text.
-    let out = telos(tmp.path(), &["show", "CHG-0001"]).output().unwrap();
+    let out = telos(
+        tmp.path(),
+        &["show", "CHG-00000000-0000-0000-0000-000000000001"],
+    )
+    .output()
+    .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         format!("{on_disk}\nrelations:\n")
@@ -579,18 +651,24 @@ fn show_of_an_unknown_change_reports_the_store_error() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
-    let out = telos(tmp.path(), &["show", "CHG-9999", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &["show", "CHG-00000000-0000-0000-0000-00000000270f", "--json"],
+    )
+    .output()
+    .unwrap();
 
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
     assert_eq!(envelope["error"]["code"], json!("TELOS_REFERENCE_UNKNOWN"));
     assert_eq!(
         envelope["error"]["message"],
-        json!("unknown change `CHG-9999`")
+        json!("unknown change `CHG-00000000-0000-0000-0000-00000000270f`")
     );
-    assert_eq!(envelope["error"]["hint"], json!("closest is CHG-0001"));
+    assert_eq!(
+        envelope["error"]["hint"],
+        json!("closest is CHG-00000000-0000-0000-0000-000000000001")
+    );
 }
 
 /// Human mode prints the change's canonical text, then the (always empty)
@@ -600,7 +678,12 @@ fn show_of_a_change_human_mode_prints_the_canonical_text_and_no_relation() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
-    let out = telos(tmp.path(), &["show", "CHG-0001"]).output().unwrap();
+    let out = telos(
+        tmp.path(),
+        &["show", "CHG-00000000-0000-0000-0000-000000000001"],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -643,10 +726,17 @@ fn change_list_and_abandon_are_allowed_while_drifted() {
     drift(tmp.path());
 
     telos(tmp.path(), &["change", "list"]).assert().success();
-    telos(tmp.path(), &["change", "abandon", "CHG-0001"])
-        .assert()
-        .success();
-    assert!(!tmp.path().join(CHG_0001).exists());
+    telos(
+        tmp.path(),
+        &[
+            "change",
+            "abandon",
+            "CHG-00000000-0000-0000-0000-000000000001",
+        ],
+    )
+    .assert()
+    .failure();
+    assert!(tmp.path().join(CHG_0001).exists());
 }
 
 // --- check --sealed while changing -----------------------------------------
@@ -688,7 +778,7 @@ fn check_sealed_reports_drift_before_open_changes() {
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     assert_eq!(
         json_stdout(&out)["error"]["code"],
-        json!("TELOS_DRIFT_DETECTED")
+        json!("TELOS_UNPLANNED_CHANGE")
     );
 }
 
@@ -756,13 +846,27 @@ fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload(),
     );
 
-    let out = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -772,7 +876,10 @@ fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
     let envelope = json_stdout(&out);
     assert_eq!(envelope["command"], json!("change"));
     let result = &envelope["result"];
-    assert_eq!(result["id"], json!("CHG-0001"));
+    assert_eq!(
+        result["id"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
     assert_eq!(result["status"], json!("drafted"));
     assert_eq!(result["approved_digest"], Value::Null);
     assert_eq!(result["stale"], json!(false));
@@ -789,11 +896,17 @@ fn change_diff_on_a_one_op_add_reports_null_before_and_the_canonical_after() {
             "after": VENDOR_CANONICAL,
         }])
     );
+    let (plan, task) = telos_core::plans::store::for_change(
+        tmp.path(),
+        "CHG-00000000-0000-0000-0000-000000000001",
+    )
+    .unwrap();
     assert_eq!(
         envelope["next_actions"],
-        json!([format!(
-            "telos change approve CHG-0001 --expected-digest {digest}"
-        )])
+        json!([
+            format!("telos plan task import {} {}", plan.id, task.definition.id),
+            format!("telos plan diff {}", plan.id),
+        ])
     );
 }
 
@@ -812,15 +925,28 @@ fn change_diff_of_an_edit_reports_the_corpus_block_as_before_and_the_patch_as_af
     stage_ok(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({"telos": "An invoice must start its life open and unpaid -- reworded."})
             .to_string(),
     );
 
-    let out = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -856,13 +982,22 @@ fn change_diff_human_mode_prints_per_op_sections() {
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload(),
     );
 
-    let out = telos(tmp.path(), &["change", "diff", "CHG-0001"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &["change", "diff", "CHG-00000000-0000-0000-0000-000000000001"],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -888,13 +1023,27 @@ fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload(),
     );
 
-    let out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(
         out.status.success(),
@@ -903,7 +1052,10 @@ fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
     );
     let envelope = json_stdout(&out);
     assert_eq!(envelope["command"], json!("change"));
-    assert_eq!(envelope["result"]["id"], json!("CHG-0001"));
+    assert_eq!(
+        envelope["result"]["id"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
     assert_eq!(envelope["result"]["status"], json!("approved"));
     let digest = envelope["result"]["digest"]
         .as_str()
@@ -912,11 +1064,11 @@ fn change_approve_writes_status_and_digest_and_matches_the_golden_result() {
     assert!(is_sha256_hex(&digest), "not sha256:<64 hex>: {digest}");
     assert_eq!(
         envelope["next_actions"],
-        json!(["telos change reconcile CHG-0001"])
+        json!(["telos change reconcile CHG-00000000-0000-0000-0000-000000000001"])
     );
 
     let expected = format!(
-        "change CHG-0001 \"{MOTIVATION}\" {{\n  \
+        "change CHG-00000000-0000-0000-0000-000000000001 \"{MOTIVATION}\" {{\n  \
            status approved\n  \
            digest \"{digest}\"\n\
          \n  \
@@ -937,18 +1089,38 @@ fn change_approve_refuses_a_digest_that_changed_during_review() {
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload(),
     );
     let diff = json_stdout(
-        &telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
-            .output()
-            .unwrap(),
+        &telos(
+            tmp.path(),
+            &[
+                "change",
+                "diff",
+                "CHG-00000000-0000-0000-0000-000000000001",
+                "--json",
+            ],
+        )
+        .output()
+        .unwrap(),
     );
     let stale = diff["result"]["digest"].as_str().unwrap().to_string();
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload().replace("Vendor", "Supplier"),
     );
     let before = fs::read_to_string(tmp.path().join(CHG_0001)).unwrap();
@@ -958,7 +1130,7 @@ fn change_approve_refuses_a_digest_that_changed_during_review() {
         &[
             "change",
             "approve",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--expected-digest",
             &stale,
             "--json",
@@ -975,7 +1147,9 @@ fn change_approve_refuses_a_digest_that_changed_during_review() {
     );
     assert_eq!(
         envelope["error"]["message"],
-        json!("change CHG-0001 no longer matches the expected digest")
+        json!(
+            "change CHG-00000000-0000-0000-0000-000000000001 no longer matches the expected digest"
+        )
     );
     assert_eq!(
         fs::read_to_string(tmp.path().join(CHG_0001)).unwrap(),
@@ -993,9 +1167,17 @@ fn change_approve_of_a_change_with_no_ops_is_change_state_invalid() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
 
-    let out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
@@ -1005,7 +1187,7 @@ fn change_approve_of_a_change_with_no_ops_is_change_state_invalid() {
     );
     assert_eq!(
         envelope["error"]["message"],
-        json!("change CHG-0001 has no staged operations")
+        json!("change CHG-00000000-0000-0000-0000-000000000001 has no staged operations")
     );
     assert_eq!(
         envelope["error"]["hint"],
@@ -1017,77 +1199,71 @@ fn change_approve_of_a_change_with_no_ops_is_change_state_invalid() {
     );
 }
 
-/// Staging into an already-approved change is allowed (`mutate.rs`'s own
-/// design): nothing is lost, but the approval goes stale -- `diff`
-/// reports it, and re-`approve` idempotently clears it by recalculating the
-/// digest.
+/// The inherited plan contract is immutable during execution. Refused staging
+/// leaves both the approved digest and the reviewed delta unchanged.
 #[test]
-fn staging_after_approve_goes_stale_and_re_approve_clears_it() {
+fn staging_after_plan_approval_is_refused_without_invalidating_the_digest() {
     let tmp = with_fixture();
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload(),
     );
 
-    let approve_out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let approve_out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
     assert!(approve_out.status.success());
     let first_digest = json_stdout(&approve_out)["result"]["digest"]
         .as_str()
         .unwrap()
         .to_string();
 
-    stage_ok(
+    let out = telos(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
-        &json!({
-            "name": "InvoiceCancelled", "kind": "event",
-            "def": "An invoice was cancelled before settlement."
-        })
-        .to_string(),
-    );
-
-    let diff_out = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
-    let envelope = json_stdout(&diff_out);
-    let result = &envelope["result"];
-    assert_eq!(result["status"], json!("approved"));
-    assert_eq!(result["stale"], json!(true));
-    assert_eq!(result["approved_digest"], json!(first_digest));
-    let live_digest = result["digest"].as_str().unwrap().to_string();
-    assert_ne!(live_digest, first_digest);
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .write_stdin(vendor_payload())
+    .output()
+    .unwrap();
     assert_eq!(
-        envelope["next_actions"],
-        json!([format!(
-            "telos change approve CHG-0001 --expected-digest {live_digest}"
-        )])
+        json_stdout(&out)["error"]["code"],
+        "TELOS_PLAN_SCOPE_VIOLATION"
     );
-
-    let reapprove_out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
-    assert!(reapprove_out.status.success());
-    let second_digest = json_stdout(&reapprove_out)["result"]["digest"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(second_digest, live_digest);
-    assert_ne!(second_digest, first_digest);
-
-    let diff_out2 = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
-    let envelope2 = json_stdout(&diff_out2);
-    assert_eq!(envelope2["result"]["stale"], json!(false));
-    assert_eq!(envelope2["result"]["approved_digest"], json!(second_digest));
-    assert_eq!(
-        envelope2["next_actions"],
-        json!(["telos change reconcile CHG-0001"])
-    );
+    let diff = telos(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(json_stdout(&diff)["result"]["digest"], first_digest);
+    assert_eq!(json_stdout(&diff)["result"]["stale"], false);
 }
 
 /// `approve` is refused on unclaimed drift, same as `open`, and writes
@@ -1098,14 +1274,28 @@ fn change_approve_on_unclaimed_drift_is_refused() {
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload(),
     );
     drift(tmp.path());
 
-    let out = telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert_eq!(out.status.code(), Some(1), "a domain error exits 1");
     let envelope = json_stdout(&out);
@@ -1125,12 +1315,21 @@ fn change_diff_is_allowed_on_unclaimed_drift() {
     open_change(tmp.path(), MOTIVATION);
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &vendor_payload(),
     );
     drift(tmp.path());
 
-    telos(tmp.path(), &["change", "diff", "CHG-0001"])
-        .assert()
-        .success();
+    telos(
+        tmp.path(),
+        &["change", "diff", "CHG-00000000-0000-0000-0000-000000000001"],
+    )
+    .assert()
+    .success();
 }

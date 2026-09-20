@@ -13,9 +13,11 @@ pub mod config;
 pub mod context;
 pub mod impact;
 pub mod init;
+pub mod journal;
 pub mod list;
 pub mod map;
 pub mod mutate;
+pub mod plan;
 pub mod query;
 pub mod rebuild;
 pub mod revert;
@@ -207,9 +209,7 @@ pub(crate) fn allocator(ws: &Workspace, lock: &Lock) -> Result<Alloc, TelosError
         .collect();
 
     let mut floor = floors(&model, &parsed, lock.sealed_by);
-    for id in &ids {
-        floor.change = floor.change.max(id.0);
-    }
+    floor.change = floor.change.max(ids.len() as u32);
 
     Ok(Alloc::new(read_counters(ws)?, floor))
 }
@@ -248,7 +248,12 @@ pub(crate) fn require_no_unclaimed_drift(project: &Project) -> Result<(), TelosE
 /// transition out of a state the project is not in. `verb` is the command's
 /// own word, so the message reads as the answer to what was actually typed.
 pub(crate) fn require_drift(project: &Project, verb: &str) -> Result<(), TelosError> {
-    if project.state.state == ProjectStateKind::Drifted {
+    if project.state.state == ProjectStateKind::Drifted
+        || telos_core::plans::ledger::read(&project.ws.repo_root).is_ok_and(|ledger| {
+            telos_core::inventory::capture(&project.ws.repo_root)
+                .is_ok_and(|current| current != ledger.current)
+        })
+    {
         return Ok(());
     }
     Err(TelosError::new(
@@ -295,7 +300,7 @@ pub(crate) fn require_approved(change: &Change) -> Result<(), TelosError> {
         format!("change {} is not approved; approve it first", change.id),
     )
     .hint(format!(
-        "run `telos change diff {id}` then `telos change approve {id}`",
+        "review the plan owning {id}, approve its digest, then run `telos plan task start <plan> <task>`",
         id = change.id
     )))
 }

@@ -422,7 +422,7 @@ fn published_error_codes(contracts: &str) -> Vec<&str> {
 }
 
 /// The canonical table is an exact set, not a sampling of prose. This catches
-/// a removed code, an accidental nineteenth code, and a duplicate row.
+/// a removed code, an accidental extra code, and a duplicate row.
 #[test]
 fn published_error_code_table_is_exact_and_unique() {
     let contracts = include_str!("../../../docs/contracts.md");
@@ -438,6 +438,8 @@ fn published_error_code_table_is_exact_and_unique() {
         "TELOS_CONSTRAINT_FAILED",
         "TELOS_CHANGE_STATE_INVALID",
         "TELOS_FILE_CLAIMED",
+        "TELOS_LAYOUT_VIOLATION",
+        "TELOS_CONTEXT_BOUNDARY_VIOLATION",
         "TELOS_NOT_INITIALIZED",
         "TELOS_ALREADY_INITIALIZED",
         "TELOS_PARSE_ERROR",
@@ -447,11 +449,23 @@ fn published_error_code_table_is_exact_and_unique() {
         "TELOS_INTERNAL",
         "TELOS_TEST_NOT_FOUND",
         "TELOS_TEST_NOT_EXECUTED",
+        "TELOS_PLAN_REQUIRED",
+        "TELOS_PLAN_NOT_APPROVED",
+        "TELOS_PLAN_SCOPE_VIOLATION",
+        "TELOS_PLAN_DEPENDENCY_UNMET",
+        "TELOS_PLAN_VALIDATION_FAILED",
+        "TELOS_PLAN_VERSION_STALE",
+        "TELOS_REQUEST_ID_CONFLICT",
+        "TELOS_UNPLANNED_CHANGE",
+        "TELOS_RECOVERY_REQUIRED",
+        "TELOS_RECOVERY_CONFLICT",
+        "TELOS_HISTORY_CONFLICT",
+        "TELOS_WORKSPACE_BUSY",
     ]
     .into_iter()
     .collect();
 
-    assert_eq!(live.len(), 18, "the executable ErrorCode set is complete");
+    assert_eq!(live.len(), 32, "the executable ErrorCode set is complete");
     assert_eq!(
         documented.len(),
         documented_set.len(),
@@ -471,7 +485,7 @@ fn published_error_code_parser_accepts_crlf_contracts() {
     assert!(!contracts.contains("\r\r\n"));
     let documented = published_error_codes(&contracts);
 
-    assert_eq!(documented.len(), 18);
+    assert_eq!(documented.len(), 32);
     assert!(documented.contains(&"TELOS_TEST_NOT_FOUND"));
 }
 
@@ -493,7 +507,7 @@ fn published_contract_freezes_the_agent_workflow_surface() {
         "The eleven gates, frozen order",
         "| 7 | sealed code coverage: every path in the previous lock's `code` table remains bound in the folded post-model, unless this delta stages its owning `telos/contexts/<context>/bindings.tel` | `TELOS_INTEGRITY_VIOLATION`",
         "strict versus advisory",
-        "Structurally skips gates 1–4, 7, and 8",
+        "Full reconciliation requires an approved recovery or integration task",
         "the file passed with --file does not exist: `<path>`",
         "no file matched by the [tests] globs contains `scn_NNNN`",
         "name the test after the scenario id (`scn_NNNN_…`) in a file the [tests] globs cover, or pass `--file <path>`",
@@ -510,22 +524,18 @@ fn published_contract_freezes_the_agent_workflow_surface() {
 }
 
 #[test]
-fn published_contract_pins_reapproval_and_codex_activation() {
+fn published_contract_pins_plan_approval_and_codex_activation() {
     let contracts = include_str!("../../../docs/contracts.md");
     let normalized = contracts.split_whitespace().collect::<Vec<_>>().join(" ");
-
     for required in [
-        "Re-approval accepts both `approved` and `implementing` changes",
-        "preserves the entering status in `result.status` (`approved` or `implementing`)",
-        "refreshes `approved_digest` from the current ops digest, and makes the next `change diff` report `stale: false`",
+        "Covered changes inherit plan approval",
+        "Approved deltas cannot be extended",
+        "Completed tasks are immutable",
         "open `/hooks`, review and trust the repository `.codex` layer",
         "verify the exact `telos agent-guard --host codex` hook",
-        "Until that review and trust is complete, `.codex/hooks.json` and `.codex/rules/telos.rules` must be treated as inactive",
+        "must be treated as inactive",
     ] {
-        assert!(
-            normalized.contains(required),
-            "docs/contracts.md must freeze: {required}"
-        );
+        assert!(normalized.contains(required), "{required}");
     }
 }
 
@@ -551,7 +561,7 @@ fn published_contract_documents_safety_boundaries() {
         "shared by multiple scenarios is still invoked once globally",
         "repository-root `target`",
         "CSPRNG sibling names",
-        "`telos change approve CHG-0001 --expected-digest sha256:...`",
+        "`telos plan approve PLN-<uuid> --expected-digest sha256:...`",
         "`telos adopt --expected-state sha256:...`",
         "`telos revert --expected-state sha256:...`",
     ] {
@@ -573,7 +583,7 @@ fn published_command_values_are_the_exact_public_0_9_set() {
         [
             "version", "init", "config", "map", "status", "view", "check", "show", "list", "query",
             "impact", "pack", "rebuild", "change", "add", "edit", "move", "remove", "adopt",
-            "revert", "test", "bind",
+            "revert", "test", "plan", "history", "recover", "bind",
         ]
     );
     assert!(rows.iter().all(|row| row.len() == 2));
@@ -606,6 +616,8 @@ fn published_view_routes_and_export_files_are_an_exact_projection() {
         routes[1..],
         [
             ["Dashboard", "#/"],
+            ["Plans", "#/plans"],
+            ["Plan detail", "#/plan/PLN-<uuid>"],
             ["Intents", "#/intents"],
             ["Intent detail", "#/intent/INT-NNNN"],
             ["Graph", "#/graph"],
@@ -1040,21 +1052,21 @@ fn published_billing_reconstruction_checkpoints_are_exact() {
                 "0/2",
             ],
             [
-                "change reconcile --full bootstrap",
+                "init --from-spec bootstrap",
                 "draft, draft",
                 "0",
                 "0",
                 "0/2",
             ],
             [
-                "CHG-0001 reconciled",
+                "First task reconciled",
                 "active, draft",
                 "one distinct scenario proof",
                 "staged architecture check",
                 "1/2",
             ],
             [
-                "CHG-0002 reconciled",
+                "Second task reconciled",
                 "active, active",
                 "one distinct scenario proof",
                 "architecture check",
@@ -1100,10 +1112,18 @@ fn config_read_and_write_use_exact_representative_envelopes() {
         .assert()
         .success();
     let payload = r#"{"code":{"globs":["src/**/*.rs"]},"tests":{"globs":["tests/**/*.rs"]},"test":{"cmd":"cargo test {filter}"},"policy":{"tdd":"advisory"},"agents":{"hosts":["claude","codex"]}}"#;
-    let output = telos(write.path(), &["config", "--change", "CHG-0001", "--json"])
-        .write_stdin(payload)
-        .output()
-        .unwrap();
+    let output = telos(
+        write.path(),
+        &[
+            "config",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .write_stdin(payload)
+    .output()
+    .unwrap();
     assert!(output.status.success());
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
@@ -1111,7 +1131,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
             "ok":true,
             "command":"config",
             "result":{
-                "change":"CHG-0001",
+                "change":"CHG-00000000-0000-0000-0000-000000000001",
                 "path":"telos/telos.toml",
                 "config":{
                     "code":{"globs":["src/**/*.rs"]},
@@ -1122,7 +1142,7 @@ fn config_read_and_write_use_exact_representative_envelopes() {
                 }
             },
             "error":null,
-            "next_actions":["telos change diff CHG-0001"]
+            "next_actions":["telos change diff CHG-00000000-0000-0000-0000-000000000001"]
         })
     );
 }
@@ -1453,10 +1473,19 @@ fn documented_creation_bootstrap_and_edit_result_keys_are_executable() {
         ),
     ] {
         let payload = json_code_block_after(doc, marker);
-        let out = telos(tmp.path(), &["add", kind, "--change", "CHG-0001", "--json"])
-            .write_stdin(payload.to_string())
-            .output()
-            .unwrap();
+        let out = telos(
+            tmp.path(),
+            &[
+                "add",
+                kind,
+                "--change",
+                "CHG-00000000-0000-0000-0000-000000000001",
+                "--json",
+            ],
+        )
+        .write_stdin(payload.to_string())
+        .output()
+        .unwrap();
         let result = envelope(&out);
         assert_eq!(result["ok"], true, "{kind}: {result:?}");
         assert_eq!(result["result"]["id"], expected_id);
@@ -1483,7 +1512,14 @@ fn documented_creation_bootstrap_and_edit_result_keys_are_executable() {
         };
         let out = telos(
             tmp.path(),
-            &["edit", kind, edit_key, "--change", "CHG-0001", "--json"],
+            &[
+                "edit",
+                kind,
+                edit_key,
+                "--change",
+                "CHG-00000000-0000-0000-0000-000000000001",
+                "--json",
+            ],
         )
         .write_stdin(edit_payload)
         .output()

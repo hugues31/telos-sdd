@@ -61,7 +61,7 @@ fn ledger_notion() -> Notion {
 /// A drafted change with one `add notion` op, at `id`.
 fn sample_change(id: u32) -> Change {
     Change {
-        id: ChangeId(id),
+        id: ChangeId(id.into()),
         motivation: "Introduce the ledger".to_string(),
         status: ChangeStatus::Drafted,
         approved_digest: None,
@@ -83,19 +83,28 @@ fn write_read_delete_round_trips_through_the_store() {
 
     write_change(&ws, &change).unwrap();
     assert!(
-        tmp.path().join("telos/changes/CHG-0001.tel").is_file(),
-        "write_change must create telos/changes/CHG-0001.tel"
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel")
+            .is_file(),
+        "write_change must create telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"
     );
 
     let read_back = read_change(&ws, ChangeId(1)).unwrap();
     assert_eq!(read_back, change);
 
     delete_change(&ws, ChangeId(1)).unwrap();
-    assert!(!tmp.path().join("telos/changes/CHG-0001.tel").exists());
+    assert!(
+        !tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel")
+            .exists()
+    );
 
     let err = read_change(&ws, ChangeId(1)).unwrap_err();
     assert_eq!(err.code, ErrorCode::TelosReferenceUnknown);
-    assert_eq!(err.message, "unknown change `CHG-0001`");
+    assert_eq!(
+        err.message,
+        "unknown change `CHG-00000000-0000-0000-0000-000000000001`"
+    );
 }
 
 #[test]
@@ -106,7 +115,10 @@ fn delete_change_on_an_absent_id_is_the_same_unknown_error_as_read() {
     let err = delete_change(&ws, ChangeId(1)).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosReferenceUnknown);
-    assert_eq!(err.message, "unknown change `CHG-0001`");
+    assert_eq!(
+        err.message,
+        "unknown change `CHG-00000000-0000-0000-0000-000000000001`"
+    );
 }
 
 // --- list_change_ids ---------------------------------------------------
@@ -153,8 +165,14 @@ fn read_change_names_the_nearest_existing_id_by_numeric_distance() {
     let err = read_change(&ws, ChangeId(9999)).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::TelosReferenceUnknown);
-    assert_eq!(err.message, "unknown change `CHG-9999`");
-    assert_eq!(err.hint.as_deref(), Some("closest is CHG-9000"));
+    assert_eq!(
+        err.message,
+        "unknown change `CHG-00000000-0000-0000-0000-00000000270f`"
+    );
+    assert_eq!(
+        err.hint.as_deref(),
+        Some("closest is CHG-00000000-0000-0000-0000-000000002328")
+    );
 }
 
 #[test]
@@ -176,8 +194,9 @@ fn read_change_converts_parse_diagnostics_via_the_first_diagnostic_policy() {
     let ws = Workspace::discover(tmp.path()).unwrap();
     fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
     fs::write(
-        tmp.path().join("telos/changes/CHG-0001.tel"),
-        "change CHG-0001 \"x\" {\n  status finished\n}\n",
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"),
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status finished\n}\n",
     )
     .unwrap();
 
@@ -216,7 +235,8 @@ fn open_change_infos_treats_an_unparseable_file_as_a_best_effort_open_change() {
     let ws = Workspace::discover(tmp.path()).unwrap();
     fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
     fs::write(
-        tmp.path().join("telos/changes/CHG-0001.tel"),
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"),
         b"\x00not even a change file{{{".as_slice(),
     )
     .unwrap();
@@ -229,7 +249,10 @@ fn open_change_infos_treats_an_unparseable_file_as_a_best_effort_open_change() {
     assert!(infos[0].claims.is_empty());
     assert_eq!(
         infos[0].obligations,
-        vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()]
+        vec![
+            "abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel is unparseable)"
+                .to_string()
+        ]
     );
 }
 
@@ -244,7 +267,8 @@ fn open_change_infos_treats_invalid_utf8_bytes_as_a_best_effort_open_change() {
     let ws = Workspace::discover(tmp.path()).unwrap();
     fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
     fs::write(
-        tmp.path().join("telos/changes/CHG-0001.tel"),
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"),
         b"\xff\xfe garbage".as_slice(),
     )
     .unwrap();
@@ -257,7 +281,10 @@ fn open_change_infos_treats_invalid_utf8_bytes_as_a_best_effort_open_change() {
     assert!(infos[0].claims.is_empty());
     assert_eq!(
         infos[0].obligations,
-        vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()]
+        vec![
+            "abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel is unparseable)"
+                .to_string()
+        ]
     );
 }
 
@@ -303,7 +330,8 @@ fn scan_changes_keeps_an_unparseable_file_as_an_info_stub_and_out_of_parsed() {
     let ws = Workspace::discover(tmp.path()).unwrap();
     write_change(&ws, &sample_change(1)).unwrap();
     fs::write(
-        tmp.path().join("telos/changes/CHG-0002.tel"),
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000002.tel"),
         b"\x00not even a change file{{{".as_slice(),
     )
     .unwrap();
@@ -325,7 +353,10 @@ fn scan_changes_keeps_an_unparseable_file_as_an_info_stub_and_out_of_parsed() {
     assert!(scan.infos[1].claims.is_empty());
     assert_eq!(
         scan.infos[1].obligations,
-        vec!["abandon (telos/changes/CHG-0002.tel is unparseable)".to_string()]
+        vec![
+            "abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000002.tel is unparseable)"
+                .to_string()
+        ]
     );
 }
 
@@ -335,7 +366,8 @@ fn open_change_infos_is_exactly_the_scans_infos() {
     let ws = Workspace::discover(tmp.path()).unwrap();
     write_change(&ws, &sample_change(1)).unwrap();
     fs::write(
-        tmp.path().join("telos/changes/CHG-0002.tel"),
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000002.tel"),
         b"garbage".as_slice(),
     )
     .unwrap();

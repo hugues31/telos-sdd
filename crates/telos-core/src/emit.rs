@@ -1319,7 +1319,7 @@ mod tests {
             change.journal = vec![];
             assert_eq!(
                 emit_change(&change),
-                "change CHG-0001 \"x\" {\n  status open\n}\n"
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status open\n}\n"
             );
         }
 
@@ -1335,7 +1335,7 @@ mod tests {
             assert_eq!(
                 emit_change(&change),
                 concat!(
-                    "change CHG-0001 \"x\" {\n",
+                    "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                     "  status open\n",
                     "\n",
                     "  bind \"src/billing.rs\" -> INT-0001\n",
@@ -1401,7 +1401,7 @@ mod tests {
         fn a_change_with_no_op_is_a_header_a_status_and_a_brace() {
             assert_eq!(
                 emit_change(&empty_change()),
-                "change CHG-0001 \"x\" {\n  status open\n}\n"
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status open\n}\n"
             );
         }
 
@@ -1415,7 +1415,7 @@ mod tests {
             // Dropping `digest` must not reflow `status`: the padding width
             // is a property of the group, not of the lines present.
             assert!(emitted.starts_with(
-                "change CHG-0007 \"Invoices can be settled\" {\n  status drafted\n\n  op add"
+                "change CHG-00000000-0000-0000-0000-000000000007 \"Invoices can be settled\" {\n  status drafted\n\n  op add"
             ));
         }
 
@@ -1433,7 +1433,7 @@ mod tests {
                 assert_eq!(
                     emit_change(&change),
                     format!(
-                        "change CHG-0001 \"x\" {{\n  status {}\n}}\n",
+                        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status {}\n}}\n",
                         status.as_str()
                     )
                 );
@@ -1593,14 +1593,19 @@ mod tests {
         fn change_id_is_written_in_its_display_form() {
             let mut change = empty_change();
             change.id = ChangeId(7);
-            assert!(emit_change(&change).starts_with("change CHG-0007 "));
+            assert!(
+                emit_change(&change)
+                    .starts_with("change CHG-00000000-0000-0000-0000-000000000007 ")
+            );
         }
 
         #[test]
         fn a_motivation_that_needs_escaping_is_quoted() {
             let mut change = empty_change();
             change.motivation = "say \"hi\"".to_string();
-            assert!(emit_change(&change).starts_with("change CHG-0001 \"say \\\"hi\\\"\" {\n"));
+            assert!(emit_change(&change).starts_with(
+                "change CHG-00000000-0000-0000-0000-000000000001 \"say \\\"hi\\\"\" {\n"
+            ));
         }
     }
 }

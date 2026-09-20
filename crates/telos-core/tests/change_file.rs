@@ -27,7 +27,7 @@ use telos_core::model::{Binding, ChangeStatus, JournalEntry, StagedOp};
 use telos_core::syntax::parse_change_file;
 
 fn path() -> RepoPath {
-    RepoPath::new("telos/changes/CHG-0001.tel")
+    RepoPath::new("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel")
 }
 
 /// Parses a source that must be valid, reporting every diagnostic when it
@@ -66,14 +66,14 @@ fn assert_reports(diags: &[Diagnostic], needle: &str) {
 
 /// `telos change open` and nothing else: no op, no digest.
 const OPEN_EMPTY: &str = concat!(
-    "change CHG-0001 \"Nothing is staged yet\" {\n",
+    "change CHG-00000000-0000-0000-0000-000000000001 \"Nothing is staged yet\" {\n",
     "  status open\n",
     "}\n",
 );
 
 /// One `add` op, so one nested `notion-file` block.
 const DRAFTED_ONE_ADD: &str = concat!(
-    "change CHG-0002 \"Introduce the ledger\" {\n",
+    "change CHG-00000000-0000-0000-0000-000000000002 \"Introduce the ledger\" {\n",
     "  status drafted\n",
     "\n",
     "  op add notion billing/Ledger entity {\n",
@@ -87,7 +87,7 @@ const DRAFTED_ONE_ADD: &str = concat!(
 /// different entity file rule -- and the intent one carrying a statement block
 /// and a scenario, so the deepest nesting the grammar admits is exercised.
 const APPROVED_MULTI: &str = concat!(
-    "change CHG-0003 \"Rework the settlement rules\" {\n",
+    "change CHG-00000000-0000-0000-0000-000000000003 \"Rework the settlement rules\" {\n",
     "  status approved\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
@@ -121,7 +121,7 @@ const APPROVED_MULTI: &str = concat!(
 
 /// The ops with no entity block at all: three `remove`s and an `accept`.
 const REMOVE_AND_ACCEPT: &str = concat!(
-    "change CHG-0004 \"Retire the legacy pieces\" {\n",
+    "change CHG-00000000-0000-0000-0000-000000000004 \"Retire the legacy pieces\" {\n",
     "  status drafted\n",
     "\n",
     "  op remove notion billing/Ledger\n",
@@ -139,7 +139,7 @@ const REMOVE_AND_ACCEPT: &str = concat!(
 /// its approval froze -- reconcile accepts `approved` *or* `implementing`,
 /// and a change that lost its digest on the way could never be reconciled.
 const IMPLEMENTING_WITH_DIGEST: &str = concat!(
-    "change CHG-0005 \"Settle the ledger\" {\n",
+    "change CHG-00000000-0000-0000-0000-000000000005 \"Settle the ledger\" {\n",
     "  status implementing\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
@@ -150,7 +150,7 @@ const IMPLEMENTING_WITH_DIGEST: &str = concat!(
 /// An implementing change whose journal holds runs only: the state
 /// `telos test` leaves behind before anything is bound.
 const IMPLEMENTING_RUNS_ONLY: &str = concat!(
-    "change CHG-0006 \"Settle the ledger\" {\n",
+    "change CHG-00000000-0000-0000-0000-000000000006 \"Settle the ledger\" {\n",
     "  status implementing\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
@@ -164,7 +164,7 @@ const IMPLEMENTING_RUNS_ONLY: &str = concat!(
 /// Runs *and* binds, in the order they were appended -- a bind between two
 /// runs, which no sort would ever produce.
 const IMPLEMENTING_RUNS_AND_BINDS: &str = concat!(
-    "change CHG-0007 \"Settle the ledger\" {\n",
+    "change CHG-00000000-0000-0000-0000-000000000007 \"Settle the ledger\" {\n",
     "  status implementing\n",
     "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
     "\n",
@@ -279,7 +279,9 @@ fn add_and_edit_carry_the_whole_nested_entity() {
 
 #[test]
 fn an_unknown_status_names_the_five_it_could_have_been() {
-    let diags = parse_err("change CHG-0001 \"x\" {\n  status finished\n}\n");
+    let diags = parse_err(
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status finished\n}\n",
+    );
     assert_reports(
         &diags,
         "expected one of `open`, `drafted`, `approved`, `implementing`, `abandoned`",
@@ -290,7 +292,7 @@ fn an_unknown_status_names_the_five_it_could_have_been() {
 #[test]
 fn a_digest_on_a_change_that_carries_no_approval_is_rejected() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status drafted\n",
         "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
         "}\n",
@@ -304,7 +306,9 @@ fn a_digest_on_a_change_that_carries_no_approval_is_rejected() {
 #[test]
 fn an_approved_or_implementing_change_without_a_digest_is_rejected() {
     for status in ["approved", "implementing"] {
-        let src = format!("change CHG-0001 \"x\" {{\n  status {status}\n}}\n");
+        let src = format!(
+            "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status {status}\n}}\n"
+        );
         assert_reports(&parse_err(&src), "an approved change must carry its digest");
     }
 }
@@ -330,8 +334,9 @@ fn a_digest_that_is_not_sha256_of_64_hex_is_rejected() {
         // Upper-case hex is not the canonical form.
         "sha256:9F8E7D6C5B4A39281706F5E4D3C2B1A09F8E7D6C5B4A39281706F5E4D3C2B1A0",
     ] {
-        let src =
-            format!("change CHG-0001 \"x\" {{\n  status approved\n  digest \"{digest}\"\n}}\n");
+        let src = format!(
+            "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status approved\n  digest \"{digest}\"\n}}\n"
+        );
         assert_reports(
             &parse_err(&src),
             "malformed digest; expected sha256:<64 hex>",
@@ -342,7 +347,7 @@ fn a_digest_that_is_not_sha256_of_64_hex_is_rejected() {
 #[test]
 fn an_accept_op_with_a_path_but_no_oid_is_an_arity_error() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status drafted\n",
         "\n",
         "  op accept \"telos/telos.toml\"\n",
@@ -369,7 +374,9 @@ fn a_remove_op_naming_the_wrong_kind_of_id_says_which_one_it_wanted() {
         ),
     ];
     for (op, expected) in cases {
-        let src = format!("change CHG-0001 \"x\" {{\n  status drafted\n\n  {op}\n}}\n");
+        let src = format!(
+            "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status drafted\n\n  {op}\n}}\n"
+        );
         assert_reports(&parse_err(&src), expected);
     }
 }
@@ -377,7 +384,7 @@ fn a_remove_op_naming_the_wrong_kind_of_id_says_which_one_it_wanted() {
 #[test]
 fn an_unknown_verb_names_the_four_ops() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status drafted\n",
         "\n",
         "  op delete notion Ledger\n",
@@ -465,7 +472,7 @@ fn a_journal_line_naming_the_spec_tree_does_not_parse() {
         "  run  SCN-0107 red \"telos/contexts/billing/capabilities/settlement/intents/INT-0042.tel::scn_0107\" \"e69de29\" exit-status",
     ] {
         let src = format!(
-            "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
+            "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
              {line}\n}}\n",
             "0".repeat(64)
         );
@@ -511,7 +518,7 @@ fn a_journal_does_not_move_the_digest_of_the_delta_it_implements() {
 #[test]
 fn a_journal_on_a_change_that_is_not_implementing_is_rejected() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status drafted\n",
         "\n",
         "  bind \"src/billing.rs\" -> INT-0042\n",
@@ -526,7 +533,7 @@ fn a_journal_on_a_change_that_is_not_implementing_is_rejected() {
 #[test]
 fn a_verdict_that_is_neither_red_nor_green_is_rejected() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status implementing\n",
         "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
         "\n",
@@ -539,7 +546,7 @@ fn a_verdict_that_is_neither_red_nor_green_is_rejected() {
 #[test]
 fn a_run_line_without_a_known_evidence_word_is_rejected() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status implementing\n",
         "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
         "\n",
@@ -555,7 +562,7 @@ fn a_run_line_without_a_known_evidence_word_is_rejected() {
 #[test]
 fn a_run_line_without_any_evidence_word_is_rejected() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status implementing\n",
         "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
         "\n",
@@ -568,7 +575,7 @@ fn a_run_line_without_any_evidence_word_is_rejected() {
 #[test]
 fn an_op_may_not_follow_a_journal_line() {
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status implementing\n",
         "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
         "\n",
@@ -587,7 +594,7 @@ fn a_broken_nested_block_does_not_swallow_the_ops_that_follow() {
     // `accept` op two lines down is still checked -- two diagnostics, not
     // one.
     let src = concat!(
-        "change CHG-0001 \"x\" {\n",
+        "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
         "  status drafted\n",
         "\n",
         "  op add notion billing/Ledger entity {\n",
@@ -612,7 +619,7 @@ fn a_change_rejects_legacy_entity_declarations_without_an_owner() {
         "constraint CON-0009 quality \"Legacy constraint\" {\n    rule  \"No owner.\"\n    scope global\n  }",
     ] {
         let src = format!(
-            "change CHG-0001 \"Legacy declaration\" {{\n  status drafted\n\n  op add {declaration}\n}}\n"
+            "change CHG-00000000-0000-0000-0000-000000000001 \"Legacy declaration\" {{\n  status drafted\n\n  op add {declaration}\n}}\n"
         );
         assert_reports(&parse_err(&src), "owner");
     }

@@ -24,6 +24,8 @@ const WORKFLOW: &str = concat!(
     "    runs-on: ubuntu-latest\n",
     "    steps:\n",
     "      - uses: actions/checkout@v7\n",
+    "        with:\n",
+    "          fetch-depth: 0\n",
     "      - name: Install Telos v",
     env!("CARGO_PKG_VERSION"),
     "\n",
@@ -40,8 +42,12 @@ const WORKFLOW: &str = concat!(
     "          tar -xzf \"${asset}\"\n",
     "          install -D -m 0755 telos \"$HOME/.local/bin/telos\"\n",
     "          echo \"$HOME/.local/bin\" >> \"$GITHUB_PATH\"\n",
-    "      - name: Verify sealed Telos state\n",
-    "        run: telos check --sealed\n",
+    "      - name: Verify planned and sealed repository state\n",
+    "        env:\n",
+    "          TELOS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}\n",
+    "        run: |\n",
+    "          test -n \"$TELOS_BASE\"\n",
+    "          telos check --sealed --planned --base \"$TELOS_BASE\"\n",
 );
 
 /// The fully validated immutable GitHub installation.

@@ -2280,7 +2280,7 @@ mod tests {
     #[test]
     fn change_files_parse_owned_ops_and_explicit_moves() {
         let src = concat!(
-            "change CHG-0001 \"Move invoice ownership\" {\n",
+            "change CHG-00000000-0000-0000-0000-000000000001 \"Move invoice ownership\" {\n",
             "  status drafted\n",
             "\n",
             "  op add notion billing/Invoice value {\n",
@@ -2297,7 +2297,11 @@ mod tests {
             "}\n",
         );
 
-        let change = parse_change_file(&RepoPath::new("telos/changes/CHG-0001.tel"), src).unwrap();
+        let change = parse_change_file(
+            &RepoPath::new("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"),
+            src,
+        )
+        .unwrap();
         assert!(matches!(change.ops[0], StagedOp::AddOwnedNotion { .. }));
         match &change.ops[1] {
             StagedOp::MoveIntent { from, to, intent } => {
@@ -3723,7 +3727,7 @@ mod tests {
         use crate::model::{Evidence, JournalEntry, TestRun, Witness};
 
         fn change_path() -> RepoPath {
-            RepoPath::new("telos/changes/CHG-0007.tel")
+            RepoPath::new("telos/changes/CHG-00000000-0000-0000-0000-000000000007.tel")
         }
 
         fn parse(src: &str) -> Change {
@@ -3805,14 +3809,18 @@ mod tests {
                     } else {
                         String::new()
                     };
-                let src = format!("change CHG-0001 \"x\" {{\n  status {word}\n{digest}}}\n");
+                let src = format!(
+                    "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status {word}\n{digest}}}\n"
+                );
                 assert_eq!(parse(&src).status, status);
             }
         }
 
         #[test]
         fn an_unknown_status_lists_the_five_and_suggests_the_closest() {
-            let found = diags("change CHG-0001 \"x\" {\n  status aproved\n}\n");
+            let found = diags(
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status aproved\n}\n",
+            );
             assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
             assert_eq!(
                 found[0].message,
@@ -3828,7 +3836,7 @@ mod tests {
         fn a_missing_status_line_is_reported_once() {
             // `status` has a stand-in (`open`), so the ops after it are
             // still parsed rather than abandoned.
-            let src = "change CHG-0001 \"x\" {\n  op remove notion billing/Ledger\n}\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  op remove notion billing/Ledger\n}\n";
             let found = diags(src);
             assert_eq!(found.len(), 1, "diagnostics: {found:#?}");
             assert_eq!(found[0].message, "expected `status`, found `op`");
@@ -3847,7 +3855,7 @@ mod tests {
             // both are approved changes.
             for status in ["approved", "implementing"] {
                 let found = diags(&format!(
-                    "change CHG-0001 \"x\" {{\n  status {status}\n}}\n"
+                    "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status {status}\n}}\n"
                 ));
                 assert_eq!(found.len(), 1, "for `{status}`: {found:#?}");
                 assert_eq!(
@@ -3864,7 +3872,9 @@ mod tests {
         fn a_status_that_carries_no_approval_may_not_carry_a_digest() {
             let digest = format!("  digest \"sha256:{}\"\n", "0".repeat(64));
             for status in ["open", "drafted", "abandoned"] {
-                let src = format!("change CHG-0001 \"x\" {{\n  status {status}\n{digest}}}\n");
+                let src = format!(
+                    "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status {status}\n{digest}}}\n"
+                );
                 let found = diags(&src);
                 assert_eq!(found.len(), 1, "for `{status}`: {found:#?}");
                 assert_eq!(
@@ -3877,7 +3887,7 @@ mod tests {
 
         #[test]
         fn a_malformed_digest_is_reported_where_it_stands() {
-            let src = "change CHG-0001 \"x\" {\n  status approved\n  digest \"sha256:beef\"\n}\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status approved\n  digest \"sha256:beef\"\n}\n";
             let found = diags(src);
             // The digest line was written, so the coherence check stays
             // quiet: one fault, one diagnostic.
@@ -3907,7 +3917,7 @@ mod tests {
         #[test]
         fn every_op_shape_parses() {
             let src = concat!(
-                "change CHG-0001 \"x\" {\n",
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
                 "  op add notion billing/A entity {\n",
@@ -3957,7 +3967,7 @@ mod tests {
 
         #[test]
         fn an_accept_op_takes_exactly_two_strings() {
-            let base = "change CHG-0001 \"x\" {\n  status drafted\n\n  op accept";
+            let base = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status drafted\n\n  op accept";
             let cases = [
                 ("", "expected a repository path, found end of line"),
                 (
@@ -3996,7 +4006,7 @@ mod tests {
             ];
             for (tail, expected) in cases {
                 let src = format!(
-                    "change CHG-0001 \"x\" {{\n  status drafted\n\n  op remove {tail}\n}}\n"
+                    "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status drafted\n\n  op remove {tail}\n}}\n"
                 );
                 let found = diags(&src);
                 assert_eq!(found.len(), 1, "for `{tail}`: {found:#?}");
@@ -4006,13 +4016,12 @@ mod tests {
 
         #[test]
         fn an_unknown_verb_or_entity_names_what_was_expected() {
-            let src = "change CHG-0001 \"x\" {\n  status drafted\n\n  op stage notion A\n}\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status drafted\n\n  op stage notion A\n}\n";
             assert_eq!(
                 diags(src)[0].message,
                 "expected `add`, `edit`, `remove`, `move` or `accept`, found `stage`"
             );
-            let src =
-                "change CHG-0001 \"x\" {\n  status drafted\n\n  op add scenario SCN-0001\n}\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status drafted\n\n  op add scenario SCN-0001\n}\n";
             assert_eq!(
                 diags(src)[0].message,
                 "expected `context`, `capability`, `notion`, `intent`, `constraint` or `context-map`, found `scenario`"
@@ -4022,7 +4031,7 @@ mod tests {
         #[test]
         fn a_line_that_is_neither_an_op_nor_a_journal_line_is_reported_and_skipped() {
             let src = concat!(
-                "change CHG-0001 \"x\" {\n",
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
                 "  check \"cargo test\"\n",
@@ -4047,7 +4056,7 @@ mod tests {
             // change's own body and keep going, or the ops below would
             // vanish silently.
             let src = concat!(
-                "change CHG-0001 \"x\" {\n",
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
                 "  op add intent INT-0001 in billing/invoicing \"t\" {\n",
@@ -4068,7 +4077,7 @@ mod tests {
 
         #[test]
         fn an_unclosed_change_block_is_fatal() {
-            let src = "change CHG-0001 \"x\" {\n  status drafted\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status drafted\n";
             let found = diags(src);
             assert_eq!(
                 found[0].message,
@@ -4078,7 +4087,7 @@ mod tests {
 
         #[test]
         fn nothing_may_follow_the_closing_brace() {
-            let src = "change CHG-0001 \"x\" {\n  status open\n}\nchange CHG-0002 \"y\" {\n}\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status open\n}\nchange CHG-00000000-0000-0000-0000-000000000002 \"y\" {\n}\n";
             assert_eq!(
                 diags(src)[0].message,
                 "expected end of input, found `change`"
@@ -4090,14 +4099,14 @@ mod tests {
             // The emitter writes exactly one blank line before each op; the
             // parser accepts none, one or many, and emitting normalizes.
             let dense = concat!(
-                "change CHG-0001 \"x\" {\n",
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                 "  status drafted\n",
                 "  op remove notion billing/A\n",
                 "  op remove notion billing/B\n",
                 "}\n",
             );
             let canonical = concat!(
-                "change CHG-0001 \"x\" {\n",
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                 "  status drafted\n",
                 "\n",
                 "  op remove notion billing/A\n",
@@ -4114,7 +4123,7 @@ mod tests {
         /// An implementing change with `body` as its journal block.
         fn journalled(body: &str) -> String {
             format!(
-                "change CHG-0001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status implementing\n  digest \"sha256:{}\"\n\n\
                  {body}}}\n",
                 "0".repeat(64)
             )
@@ -4239,7 +4248,7 @@ mod tests {
             // rule relates two lines, so it lives with the digest check.
             for status in ["open", "drafted", "abandoned"] {
                 let src = format!(
-                    "change CHG-0001 \"x\" {{\n  status {status}\n\n  \
+                    "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status {status}\n\n  \
                      bind \"src/b.rs\" -> INT-0001\n}}\n"
                 );
                 let found = diags(&src);
@@ -4260,7 +4269,7 @@ mod tests {
             // `implementing`, so an approved change with a journal is a
             // change whose writer skipped that transition.
             let src = format!(
-                "change CHG-0001 \"x\" {{\n  status approved\n  digest \"sha256:{}\"\n\n  \
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {{\n  status approved\n  digest \"sha256:{}\"\n\n  \
                  run  SCN-0107 red \"tests/b.rs\" \"cafe\" exit-status\n}}\n",
                 "0".repeat(64)
             );
@@ -4276,7 +4285,7 @@ mod tests {
         fn a_journal_line_that_did_not_parse_still_counts_as_a_journal() {
             // The coherence check is about the line being there, not about
             // it being well-formed -- the same rule the digest check uses.
-            let src = "change CHG-0001 \"x\" {\n  status drafted\n\n  bind \"src/b.rs\"\n}\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status drafted\n\n  bind \"src/b.rs\"\n}\n";
             let found = diags(src);
             let messages: Vec<&str> = found.iter().map(|d| d.message.as_str()).collect();
             assert_eq!(
@@ -4307,8 +4316,7 @@ mod tests {
 
         #[test]
         fn an_unclosed_journal_block_names_what_could_still_come() {
-            let src =
-                "change CHG-0001 \"x\" {\n  status implementing\n  bind \"a.rs\" -> INT-0001\n";
+            let src = "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n  status implementing\n  bind \"a.rs\" -> INT-0001\n";
             let found = diags(src);
             assert_eq!(
                 found[0].message,
@@ -4322,7 +4330,7 @@ mod tests {
             // inside it; the parser accepts any spacing, and emitting
             // normalizes.
             let dense = concat!(
-                "change CHG-0001 \"x\" {\n",
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                 "  status implementing\n",
                 "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
                 "  bind \"a.rs\" -> INT-0001\n",
@@ -4332,7 +4340,7 @@ mod tests {
                 "}\n",
             );
             let canonical = concat!(
-                "change CHG-0001 \"x\" {\n",
+                "change CHG-00000000-0000-0000-0000-000000000001 \"x\" {\n",
                 "  status implementing\n",
                 "  digest \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
                 "\n",

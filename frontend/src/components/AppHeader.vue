@@ -14,6 +14,7 @@ import ThemeToggle from './ThemeToggle.vue';
 // from the nav itself.
 const links = [
   { to: '/', label: 'Dashboard' },
+  { to: '/plans', label: 'Plans' },
   { to: '/contexts', label: 'Contexts' },
   { to: '/intents', label: 'Intents' },
   { to: '/graph', label: 'Graph' },
@@ -270,7 +271,7 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-@media (max-width: 48rem) {
+@media (max-width: 64rem) {
   .app-header__inner {
     padding-inline: 0.75rem;
     gap: 0.75rem;

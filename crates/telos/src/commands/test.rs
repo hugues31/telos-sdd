@@ -90,6 +90,7 @@ fn one(project: &Project, arg: &str, file: Option<&RepoPath>, diagnostics: bool)
 
     let owner = owner_of(project, scenario).ok_or_else(|| no_owner(scenario))?;
     require_approved(owner)?;
+    telos_core::plans::actions::require_change_contract(&project.ws.repo_root, owner, true)?;
     let effective_ws = approved_config_workspace(project)?;
     let runner = require_runner(&effective_ws)?;
     let test = find_test_for(&effective_ws, scenario, file)?;

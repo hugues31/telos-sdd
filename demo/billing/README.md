@@ -15,11 +15,11 @@ telos rebuild plan --json
 telos rebuild status --json
 ```
 
-The first full reconcile is an honest spec-only bootstrap. There is no active
+Explicit initialization observes the spec-only bootstrap. There is no active
 behavioral obligation yet, so it runs zero tests and zero checks:
 
 ```console
-telos change reconcile --full --json
+telos init --from-spec --json
 telos status --json
 ```
 
@@ -47,11 +47,17 @@ constraint executable:
 <!-- constraint-check-patch:end -->
 
 ```console
-telos change open "rebuild INT-0017" --json
-printf '%s\n' '{"status":"active"}' | telos edit intent INT-0017 --change CHG-0001 --json
-printf '%s\n' '{"check":"cargo test --test invoice_issued domain_does_not_import_adapter_modules -- --exact"}' | telos edit constraint CON-0003 --change CHG-0001 --json
-telos change diff CHG-0001 --json
-telos change approve CHG-0001 --expected-digest '<digest returned by diff>' --json
+telos plan open "rebuild INT-0017" --json
+# Define TSK-001 with the intended source, test, manifest and spec paths.
+telos plan edit "$PLAN" < /tmp/billing-plan.json
+telos plan task prepare "$PLAN" TSK-001 --json
+printf '%s\n' '{"status":"active"}' | telos edit intent INT-0017 --change "$CHANGE" --json
+printf '%s\n' '{"check":"cargo test --test invoice_issued domain_does_not_import_adapter_modules -- --exact"}' | telos edit constraint CON-0003 --change "$CHANGE" --json
+telos change diff "$CHANGE" --json
+telos plan task import "$PLAN" TSK-001
+telos plan diff "$PLAN" --json
+telos plan approve "$PLAN" --expected-digest '<digest returned by plan diff>' --json
+telos plan task start "$PLAN" TSK-001
 ```
 
 After approval, the external implementer creates a manifest, application code,
@@ -63,27 +69,43 @@ green witness on unchanged test bytes, and reconcile:
 telos test SCN-0091 --json
 telos bind '<code path>' INT-0017 --json
 telos test SCN-0091 --json
-telos change reconcile CHG-0001 --json
+telos change reconcile "$CHANGE" --json
 telos rebuild status --json
 ```
 
-Progress must now be `1/2`.
+Use a scenario validator for the task and a final acceptance review. After
+reconciliation, run `telos plan verify "$PLAN" --task TSK-001 SCN-0091`,
+`telos plan task finish "$PLAN" TSK-001`, the final validator and
+`telos plan complete "$PLAN"`. Progress must now be `1/2`.
+
+The [native plan guide](../../docs/plans.md) supplies the complete definition
+schema. The returned `$PLAN` and `$CHANGE` are UUID identities. Include
+`Cargo.toml`, `Cargo.lock`, `src/**`, `tests/**` and the affected
+`telos/contexts/**` paths in both the plan and task scopes. No implementation
+file may be written before approval and task start.
 
 For the second batch, repeat the same reviewed loop for `INT-0042` and a test
 whose discovered name begins with `scn_0107_`:
 
 ```console
-telos change open "rebuild INT-0042" --json
-printf '%s\n' '{"status":"active"}' | telos edit intent INT-0042 --change CHG-0002 --json
-telos change diff CHG-0002 --json
-telos change approve CHG-0002 --expected-digest '<digest returned by diff>' --json
+telos plan open "rebuild INT-0042" --json
+telos plan edit "$PLAN" < /tmp/settlement-plan.json
+telos plan task prepare "$PLAN" TSK-001 --json
+printf '%s\n' '{"status":"active"}' | telos edit intent INT-0042 --change "$CHANGE" --json
+telos change diff "$CHANGE" --json
+telos plan task import "$PLAN" TSK-001
+telos plan diff "$PLAN" --json
+telos plan approve "$PLAN" --expected-digest '<digest returned by plan diff>' --json
+telos plan task start "$PLAN" TSK-001
 telos test SCN-0107 --json
 telos bind '<code path>' INT-0042 --json
 telos test SCN-0107 --json
-telos change reconcile CHG-0002 --json
+telos change reconcile "$CHANGE" --json
 ```
 
-The executable `CON-0003` check must genuinely reject a domain-to-adapter
+Finish and validate this task and its plan the same way, using `SCN-0107`.
+
+The executable `CON-0003` check must reject a domain-to-adapter
 dependency. If reconcile reports `TELOS_CONSTRAINT_FAILED`, repair only the
 external implementation and reconcile again; do not edit the Telos-owned tree
 or the already witnessed test.
@@ -92,9 +114,9 @@ Finish by verifying `2/2`, the coherent seal, and the optional view:
 
 ```console
 telos rebuild status --json
-telos check --sealed --json
+telos check --sealed --planned --json
 telos view --port 3000
-telos view --export site
+telos view --export /tmp/billing-site
 ```
 
 The repository test `cargo test -p telos --test rebuild_demo` is a

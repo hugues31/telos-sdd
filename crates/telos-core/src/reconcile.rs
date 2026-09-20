@@ -144,7 +144,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::changes::{OpenChangeInfo, delete_change, diagnostics_to_error};
+use crate::changes::{OpenChangeInfo, diagnostics_to_error};
 use crate::config::{Config, TddPolicy};
 use crate::emit::emit_file;
 use crate::error::{ErrorCode, TelosError};
@@ -216,6 +216,15 @@ pub fn reconcile_change(
     change: &Change,
     others: &[OpenChangeInfo],
 ) -> Result<ReconcileOutcome, TelosError> {
+    let writer = crate::transaction::Writer::acquire(&ws.repo_root)?;
+    let governed = writer
+        .read(&RepoPath::new(crate::plans::ledger::PATH))?
+        .is_some();
+    if governed {
+        crate::plans::actions::require_change_contract(&ws.repo_root, change, true)?;
+    }
+    let inventory_before = crate::inventory::capture(&ws.repo_root)?;
+    crate::inventory::store(&ws.repo_root, &inventory_before)?;
     let carried = classify_drift(ws, git, lock, change, others)?;
     require_approved(change)?;
     require_fresh_approval(change)?;
@@ -243,34 +252,61 @@ pub fn reconcile_change(
     require_unchanged_snapshot(ws, git, &proven)?;
 
     let mut writes = ReconcileWrites::new(ws)?;
-    let publication = (|| {
-        // --- write phase: everything above passed, so and only so, write. ---
-        for op in &change.ops {
-            apply_op(&mut writes, op)?;
+    for op in &change.ops {
+        apply_op(&mut writes, op)?;
+    }
+    write_bindings(&mut writes, &model)?;
+    let mut spec = proven.spec.clone();
+    let mut after = inventory_before.clone();
+    for (path, bytes) in &writes.after {
+        match bytes {
+            Some(bytes) => {
+                let oid =
+                    crate::inventory::hash_bytes(&ws.repo_root, Some(path.as_str()), bytes, true)?;
+                spec.insert(path.clone(), Oid(oid.clone()));
+                let mode = after
+                    .get(path.as_str())
+                    .map_or_else(|| "100644".to_owned(), |state| state.mode.clone());
+                after.insert(path.to_string(), crate::inventory::FileState { oid, mode });
+            }
+            None => {
+                spec.remove(path);
+                after.remove(path.as_str());
+            }
         }
-        write_bindings(&mut writes, &model)?;
-        let spec_paths = ws.spec_files()?;
-        let spec = git.blob_oids(&spec_paths)?;
-        require_complete_map("specification", &spec_paths, &spec)?;
-        require_code_snapshot(git, &proven.code)?;
-        let publication_spec = spec.clone();
-        let mut fresh = lock_from_maps(
-            spec,
-            proven.code.clone(),
-            Some(change.id),
-            effective_ws.config.test.evidence(),
-        );
-        carry_over(&mut fresh, lock, &carried);
-        store_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
-        writes.write(
-            &RepoPath::new("telos/telos.lock"),
-            fresh.render().as_bytes(),
-        )?;
-        require_publication_snapshot(ws, git, &publication_spec, &proven.code)?;
-        delete_change(ws, change.id)?;
-        Ok(fresh)
-    })();
-    let fresh = publication.map_err(|error| writes.rollback(error))?;
+    }
+    require_code_snapshot(git, &proven.code)?;
+    let mut fresh = lock_from_maps(
+        spec,
+        proven.code.clone(),
+        Some(change.id),
+        effective_ws.config.test.evidence(),
+    );
+    carry_over(&mut fresh, lock, &carried);
+    // Store the current code blobs before publication; generated spec blobs were
+    // stored above without exposing an intermediate specification to readers.
+    git.store_blobs(&proven.code.keys().cloned().collect::<Vec<_>>())?;
+    if crate::inventory::capture(&ws.repo_root)? != inventory_before {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            "repository changed while reconciliation was running",
+        ));
+    }
+    writes.write(
+        &RepoPath::new("telos/telos.lock"),
+        fresh.render().as_bytes(),
+    )?;
+    writes.remove_file(&RepoPath::new(format!("telos/changes/{}.tel", change.id)))?;
+    let mut publication: Vec<_> = writes.after.into_iter().collect();
+    if governed {
+        publication.extend(crate::plans::ledger::publication(
+            &ws.repo_root,
+            change,
+            &model,
+            after,
+        )?);
+    }
+    writer.publish(publication)?;
 
     Ok(ReconcileOutcome {
         ops_applied: change.ops.len() as u32,
@@ -334,6 +370,47 @@ pub fn reconcile_change(
 /// and, when the model has active obligations, one run of `[test] cmd` with
 /// an empty `{filter}` for the whole suite.
 pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome, TelosError> {
+    let writer = crate::transaction::Writer::acquire(&ws.repo_root)?;
+    let governed = writer
+        .read(&RepoPath::new(crate::plans::ledger::PATH))?
+        .is_some();
+    let owner = if governed {
+        let (plan, task) = crate::plans::store::active(&ws.repo_root)?.ok_or_else(|| {
+            TelosError::new(
+                ErrorCode::TelosPlanRequired,
+                "full reconciliation requires an active plan task",
+            )
+        })?;
+        crate::plans::store::require_approved(&plan)?;
+        if !matches!(
+            task.definition.kind,
+            crate::plans::model::TaskKind::Integration | crate::plans::model::TaskKind::Recovery
+        ) {
+            return Err(TelosError::new(
+                ErrorCode::TelosPlanScopeViolation,
+                "full reconciliation requires an integration or recovery task",
+            ));
+        }
+        let id = task
+            .change
+            .as_deref()
+            .ok_or_else(|| TelosError::new(ErrorCode::TelosPlanRequired, "task has no change"))?
+            .parse()?;
+        let change = crate::changes::read_change(ws, id)?;
+        crate::plans::actions::require_change_contract(&ws.repo_root, &change, true)?;
+        if !change.ops.is_empty() {
+            return Err(TelosError::new(
+                ErrorCode::TelosPlanScopeViolation,
+                "reconcile the staged change by identity; full reconciliation requires an empty delta",
+            ));
+        }
+        Some(change)
+    } else {
+        None
+    };
+    let inventory_before = crate::inventory::capture(&ws.repo_root)?;
+    crate::inventory::store(&ws.repo_root, &inventory_before)?;
+
     // [`seal`] checks this too, but only after every check and test has
     // run: paying for it upfront turns "you invoked this from the wrong
     // repository" into an immediate answer rather than one that arrives
@@ -361,12 +438,34 @@ pub fn reconcile_full(ws: &Workspace, git: &GitRepo) -> Result<ReconcileOutcome,
     let lock = lock_from_maps(
         proven.spec.clone(),
         proven.code.clone(),
-        None,
+        owner.as_ref().map(|c| c.id),
         ws.config.test.evidence(),
     );
     store_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
-    lock.write_to_workspace(ws)?;
     require_publication_snapshot(ws, git, &lock.spec, &lock.code)?;
+    if crate::inventory::capture(&ws.repo_root)? != inventory_before {
+        return Err(TelosError::new(
+            ErrorCode::TelosIntegrityViolation,
+            "repository changed during full reconciliation",
+        ));
+    }
+    let mut writes = vec![(
+        RepoPath::new("telos/telos.lock"),
+        Some(lock.render().into_bytes()),
+    )];
+    if let Some(change) = owner {
+        writes.extend(crate::plans::ledger::publication(
+            &ws.repo_root,
+            &change,
+            &model,
+            inventory_before,
+        )?);
+        writes.push((
+            RepoPath::new(format!("telos/changes/{}.tel", change.id)),
+            None,
+        ));
+    }
+    writer.publish(writes)?;
 
     Ok(ReconcileOutcome {
         ops_applied: 0,
@@ -718,7 +817,7 @@ fn require_approved(change: &Change) -> Result<(), TelosError> {
             format!("change {} is not approved; approve it first", change.id),
         )
         .hint(format!(
-            "run `telos change diff {id}` then `telos change approve {id}`",
+            "review the plan owning {id}, approve its digest, then run `telos plan task start <plan> <task>`",
             id = change.id
         ))),
     }
@@ -1509,62 +1608,25 @@ fn test_failed(target: &str, command: &str) -> TelosError {
 /// and rollback must preserve those exact bytes, including their line endings.
 struct ReconcileWrites {
     fs: RepoFs,
-    before: BTreeMap<RepoPath, Option<Vec<u8>>>,
+    after: BTreeMap<RepoPath, Option<Vec<u8>>>,
 }
 
 impl ReconcileWrites {
     fn new(ws: &Workspace) -> Result<Self, TelosError> {
         Ok(Self {
             fs: RepoFs::open(&ws.repo_root)?,
-            before: BTreeMap::new(),
+            after: BTreeMap::new(),
         })
     }
-
-    fn remember(&mut self, path: &RepoPath) -> Result<(), TelosError> {
-        if !self.before.contains_key(path) {
-            self.before
-                .insert(path.clone(), self.fs.read_optional(path)?);
-        }
+    fn write(&mut self, path: &RepoPath, bytes: &[u8]) -> Result<(), TelosError> {
+        self.fs.read_optional(path)?;
+        self.after.insert(path.clone(), Some(bytes.to_vec()));
         Ok(())
     }
-
-    fn write(&mut self, path: &RepoPath, bytes: &[u8]) -> Result<(), TelosError> {
-        self.remember(path)?;
-        self.fs.write(path, bytes)
-    }
-
     fn remove_file(&mut self, path: &RepoPath) -> Result<(), TelosError> {
-        self.remember(path)?;
-        self.fs.remove_file(path)
-    }
-
-    fn rollback(self, mut error: TelosError) -> TelosError {
-        let mut failed = Vec::new();
-        for (path, before) in self.before.iter().rev() {
-            // A refused write often left the original intact. Do not try to
-            // rewrite it (e.g. an unwritable lock); restore other paths anyway.
-            if self.fs.read_optional(path).ok().as_ref() == Some(before) {
-                continue;
-            }
-            let restored = match before {
-                Some(bytes) => self.fs.write(path, bytes),
-                None => self.fs.remove_file(path),
-            };
-            if restored.is_err() {
-                failed.push(path.to_string());
-            }
-        }
-        if !failed.is_empty() {
-            let recovery = format!(
-                "reconcile rollback could not restore [{}]; restore access and recover these paths from the pre-reconcile state before retrying",
-                failed.join(", ")
-            );
-            error.hint = Some(match error.hint {
-                Some(hint) => format!("{hint}; {recovery}"),
-                None => recovery,
-            });
-        }
-        error
+        self.fs.read_optional(path)?;
+        self.after.insert(path.clone(), None);
+        Ok(())
     }
 }
 
@@ -1951,7 +2013,7 @@ mod tests {
 
     fn info(id: u32, claims: &[&str]) -> OpenChangeInfo {
         OpenChangeInfo {
-            id: crate::ids::ChangeId(id),
+            id: crate::ids::ChangeId(id.into()),
             status: ChangeStatus::Implementing,
             claims: claims.iter().map(|p| RepoPath::new(*p)).collect(),
             obligations: Vec::new(),
@@ -2006,56 +2068,21 @@ mod tests {
 }
 
 #[cfg(test)]
-mod rollback_tests {
+mod publication_tests {
     use super::*;
-    use std::fs;
-
     #[test]
-    fn rollback_restores_original_bytes_and_deletions_across_repeated_ops() {
+    fn staging_never_changes_disk_and_last_operation_wins() {
         let tmp = tempfile::tempdir().unwrap();
-        let original = RepoPath::new("telos/original.tel");
-        let added = RepoPath::new("telos/new.tel");
-        fs::create_dir_all(tmp.path().join("telos")).unwrap();
-        fs::write(tmp.path().join(original.as_str()), b"adopted bytes\r\n").unwrap();
+        let fs = RepoFs::open(tmp.path()).unwrap();
+        let path = RepoPath::new("telos/item.tel");
+        fs.write(&path, b"original").unwrap();
         let mut writes = ReconcileWrites {
-            fs: RepoFs::open(tmp.path()).unwrap(),
-            before: BTreeMap::new(),
+            fs,
+            after: BTreeMap::new(),
         };
-        writes.write(&original, b"intermediate").unwrap();
-        writes.remove_file(&original).unwrap();
-        writes.write(&added, b"first").unwrap();
-        writes.write(&added, b"second").unwrap();
-        let error = writes.rollback(TelosError::new(
-            ErrorCode::TelosGitError,
-            "original failure",
-        ));
-        assert_eq!(error.code, ErrorCode::TelosGitError);
-        assert_eq!(error.message, "original failure");
-        assert_eq!(error.hint, None);
-        assert_eq!(
-            fs::read(tmp.path().join(original.as_str())).unwrap(),
-            b"adopted bytes\r\n"
-        );
-        assert!(!tmp.path().join(added.as_str()).exists());
-    }
-
-    #[test]
-    fn rollback_names_unrestored_paths_without_losing_the_original_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = RepoPath::new("telos/file.tel");
-        let mut writes = ReconcileWrites {
-            fs: RepoFs::open(tmp.path()).unwrap(),
-            before: BTreeMap::new(),
-        };
-        writes.write(&path, b"new").unwrap();
-        fs::remove_file(tmp.path().join(path.as_str())).unwrap();
-        fs::create_dir(tmp.path().join(path.as_str())).unwrap();
-        let error = writes.rollback(TelosError::new(
-            ErrorCode::TelosGitError,
-            "original failure",
-        ));
-        assert_eq!(error.code, ErrorCode::TelosGitError);
-        assert_eq!(error.message, "original failure");
-        assert!(error.hint.unwrap().contains("telos/file.tel"));
+        writes.remove_file(&path).unwrap();
+        writes.write(&path, b"final").unwrap();
+        assert_eq!(writes.fs.read(&path).unwrap(), b"original");
+        assert_eq!(writes.after[&path], Some(b"final".to_vec()));
     }
 }

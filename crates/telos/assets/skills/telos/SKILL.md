@@ -1,33 +1,37 @@
 ---
 name: telos
-description: Route every Telos project request from the project's exact machine state before changing specifications or code.
+description: Route every Telos repository request through persisted plans, approved task scope, execution and recovery.
 ---
 
 # Telos router
 
-Always begin with `telos status --json`. Do not infer state from files, prose, or a previous run. Read the literal `result.state` and route exactly:
+Start with `telos status --json`. Every versioned path is governed: code, tests,
+configuration, dependencies, assets, CI, documentation and specifications.
+Use the CLI for all writes under `telos/`; generated work records are governed
+by their own journal and do not require a recursive plan.
 
-- `coherent`: use `telos-challenger` for a requested behavior/specification change; use `telos-implementer` only for an already approved change.
-- `changing`: inspect `result.changes[*].status` and `obligations`. Route an `open` or `drafted` change to `telos-challenger`; route an `approved` or `implementing` change to `telos-implementer`.
-- `drifted`: stop. Show `result.drift.paths` and `result.drift.token`, then ask the human to choose adopt or revert. Never choose either action for them. After that choice run only `telos adopt` or `telos revert` with `--expected-state <the displayed token>`, then restart with `telos status --json`. A missing or stale token is a hard stop; refresh status and ask again.
+- For a new request, load and invoke `telos-brainstormer`, then
+  `telos-challenger`. Use a small plan for a small change; do not bypass planning.
+- For existing work, run `telos plan resume <PLN-id> --json`. Load the owning
+  skill from the saved phase. Reuse the brief and decisions rather than
+  restarting brainstorming. A fresh agent needs no prior chat transcript.
+- For an approved ready task, load and invoke `telos-implementer`. Start it
+  before modifying repository files. The approved revision authorizes its
+  exact task deltas; covered changes require no additional human approval.
+- For new scope, pause, invoke the brainstormer for the new question only,
+  then the challenger. A new revision needs approval before execution.
+- For `TELOS_RECOVERY_REQUIRED`, run `telos recover` and inspect the recovered
+  plan. `TELOS_RECOVERY_CONFLICT` preserves external bytes: resolve the named
+  conflict before retrying. Never erase the recovery journal to continue.
+- For unplanned changes, inspect their origin. Use an explicit recovery plan
+  to adopt or revert them, or restore unrelated work with existing permission.
+  Do not silently assign them to an approved task or discard user work.
 
-Routing is a mandatory handoff. After selecting a phase, load and invoke the routed skill before any action in that phase. Never execute Challenge or Implement steps yourself without the routed skill.
+Honor `TELOS_PLAN_VERSION_STALE` by refreshing the plan and `TELOS_APPROVAL_STALE`
+by reviewing a new revision. Reuse a mutation's `--request-id` when retrying a
+lost response. An interrupted runner has an unknown outcome: inspect it before
+an explicit retry, and never infer passing evidence from a missing result.
 
-Never edit any path under `telos/` manually, even if the user asks to skip ceremony or promises to regularize later. All Telos mutations go through the CLI. Never load the entire Telos tree when `telos impact`, `telos pack`, `telos map`, or `telos show` can answer the question. Treat discovery as information, not authorization: an impact edge or context-map mapping does not permit changing a supplier context.
-
-Route frozen error codes literally; do not reinterpret messages:
-
-- `TELOS_DRIFT_DETECTED`: stop and ask the human to choose adopt or revert.
-- `TELOS_APPROVAL_STALE`: route back to the challenger for a new diff and human approval.
-- `TELOS_REFERENCE_UNKNOWN`: stop the mutation and resolve the named reference through bounded queries.
-- `TELOS_SCENARIO_RED_EXPECTED`: route to the implementer to record a genuine red witness.
-- `TELOS_TEST_SEALED`: stop; restore the sealed test bytes or record a new red witness before green.
-- `TELOS_TEST_NOT_EXECUTED`: route to the implementer; the scenario's test did not execute (missing report, skipped or unselected test, build failure) and must, before any witness or seal.
-- `TELOS_ORPHAN_CODE`: route to the implementer to bind legitimate code or remove unnecessary code.
-- `TELOS_CONSTRAINT_FAILED`: stop implementation and report the failed constraint.
-- `TELOS_CHANGE_STATE_INVALID`: stop and return to the phase named by `error.hint`.
-- `TELOS_FILE_CLAIMED`: stop; do not overwrite another change's claim.
-- `TELOS_LAYOUT_VIOLATION`: stop; use the canonical owner-derived path through the CLI.
-- `TELOS_CONTEXT_BOUNDARY_VIOLATION`: stop; the requested dependency, vocabulary reference, move, or binding crosses a hard domain boundary.
-
-Stop and ask the human whenever state is missing, unknown, or requires a human decision. Do not continue optimistically.
+Use bounded model queries to resolve references and domain boundaries. A
+context-map relation provides a published contract, not permission to modify
+its supplier. Preserve scenario witness, sealed-test and ownership gates.

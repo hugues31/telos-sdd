@@ -29,7 +29,6 @@ use crate::error::{ErrorCode, TelosError};
 use crate::git::{GitRepo, Oid};
 use crate::ids::{ChangeId, RepoPath};
 use crate::model::{Evidence, TelosModel};
-use crate::repo_fs::RepoFs;
 use crate::workspace::Workspace;
 
 pub const LOCK_VERSION: u32 = 3;
@@ -156,11 +155,6 @@ impl Lock {
                 format!("failed to write {}: {e}", path.display()),
             )
         })
-    }
-
-    pub(crate) fn write_to_workspace(&self, ws: &Workspace) -> Result<(), TelosError> {
-        RepoFs::open(&ws.repo_root)?
-            .write(&RepoPath::new("telos/telos.lock"), self.render().as_bytes())
     }
 
     pub fn render(&self) -> String {

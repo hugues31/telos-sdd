@@ -57,10 +57,18 @@ fn map_prints_and_stages_the_complete_context_map() {
     assert_eq!(json_stdout(&shown)["result"]["dependencies"], json!([]));
 
     open_change(tmp.path());
-    let staged = telos(tmp.path(), &["map", "--change", "CHG-0001", "--json"])
-        .write_stdin("context-map {\n}\n")
-        .output()
-        .unwrap();
+    let staged = telos(
+        tmp.path(),
+        &[
+            "map",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .write_stdin("context-map {\n}\n")
+    .output()
+    .unwrap();
     assert!(staged.status.success(), "map staging failed: {staged:?}");
     assert_eq!(
         json_stdout(&staged)["result"]["claims"],
@@ -228,7 +236,12 @@ fn stage_edit_int_0042(dir: &std::path::Path, payload: &str) {
     let out = telos(
         dir,
         &[
-            "edit", "intent", "INT-0042", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0042",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
     )
     .write_stdin(payload)
@@ -238,9 +251,17 @@ fn stage_edit_int_0042(dir: &std::path::Path, payload: &str) {
 }
 
 fn approve(dir: &std::path::Path) {
-    let out = telos(dir, &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        dir,
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
     assert!(out.status.success(), "approving the change failed: {out:?}");
 }
 
@@ -252,36 +273,45 @@ fn bind(dir: &std::path::Path, path: &str) {
 }
 
 fn stage_new_intent(dir: &std::path::Path) -> String {
-    let out = telos(dir, &["add", "intent", "--change", "CHG-0001", "--json"])
-        .write_stdin(
-            json!({
-                "owner": "billing/settlement",
-                "title": "Invoices can be cancelled",
-                "status": "active",
-                "telos": "Customers need to void invoices raised in error.",
-                "statement": {
-                    "template": "event-driven",
-                    "when": "PaymentReceived",
-                    "on": "Invoice",
-                    "action": "set Invoice.state = cancelled",
-                },
-                "refines": [],
-                "requires": [],
-                "excludes": [],
-                "scenarios": [{
-                    "title": "a payment cancels a disputed invoice",
-                    "given": [{
-                        "notion": "Invoice",
-                        "fields": {"state": "open", "balance": "50.00 EUR"},
-                    }],
-                    "when": {"notion": "PaymentReceived", "fields": {"amount": "50.00 EUR"}},
-                    "then": ["Invoice.state == cancelled"],
+    let out = telos(
+        dir,
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .write_stdin(
+        json!({
+            "owner": "billing/settlement",
+            "title": "Invoices can be cancelled",
+            "status": "active",
+            "telos": "Customers need to void invoices raised in error.",
+            "statement": {
+                "template": "event-driven",
+                "when": "PaymentReceived",
+                "on": "Invoice",
+                "action": "set Invoice.state = cancelled",
+            },
+            "refines": [],
+            "requires": [],
+            "excludes": [],
+            "scenarios": [{
+                "title": "a payment cancels a disputed invoice",
+                "given": [{
+                    "notion": "Invoice",
+                    "fields": {"state": "open", "balance": "50.00 EUR"},
                 }],
-            })
-            .to_string(),
-        )
-        .output()
-        .unwrap();
+                "when": {"notion": "PaymentReceived", "fields": {"amount": "50.00 EUR"}},
+                "then": ["Invoice.state == cancelled"],
+            }],
+        })
+        .to_string(),
+    )
+    .output()
+    .unwrap();
     assert!(out.status.success(), "staging an intent failed: {out:?}");
     json_stdout(&out)["result"]["id"]
         .as_str()
@@ -306,7 +336,12 @@ fn stage_new_scenario(dir: &std::path::Path) -> String {
     let out = telos(
         dir,
         &[
-            "edit", "intent", "INT-0042", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0042",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
     )
     .write_stdin(
@@ -413,7 +448,11 @@ fn assert_unknown_pack(dir: &std::path::Path, target: &str, kind: &str, hint: &s
 fn rejects_non_intent_and_non_scenario_targets() {
     let tmp = with_fixture();
 
-    for target in ["NOT:billing/Invoice", "CON-0003", "CHG-0001"] {
+    for target in [
+        "NOT:billing/Invoice",
+        "CON-0003",
+        "CHG-00000000-0000-0000-0000-000000000001",
+    ] {
         let out = telos(tmp.path(), &["pack", target, "--json"])
             .output()
             .unwrap();
@@ -467,7 +506,10 @@ fn pack_reads_an_edited_intent_from_its_owning_post_overlay_model() {
 
     let pack = pack_result(tmp.path(), "INT-0042");
 
-    assert_eq!(pack["change"], json!("CHG-0001"));
+    assert_eq!(
+        pack["change"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
     assert!(
         pack["canonical"]
             .as_str()
@@ -486,7 +528,10 @@ fn pack_reads_an_added_intent_from_its_owning_post_overlay_model() {
     let pack = pack_result(tmp.path(), &id);
 
     assert_eq!(pack["id"], json!(id));
-    assert_eq!(pack["change"], json!("CHG-0001"));
+    assert_eq!(
+        pack["change"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
     assert_eq!(pack["scenarios"][0]["proved"], json!(false));
     assert!(
         pack["canonical"]
@@ -533,7 +578,12 @@ fn pack_rejects_a_scenario_removed_from_an_edited_intent() {
     let out = telos(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
     )
     .write_stdin(r#"{"status":"draft","scenarios":[]}"#)
@@ -590,7 +640,10 @@ fn pack_folds_a_green_test_witness_into_proves_and_scenario_state() {
     );
 
     let pack = pack_result(tmp.path(), "INT-0042");
-    assert_eq!(pack["change"], json!("CHG-0001"));
+    assert_eq!(
+        pack["change"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
     assert_eq!(
         pack["scenarios"][1],
         json!({

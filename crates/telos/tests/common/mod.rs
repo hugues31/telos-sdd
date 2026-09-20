@@ -87,13 +87,8 @@ pub fn repo() -> TempDir {
 /// starting point for every command that needs an initialized, coherent
 /// project.
 ///
-/// The seal is the real one, produced by running the real binary: `telos
-/// change reconcile --full` is exactly the command a user reaches for to
-/// seal a spec tree that exists but has no lock. The fixture is therefore
-/// built through the public command rather than by calling
-/// `telos_core::lock::seal` behind the CLI's back. The full flow (`init`,
-/// `change open`, `add`, `test`, `bind`, and `reconcile`) is covered by the
-/// end-to-end tests that drive it through the public CLI.
+/// Domain fixtures explicitly observe a synthetic baseline through the core
+/// initializer. Native governance and reconstruction tests use the public CLI.
 pub fn with_fixture() -> TempDir {
     with_fixture_mut(|_| {})
 }
@@ -123,9 +118,7 @@ pub fn with_empty_billing_domain() -> TempDir {
         fs::write(target, bytes).unwrap();
     }
 
-    telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
-        .assert()
-        .success();
+    seal_fixture(tmp.path());
     tmp
 }
 
@@ -144,24 +137,26 @@ pub fn with_fixture_mut(mutate: impl FnOnce(&Path)) -> TempDir {
     mutate(tmp.path());
     complete_fixture_for_sealing(tmp.path());
 
-    let out = telos(tmp.path(), &["change", "reconcile", "--full", "--json"])
-        .output()
-        .expect("failed to run `telos change reconcile --full`");
-    // Loudly: a harness that hands back an unsealed fixture would make every
-    // test built on it fail somewhere else, for reasons that look nothing
-    // like “the fixture never got sealed”.
-    let ok = serde_json::from_slice::<serde_json::Value>(&out.stdout)
-        .map(|envelope| envelope["ok"] == serde_json::Value::Bool(true))
-        .unwrap_or(false);
-    assert!(
-        ok,
-        "sealing the fixture with `telos change reconcile --full` failed:\n\
-         stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    seal_fixture(tmp.path());
 
     tmp
+}
+
+/// Establish a fresh observed baseline for a synthetic test corpus. Tests of
+/// initialization itself use the public CLI; this builder owns every byte.
+fn seal_fixture(root: &Path) {
+    let ledger = root.join(telos_core::plans::ledger::PATH);
+    if ledger.exists() {
+        fs::remove_file(ledger).unwrap();
+    }
+    let plans = root.join("telos/plans");
+    if plans.exists() {
+        fs::remove_dir_all(plans).unwrap();
+    }
+    let ws = telos_core::workspace::Workspace::discover(root).unwrap();
+    let git = telos_core::git::GitRepo::discover(root).unwrap();
+    telos_core::reconcile::reconcile_full(&ws, &git).unwrap();
+    telos_core::plans::ledger::bootstrap(root).unwrap();
 }
 
 /// Upgrades the intentionally partial spec-only corpus to a sealable tree.
@@ -243,13 +238,230 @@ pub fn break_int_0042_in_two_ways(root: &Path) {
     fs::write(&path, content).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
+/// Domain command tests share explicit, broad fixture plans. Governance tests
+/// use `raw_telos` to exercise missing approval and narrow path contracts.
+pub fn fixture_plan(
+    root: &Path,
+    title: &str,
+    id: telos_core::ids::ChangeId,
+    recovery: bool,
+) -> Result<String, telos_core::error::TelosError> {
+    use telos_core::plans::{actions, model::*, store};
+    let opened = store::open(root, title, &telos_core::work::new_id("REQ")?)?;
+    let plan = opened["plan"].as_str().unwrap().to_owned();
+    let definition = Definition {
+        title: title.into(),
+        request: title.into(),
+        goal: "Exercise the domain command contract".into(),
+        success_criteria: vec!["Command assertions hold".into()],
+        scope: vec!["**".into()],
+        brief: Brief {
+            summary: "Synthetic domain test fixture".into(),
+            brainstormed: true,
+            ..Default::default()
+        },
+        tasks: vec![Task {
+            id: "TSK-001".into(),
+            change_id: Some(id.to_string()),
+            title: title.into(),
+            kind: if recovery {
+                TaskKind::Recovery
+            } else {
+                TaskKind::Behavior
+            },
+            allowed_paths: vec!["**".into()],
+            acceptance: vec!["Command assertions hold".into()],
+            validation: vec![Validation::Review {
+                name: "fixture-review".into(),
+            }],
+            ..Default::default()
+        }],
+        validation: vec![Validation::Review {
+            name: "final-review".into(),
+        }],
+    };
+    actions::revise(
+        root,
+        &plan,
+        definition,
+        &telos_core::work::new_id("REQ")?,
+        None,
+    )?;
+    Ok(plan)
+}
+
+fn next_fixture_change(root: &Path) -> telos_core::ids::ChangeId {
+    use telos_core::ids::ChangeId;
+    let ws = telos_core::workspace::Workspace::discover(root).unwrap();
+    let mut next = telos_core::counters::read_counters(&ws)
+        .unwrap_or_default()
+        .change as u128;
+    if let Ok(plans) = telos_core::plans::store::list(root) {
+        for plan in plans {
+            for task in plan.view().unwrap().tasks {
+                if let Some(id) = task.change.and_then(|id| id.parse::<ChangeId>().ok())
+                    && id.0 < 100000
+                {
+                    next = next.max(id.0);
+                }
+            }
+        }
+    }
+    for id in telos_core::changes::list_change_ids(&ws).unwrap_or_default() {
+        if id.0 < 100000 {
+            next = next.max(id.0);
+        }
+    }
+    ChangeId(next + 1)
+}
+
+fn approve_fixture_change(root: &Path, id: &str) -> Result<(), telos_core::error::TelosError> {
+    use telos_core::plans::{actions, execution, store};
+    let (plan, task) = store::for_change(root, id)?;
+    if plan.view()?.approved {
+        return Ok(());
+    }
+    actions::import_change(
+        root,
+        &plan.id,
+        &task.definition.id,
+        &telos_core::work::new_id("REQ")?,
+        None,
+    )?;
+    let plan = store::read(root, &plan.id)?;
+    actions::approve(
+        root,
+        &plan.id,
+        &plan.definition_digest()?,
+        &telos_core::work::new_id("REQ")?,
+        None,
+    )?;
+    execution::start(
+        root,
+        &plan.id,
+        &task.definition.id,
+        &telos_core::work::new_id("REQ")?,
+        None,
+    )?;
+    Ok(())
+}
+
+pub fn finish_fixture_task(root: &Path) {
+    use telos_core::plans::{execution, ledger, store};
+    if let Ok(Some((plan, task))) = store::active(root)
+        && ledger::receipts(root)
+            .is_ok_and(|rs| rs.iter().any(|r| Some(&r.id) == task.change.as_ref()))
+    {
+        let req = || telos_core::work::new_id("REQ").unwrap();
+        let _ = execution::verify(
+            root,
+            &plan.id,
+            Some(&task.definition.id),
+            "fixture-review",
+            Some("Previous domain assertions passed"),
+            false,
+            &req(),
+            None,
+        );
+        let _ = execution::finish(root, &plan.id, &task.definition.id, &req(), None);
+    }
+}
+
+fn recovery_fixture(
+    root: &Path,
+    into: Option<&str>,
+    start: bool,
+) -> Result<String, telos_core::error::TelosError> {
+    use telos_core::plans::{actions, execution, ledger, model::*, store};
+    if !root.join(ledger::PATH).exists() {
+        ledger::bootstrap(root)?;
+    }
+    finish_fixture_task(root);
+    let req = || telos_core::work::new_id("REQ").unwrap();
+    let (plan, change) = if let Some(id) = into {
+        let (plan, task) = store::for_change(root, id)?;
+        let mut definition = plan.revision().definition.clone();
+        definition
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task.definition.id)
+            .unwrap()
+            .kind = TaskKind::Recovery;
+        actions::revise(root, &plan.id, definition, &req(), None)?;
+        (plan.id, id.to_owned())
+    } else {
+        let plan = fixture_plan(
+            root,
+            "Recover the test fixture",
+            next_fixture_change(root),
+            true,
+        )?;
+        let prepared = actions::prepare(root, &plan, "TSK-001", &req(), None)?;
+        (
+            plan,
+            prepared["result"]["change"].as_str().unwrap().to_owned(),
+        )
+    };
+    if start {
+        let p = store::read(root, &plan)?;
+        actions::approve(root, &plan, &p.definition_digest()?, &req(), None)?;
+        execution::start(root, &plan, "TSK-001", &req(), None)?;
+    }
+    Ok(change)
+}
+
+pub fn raw_telos(dir: &Path, args: &[&str]) -> assert_cmd::Command {
+    let mut cmd = assert_cmd::Command::cargo_bin("telos").unwrap();
+    cmd.current_dir(dir).args(args);
+    cmd
+}
+
 /// The `telos` binary under test, ready to run in `dir`.
 pub fn telos(dir: &Path, args: &[&str]) -> assert_cmd::Command {
-    let mut cmd =
-        assert_cmd::Command::cargo_bin("telos").expect("`cargo test` builds the `telos` binary");
-    cmd.current_dir(dir);
-    cmd.args(args);
-    cmd
+    let mut owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+    if args.starts_with(&["change", "reconcile"])
+        && args.contains(&"--full")
+        && !matches!(telos_core::plans::store::active(dir), Ok(Some(_)))
+    {
+        let _ = recovery_fixture(dir, None, true);
+    }
+    if dir.join(telos_core::plans::ledger::PATH).exists() {
+        if args.first() == Some(&"adopt") {
+            let into = args
+                .iter()
+                .position(|a| *a == "--into")
+                .and_then(|i| args.get(i + 1))
+                .copied();
+            if let Ok(change) = recovery_fixture(dir, into, false)
+                && into.is_none()
+            {
+                owned.extend(["--into".into(), change]);
+            }
+        } else if args.first() == Some(&"revert") {
+            let _ = recovery_fixture(dir, None, true);
+        } else if args.starts_with(&["change", "open"]) && args.len() > 2 {
+            finish_fixture_task(dir);
+            if let Ok(plan) = fixture_plan(dir, args[2], next_fixture_change(dir), false) {
+                owned.extend(["--plan".into(), plan, "--task".into(), "TSK-001".into()]);
+            }
+        } else if args.starts_with(&["change", "approve"]) && args.len() > 2 {
+            let ws = telos_core::workspace::Workspace::discover(dir).unwrap();
+            if let Ok(id) = args[2].parse()
+                && let Ok(change) = telos_core::changes::read_change(&ws, id)
+            {
+                let expected = args
+                    .iter()
+                    .position(|a| *a == "--expected-digest")
+                    .and_then(|i| args.get(i + 1));
+                if !change.ops.is_empty() && expected.is_none_or(|d| **d == change.ops_digest()) {
+                    finish_fixture_task(dir);
+                    let _ = approve_fixture_change(dir, args[2]);
+                }
+            }
+        }
+    }
+    let refs: Vec<_> = owned.iter().map(String::as_str).collect();
+    raw_telos(dir, &refs)
 }
 
 /// The `billing` corpus, which lives in `telos-core`'s test tree.
@@ -273,7 +485,7 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-fn git(cwd: &Path, args: &[&str]) {
+pub fn git(cwd: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -385,6 +597,11 @@ pub fn sealed_scenarios_passed() -> String {
 /// is written too. Call before the fixture seals.
 pub fn configure_report(root: &Path, policy: &str) {
     install_fake_runner(root);
+    fs::write(
+        root.join(".gitignore"),
+        "telos-report.xml\n.report-fixture.xml\n.report-silent\n",
+    )
+    .unwrap();
     write_report_fixture(root, &sealed_scenarios_passed());
     // The corpus test file is a placeholder; give the sealed SCN-0107
     // target a real function so `rebuild status` can resolve it.

@@ -241,7 +241,12 @@ fn spec_files_excludes_the_lock_file_and_the_changes_directory() {
     let tmp = copied_corpus();
     fs::write(tmp.path().join("telos/telos.lock"), "").unwrap();
     fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
-    fs::write(tmp.path().join("telos/changes/CHG-0001.tel"), "").unwrap();
+    fs::write(
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"),
+        "",
+    )
+    .unwrap();
 
     let ws = Workspace::discover(tmp.path()).unwrap();
     let files: Vec<String> = ws

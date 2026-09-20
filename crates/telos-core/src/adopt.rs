@@ -57,7 +57,6 @@ use crate::model::StagedOp;
 use crate::model::change::{
     capability_path, context_path, owned_constraint_path, owned_intent_path, owned_notion_path,
 };
-use crate::repo_fs::RepoFs;
 use crate::state::{DriftEntry, DriftKind};
 use crate::syntax::{
     parse_capability_file, parse_context_file, parse_context_map_file, parse_owned_constraint_file,
@@ -269,7 +268,8 @@ pub fn revert(
 ) -> Result<RevertOutcome, TelosError> {
     let mut restored = Vec::new();
     let mut deleted = Vec::new();
-    let repo_fs = RepoFs::open(&ws.repo_root)?;
+    let writer = crate::transaction::Writer::acquire(&ws.repo_root)?;
+    let mut writes = Vec::new();
 
     for entry in drift {
         entry.path.validate()?;
@@ -281,11 +281,11 @@ pub fn revert(
                     .or_else(|| lock.code.get(&entry.path))
                     .ok_or_else(|| unsealed(&entry.path))?;
                 let bytes = git.cat_blob(oid)?;
-                repo_fs.write(&entry.path, &bytes)?;
+                writes.push((entry.path.clone(), Some(bytes)));
                 restored.push(entry.path.clone());
             }
             DriftKind::Untracked => {
-                repo_fs.remove_file(&entry.path)?;
+                writes.push((entry.path.clone(), None));
                 deleted.push(entry.path.clone());
             }
         }
@@ -293,6 +293,7 @@ pub fn revert(
 
     restored.sort();
     deleted.sort();
+    writer.publish(writes)?;
     Ok(RevertOutcome { restored, deleted })
 }
 

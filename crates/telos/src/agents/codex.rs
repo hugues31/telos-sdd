@@ -22,24 +22,10 @@ Do not rely on the generated Codex guard or rules until setup is reviewed and tr
 pub(super) const RTK_RULES: &str = include_str!("../../assets/codex-rtk.rules");
 
 const RULES_BLOCK: &str = r#"# telos-sdd:start
-# The guard derives current repository context through supported hook messages;
-# these static native rules alone own the Codex permission prompts.
 prefix_rule(
-    pattern = ["telos", "change", "approve"],
+    pattern = ["telos", "plan", "approve"],
     decision = "prompt",
-    justification = "Approve only the exact --expected-digest displayed by `telos change diff` immediately before this command",
-)
-
-prefix_rule(
-    pattern = ["telos", "adopt"],
-    decision = "prompt",
-    justification = "Adopting the exact --expected-state drift scope is a human decision",
-)
-
-prefix_rule(
-    pattern = ["telos", "revert"],
-    decision = "prompt",
-    justification = "Reverting the exact --expected-state drift scope is a human decision",
+    justification = "Approve the exact plan revision digest and its repository-wide scope",
 )
 # telos-sdd:end"#;
 

@@ -15,7 +15,7 @@
 </p>
 
 Telos is a local CLI that keeps requirements, scenarios, code links, and test
-evidence together in Git. Review changes before implementation, give coding
+evidence together in Git. Approve resumable plans before implementation, give coding
 agents focused context, and let configured CI detect drift from the approved
 state.
 
@@ -36,10 +36,11 @@ verified implementation of it.
 
 - **Durable intent** versioned with the repository.
 - **Focused context** for developers and coding agents.
-- **Reviewable changes** approved before implementation.
+- **Resumable plans** with one approval for their scope and durable task progress.
+- **Traceable changes** linking files and domain entities to dated plan receipts.
 - **Test evidence** linked to the same test failing, then passing in strict TDD
   mode.
-- **Drift detection** across specifications and production code.
+- **Repository governance** covering code, tests, documentation and configuration.
 
 ## How it works
 
@@ -70,7 +71,7 @@ Then initialize Telos inside an existing Git repository:
 cd my-project
 telos init --agents claude,codex --ci github
 telos status
-telos check --sealed
+telos check --sealed --planned
 telos view --port 3000 --open
 ```
 
@@ -96,46 +97,52 @@ release with its agent runner.
 
 ## A typical development loop
 
-These IDs come from the [Billing demo](demo/billing) and assume its intent and
-scenario exist. Use your project's IDs; never edit `telos/` directly.
+Every change starts with a native plan. The generated router calls the dedicated
+brainstorming skill to clarify the request, then prepares a reviewable plan.
+Approve its scope once and let the agent execute the covered tasks.
 
 ```console
-# Open and stage.
-telos change open "settle an invoice after payment"
-printf '%s\n' '{"status":"active"}' \
-  | telos edit intent INT-0042 --change CHG-0001
+telos plan open "settle an invoice after payment" --json
+telos plan edit "$PLAN" < /tmp/plan-definition.json
+telos plan diff "$PLAN" --json
+telos plan approve "$PLAN" --expected-digest '<digest from plan diff>'
+telos plan task start "$PLAN" TSK-001 --json
 
-# Review and approve.
-telos change diff CHG-0001
-telos change approve CHG-0001 --expected-digest '<digest from diff>'
-
-# Build and prove (strict TDD).
-telos pack INT-0042
-telos test SCN-0107
-telos bind src/billing/invoice.rs INT-0042
-telos test SCN-0107
-
-# Reconcile and verify.
-telos change reconcile CHG-0001
-telos check --sealed
+# Implement and prove the approved task, then save the next action.
+telos plan checkpoint "$PLAN" --summary "Implementation ready" --next-action "Run validation"
+telos change reconcile "$CHANGE"
+telos plan verify "$PLAN" --task TSK-001 tests
+telos plan task finish "$PLAN" TSK-001
+telos plan verify "$PLAN" final
+telos plan complete "$PLAN"
+telos check --sealed --planned
 ```
 
-Staging commands accept structured input on standard input. See the
-[Billing demo](demo/billing) for the complete executable protocol. Every
-command also supports a stable `--json` envelope for agent and CI automation.
+`$PLAN` and `$CHANGE` are returned UUID identities. Validators are defined in the
+plan. The [native plan guide](docs/plans.md) includes a complete definition,
+behavioral delta preparation, recovery, branch integration and CI setup. The
+[Billing demo](demo/billing) exercises the public reconstruction protocol.
+
+Plans and progress are versioned `.tel` records. After an interruption, run
+`telos plan resume "$PLAN" --json`; another agent can continue without the old
+chat. The dashboard exposes **View plan**, task completion percentages and
+history links. A scope change requires a new approved revision.
 
 Set `[test] report` in `telos/telos.toml` to the JUnit XML file your runner
 writes (and `{report}` in `[test] cmd` to tell it where): every green then
 means a test named after the scenario executed and passed, a run that
 executed nothing is refused, and `telos status` reports `proof_evidence`.
 
-If `telos status` reports later drift, use `telos adopt` to capture it or
-`telos revert` to restore the sealed state.
+If `telos status` reports later drift, prepare an explicit recovery plan before
+adopting or restoring it. Initialization observes existing files; it does not
+claim they were implemented at the initialization date.
 
 ## A small mental model
 
 | Term | Meaning |
 |---|---|
+| **Plan** | An approved scope, dependency graph, validations and durable progress. |
+| **Receipt** | The dated record connecting applied changes to a plan and task. |
 | **Context** | A domain boundary that owns vocabulary and behavior. |
 | **Capability** | A responsibility the context provides. |
 | **Notion** | A named domain concept and its attributes. |
@@ -158,6 +165,7 @@ production-file boundaries deterministically.
 
 ## Reference
 
+- [Native plans](docs/plans.md): approval, resumption, history and CI.
 - [CLI contracts](docs/contracts.md): schemas, errors, and safety boundaries.
 - [Billing demo](demo/billing): the complete reconstruction protocol.
 - [Telos Tic-tac-toe](https://github.com/hugues31/telos-tictactoe): a Python
@@ -165,7 +173,8 @@ production-file boundaries deterministically.
 - [Releases](https://github.com/hugues31/telos-sdd/releases): prebuilt archives.
 
 Git must be available on `PATH`. Generated CI also requires a published Telos
-binary release and separately configured branch protection.
+binary release and separately configured branch protection. Establish the initial
+bootstrap as the trusted baseline before enabling the generated required check.
 
 <details>
 <summary><strong>Build from source</strong></summary>

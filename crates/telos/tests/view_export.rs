@@ -341,11 +341,11 @@ fn export_never_replaces_an_existing_destination_symlink() {
 fn two_exports_have_identical_sorted_paths_and_bytes() {
     let tmp = with_fixture();
 
-    assert!(export(tmp.path(), "site-a").status.success());
-    assert!(export(tmp.path(), "site-b").status.success());
-
-    let left = tmp.path().join("site-a");
-    let right = tmp.path().join("site-b");
+    let destinations = tempfile::tempdir().unwrap();
+    let left = destinations.path().join("site-a");
+    let right = destinations.path().join("site-b");
+    assert!(export(tmp.path(), left.to_str().unwrap()).status.success());
+    assert!(export(tmp.path(), right.to_str().unwrap()).status.success());
     let paths = exported_paths(&left);
     assert_eq!(paths, exported_paths(&right));
     for path in paths {

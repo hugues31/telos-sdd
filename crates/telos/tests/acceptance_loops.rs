@@ -183,6 +183,7 @@ fn run_ok(dir: &Path, args: &[&str]) -> Value {
         "expected `telos {}` to succeed, got: {envelope}",
         args.join(" ")
     );
+    common::finish_fixture_task(dir);
     envelope
 }
 
@@ -622,13 +623,18 @@ fn loop_merge() {
 
     // --- Branch B: touch INT-0042 the same way, from the same starting
     // point. Change ids are per-branch, so branch B seals its own
-    // `CHG-0001` too and `sealed_by` merges cleanly; what makes the two
+    // `CHG-00000000-0000-0000-0000-000000000001` too and `sealed_by` merges cleanly; what makes the two
     // `telos.lock`s conflict is `spec_digest` -- rewritten wholesale by
     // every reconcile -- plus the `[spec]` OID lines of the touched
     // intents, which sit close enough together for git to fold them into
     // one hunk.
     git(dir, &["checkout", &base]);
     git(dir, &["checkout", "-b", "branch-b"]);
+    // Synthetic fixtures reserve stable IDs; reserve a distinct branch range.
+    let ws = telos_core::workspace::Workspace::discover(dir).unwrap();
+    let mut counters = telos_core::counters::read_counters(&ws).unwrap();
+    counters.change = 100;
+    telos_core::counters::write_counters(&ws, &counters).unwrap();
     let change_b = run_ok(dir, &["change", "open", "tighten INT-0042", "--json"]);
     let change_b_id = change_b["result"]["id"].as_str().unwrap().to_string();
     assert_state(dir, "changing");
@@ -656,6 +662,36 @@ fn loop_merge() {
 
     // --- Merge: git conflicts on telos.lock, and on nothing else. ----------
     git(dir, &["checkout", "branch-a"]);
+    let integration = common::fixture_plan(
+        dir,
+        "Integrate branch B",
+        telos_core::ids::ChangeId(200),
+        false,
+    )
+    .unwrap();
+    let plan = telos_core::plans::store::read(dir, &integration).unwrap();
+    let mut definition = plan.revision().definition.clone();
+    definition.tasks[0].kind = telos_core::plans::model::TaskKind::Integration;
+    telos_core::plans::actions::revise(
+        dir,
+        &integration,
+        definition,
+        "integration-definition",
+        None,
+    )
+    .unwrap();
+    let plan = telos_core::plans::store::read(dir, &integration).unwrap();
+    telos_core::plans::actions::approve(
+        dir,
+        &integration,
+        &plan.definition_digest().unwrap(),
+        "integration-approval",
+        None,
+    )
+    .unwrap();
+    telos_core::plans::execution::start(dir, &integration, "TSK-001", "integration-start", None)
+        .unwrap();
+
     let merge_status = Command::new("git")
         .args(["merge", "branch-b"])
         .current_dir(dir)
@@ -670,10 +706,24 @@ fn loop_merge() {
     // text files that merge like any other, so a conflict on them is rare and
     // local. Here there is none at all -- each branch edited a different
     // intent -- and the only unmerged path is the derived one.
-    assert_eq!(
-        unmerged_paths(dir),
-        vec!["telos/telos.lock".to_string()],
-        "only the derived lock may conflict; the spec files merge like any other text"
+    assert!(unmerged_paths(dir).contains(&"telos/ledger.tel".to_owned()));
+    assert!(unmerged_paths(dir).iter().all(|p| p == "telos/ledger.tel"
+        || p == "telos/telos.lock"
+        || p == "telos/changes/counters.toml"));
+    for path in unmerged_paths(dir) {
+        git(dir, &["checkout", "--ours", "--", &path]);
+        git(dir, &["add", "--", &path]);
+    }
+    run_ok(
+        dir,
+        &[
+            "plan",
+            "integrate",
+            &integration,
+            "--source",
+            "branch-b",
+            "--json",
+        ],
     );
     // Both branches' edits survived the merge: nothing was picked over
     // anything else.
@@ -700,7 +750,11 @@ fn loop_merge() {
     // markers in it -- so it stays red. (`status` answers the same way for
     // the same reason, which is why this phase is asserted here and not
     // through `status`.)
-    run_err(dir, &["check", "--sealed", "--json"], "TELOS_PARSE_ERROR");
+    run_err(
+        dir,
+        &["check", "--sealed", "--json"],
+        "TELOS_HISTORY_CONFLICT",
+    );
 
     // --- Reconcile --full -------------------------------------------------------
     // full reconciliation: total integrity revalidation, every constraint re-checked, every
@@ -775,6 +829,7 @@ fn loop_projection() {
     let export_payload = data_payload(
         &fs::read_to_string(tmp.path().join("site/data.js")).expect("read exported data.js"),
     );
+    fs::remove_dir_all(tmp.path().join("site")).unwrap();
     assert_eq!(export_payload["meta"]["mode"], "export");
     assert_eq!(export_payload["snapshot"]["dashboard"]["state"], "coherent");
     assert_eq!(

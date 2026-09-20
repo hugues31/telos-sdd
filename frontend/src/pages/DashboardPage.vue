@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 
+import PlanCard from '../components/PlanCard.vue';
 import EmptyState from '../components/EmptyState.vue';
 import MetricCard from '../components/MetricCard.vue';
 import ProgressBar from '../components/ProgressBar.vue';
@@ -8,6 +9,8 @@ import StatusBadge from '../components/StatusBadge.vue';
 import { snapshot } from '../data/snapshot';
 import type { IntentStatus, ProjectState } from '../data/types';
 
+const activePlans = computed(() => snapshot.value.snapshot.plans.filter(p => !['completed', 'cancelled'].includes(p.state)));
+const unplanned = computed(() => snapshot.value.snapshot.unplanned);
 const dashboard = computed(() => snapshot.value.snapshot.dashboard);
 const coverage = computed(() => snapshot.value.snapshot.coverage);
 const intents = computed(() => snapshot.value.snapshot.intents);
@@ -84,6 +87,10 @@ const currentState = computed(() => stateInfo[dashboard.value.state]);
         </li>
       </ul>
     </section>
+
+    <section v-if="unplanned.length" role="alert"><h2>Unplanned changes</h2><ul><li v-for="path in unplanned" :key="path"><code>{{ path }}</code></li></ul></section>
+    <section v-if="activePlans.length"><h2>Work in progress</h2><PlanCard v-for="plan in activePlans" :key="plan.id" :plan="plan" /></section>
+    <p><RouterLink to="/plans">All plans and completed work →</RouterLink></p>
 
     <EmptyState
       v-if="isEmpty"

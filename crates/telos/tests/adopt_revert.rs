@@ -22,12 +22,9 @@
 //!   is claimed by the change that adopted it, so it stops being drift
 //!   and becomes the change in progress. It is the reconcile, not the adopt,
 //!   that reseals.
-//! - **Only the change that adopted a drift may seal it.** Some *other*
-//!   change reconciling meanwhile is allowed to run -- and carries the
-//!   adopted path over at its previously sealed OID rather than folding
-//!   bytes nobody approved into the new lock. The carry-over section below
-//!   pins that end to end, since it is where an out-of-protocol edit would
-//!   otherwise get laundered into a `coherent` project.
+//! - **Recovery requires approved ownership.** An unrelated plan cannot
+//!   authorize unresolved adopted bytes. The recovery plan must reconcile
+//!   them first; a separately approved full recovery also records attribution.
 
 mod common;
 
@@ -63,7 +60,10 @@ fn adopt_pairs_a_missing_and_untracked_owned_entity_into_a_move() {
             "telos/contexts/billing/capabilities/settlement/intents/INT-0017.tel"
         ])
     );
-    let change = read(tmp.path(), "telos/changes/CHG-0001.tel");
+    let change = read(
+        tmp.path(),
+        "telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel",
+    );
     assert!(
         change.contains("op move from billing/invoicing to billing/settlement intent INT-0017")
     );
@@ -120,6 +120,7 @@ fn run_ok(dir: &Path, args: &[&str]) -> Value {
         "expected `telos {}` to succeed, got: {envelope}",
         args.join(" ")
     );
+    common::finish_fixture_task(dir);
     envelope
 }
 
@@ -273,23 +274,27 @@ fn adopting_a_modified_notion_stages_an_edit_and_reconcile_canonicalizes_it() {
     assert_eq!(envelope["command"], json!("adopt"));
     assert_eq!(
         envelope["result"],
-        json!({ "change": "CHG-0001", "ops": 1, "paths": [INVOICE] })
+        json!({ "change": "CHG-00000000-0000-0000-0000-000000000001", "ops": 1, "paths": [INVOICE] })
     );
+    let (plan, task) =
+        telos_core::plans::store::for_change(dir, "CHG-00000000-0000-0000-0000-000000000001")
+            .unwrap();
     assert_eq!(
         envelope["next_actions"],
         json!([
-            "telos change diff CHG-0001",
-            "telos change approve CHG-0001"
+            "telos change diff CHG-00000000-0000-0000-0000-000000000001".to_string(),
+            format!("telos plan task import {} {}", plan.id, task.definition.id),
+            format!("telos plan diff {}", plan.id),
         ])
     );
     // The adopted path is claimed now, so it is no longer drift.
     assert_eq!(state(dir)["state"], json!("changing"));
     assert_eq!(
-        diff_ops(dir, "CHG-0001"),
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000001"),
         vec![json!({ "op": "edit", "entity": "notion", "key": "billing/Invoice" })]
     );
 
-    approve_and_reconcile(dir, "CHG-0001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
 
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert_eq!(
@@ -314,14 +319,14 @@ fn adopting_a_deleted_constraint_stages_a_remove_and_reconcile_drops_it() {
 
     assert_eq!(
         result,
-        json!({ "change": "CHG-0001", "ops": 1, "paths": [CON_0003] })
+        json!({ "change": "CHG-00000000-0000-0000-0000-000000000001", "ops": 1, "paths": [CON_0003] })
     );
     assert_eq!(
-        diff_ops(dir, "CHG-0001"),
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000001"),
         vec![json!({ "op": "remove", "entity": "constraint", "key": "CON-0003" })]
     );
 
-    approve_and_reconcile(dir, "CHG-0001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
 
     let state = state(dir);
     assert_eq!(state["state"], json!("coherent"));
@@ -350,14 +355,14 @@ fn adopting_an_untracked_notion_stages_an_add() {
 
     assert_eq!(
         result,
-        json!({ "change": "CHG-0001", "ops": 1, "paths": [ROGUE] })
+        json!({ "change": "CHG-00000000-0000-0000-0000-000000000001", "ops": 1, "paths": [ROGUE] })
     );
     assert_eq!(
-        diff_ops(dir, "CHG-0001"),
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000001"),
         vec![json!({ "op": "add", "entity": "notion", "key": "billing/Rogue" })]
     );
 
-    approve_and_reconcile(dir, "CHG-0001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
 
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert_eq!(read(dir, ROGUE), ROGUE_TEL);
@@ -388,18 +393,22 @@ fn adopting_a_modified_telos_toml_stages_an_accept_and_reconcile_seals_it() {
 
     assert_eq!(
         result,
-        json!({ "change": "CHG-0001", "ops": 1, "paths": [CONFIG] })
+        json!({ "change": "CHG-00000000-0000-0000-0000-000000000001", "ops": 1, "paths": [CONFIG] })
     );
     assert_eq!(
-        diff_ops(dir, "CHG-0001"),
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000001"),
         vec![json!({ "op": "accept", "entity": "file", "key": CONFIG })]
     );
     assert!(
-        read(dir, "telos/changes/CHG-0001.tel").contains(&adopted_oid),
+        read(
+            dir,
+            "telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"
+        )
+        .contains(&adopted_oid),
         "the accept op must carry the OID of the bytes it accepted"
     );
 
-    approve_and_reconcile(dir, "CHG-0001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
 
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert!(
@@ -418,14 +427,27 @@ fn a_file_changed_after_it_was_accepted_fails_the_accept_gate() {
 
     append(dir, CONFIG, "\n# adopted out of protocol\n");
     run_ok(dir, &["adopt", "--json"]);
-    run_ok(dir, &["change", "approve", "CHG-0001", "--json"]);
+    run_ok(
+        dir,
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    );
 
     // The same path drifts again, after the review.
     append(dir, CONFIG, "# and again\n");
 
     let error = run_err(
         dir,
-        &["change", "reconcile", "CHG-0001", "--json"],
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         "TELOS_INTEGRITY_VIOLATION",
     );
 
@@ -435,7 +457,8 @@ fn a_file_changed_after_it_was_accepted_fails_the_accept_gate() {
         "the refusal must name the path: {message}"
     );
     assert!(
-        dir.join("telos/changes/CHG-0001.tel").exists(),
+        dir.join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel")
+            .exists(),
         "a refused reconcile must not delete the change"
     );
 }
@@ -454,14 +477,14 @@ fn adopting_a_modified_code_file_stages_an_accept() {
 
     assert_eq!(
         result,
-        json!({ "change": "CHG-0001", "ops": 1, "paths": [CODE] })
+        json!({ "change": "CHG-00000000-0000-0000-0000-000000000001", "ops": 1, "paths": [CODE] })
     );
     assert_eq!(
-        diff_ops(dir, "CHG-0001"),
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000001"),
         vec![json!({ "op": "accept", "entity": "file", "key": CODE })]
     );
 
-    approve_and_reconcile(dir, "CHG-0001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
 
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert!(
@@ -491,7 +514,7 @@ fn adopting_the_deletion_of_a_bound_code_file_is_refused() {
         })
     );
     assert!(
-        !dir.join("telos/changes/CHG-0001.tel").exists(),
+        prepared_change_is_empty(dir),
         "a refused adopt must write nothing"
     );
 }
@@ -518,7 +541,7 @@ fn adopting_a_file_that_declares_another_entity_is_refused() {
         "the refusal must name both the file and where its entity belongs: {message}"
     );
     assert!(
-        !dir.join("telos/changes/CHG-0001.tel").exists(),
+        prepared_change_is_empty(dir),
         "a refused adopt must write nothing"
     );
 }
@@ -545,7 +568,12 @@ fn adopting_a_delta_the_post_state_model_refuses_writes_nothing() {
     // (a) Into an existing change: the validation is the only model load.
     let error = run_err(
         dir,
-        &["adopt", "--into", "CHG-0001", "--json"],
+        &[
+            "adopt",
+            "--into",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         "TELOS_REFERENCE_UNKNOWN",
     );
     assert!(
@@ -556,7 +584,7 @@ fn adopting_a_delta_the_post_state_model_refuses_writes_nothing() {
         "the refusal must name the reference that no longer resolves: {error}"
     );
     assert_eq!(
-        diff_ops(dir, "CHG-0001"),
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000001"),
         Vec::<Value>::new(),
         "a refused adopt must leave the target change untouched"
     );
@@ -564,8 +592,8 @@ fn adopting_a_delta_the_post_state_model_refuses_writes_nothing() {
     // (b) Into a new change: same verdict, and no change file to show for it.
     run_err(dir, &["adopt", "--json"], "TELOS_REFERENCE_UNKNOWN");
     assert!(
-        !dir.join("telos/changes/CHG-0002.tel").exists(),
-        "a refused adopt must not leave a change behind"
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000002").is_empty(),
+        "a refused adopt must leave the prepared task unchanged"
     );
 }
 
@@ -621,7 +649,7 @@ fn adopt_refuses_a_drift_token_whose_scope_changed_during_review() {
         error["message"],
         json!("project drift no longer matches the expected state token")
     );
-    assert!(!dir.join("telos/changes/CHG-0001.tel").exists());
+    assert!(prepared_change_is_empty(dir));
 }
 
 #[test]
@@ -669,7 +697,7 @@ fn drift_actions_refuse_a_token_when_bytes_change_inside_the_same_scope() {
             json!("project drift no longer matches the expected state token")
         );
         assert_eq!(read(dir, INVOICE), before);
-        assert!(!dir.join("telos/changes/CHG-0001.tel").exists());
+        assert!(prepared_change_is_empty(dir));
     }
 }
 
@@ -690,7 +718,7 @@ fn adopting_an_unparseable_spec_file_is_refused_and_writes_nothing() {
         "the refusal must name the file: {error}"
     );
     assert!(
-        !dir.join("telos/changes/CHG-0001.tel").exists(),
+        prepared_change_is_empty(dir),
         "a refused adopt must write nothing"
     );
 }
@@ -712,24 +740,33 @@ fn adopt_into_an_existing_change_appends_its_ops() {
             "constraint",
             "CON-0003",
             "--change",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--json",
         ],
         &json!({ "title": "Hexagonal boundaries, tightened" }).to_string(),
     );
 
-    // Only now does the project drift, on a path CHG-0001 does not claim.
+    // Only now does the project drift, on a path CHG-00000000-0000-0000-0000-000000000001 does not claim.
     append(dir, INVOICE, "\n");
     assert_eq!(state(dir)["state"], json!("drifted"));
 
-    let result = run_ok(dir, &["adopt", "--into", "CHG-0001", "--json"])["result"].clone();
+    let result = run_ok(
+        dir,
+        &[
+            "adopt",
+            "--into",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )["result"]
+        .clone();
 
     assert_eq!(
         result,
-        json!({ "change": "CHG-0001", "ops": 1, "paths": [INVOICE] })
+        json!({ "change": "CHG-00000000-0000-0000-0000-000000000001", "ops": 1, "paths": [INVOICE] })
     );
     assert_eq!(
-        diff_ops(dir, "CHG-0001"),
+        diff_ops(dir, "CHG-00000000-0000-0000-0000-000000000001"),
         vec![
             json!({ "op": "edit", "entity": "constraint", "key": "CON-0003" }),
             json!({ "op": "edit", "entity": "notion", "key": "billing/Invoice" }),
@@ -737,7 +774,7 @@ fn adopt_into_an_existing_change_appends_its_ops() {
         "the adopted op is appended after the ops already staged"
     );
 
-    approve_and_reconcile(dir, "CHG-0001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert!(read(dir, CON_0003).contains("Hexagonal boundaries, tightened"));
 }
@@ -751,11 +788,7 @@ fn adopt_into_an_existing_change_appends_its_ops() {
 const SEALED_DEF: &str = "A bill issued to a Customer for delivered work.";
 const HAND_EDITED_DEF: &str = "A bill issued to a Customer, edited out of protocol.";
 
-/// The notion the concurrent, unrelated change adds -- the file whose seal
-/// proves the carry-over is surgical rather than a blanket refusal to record
-/// anything.
-const REFUND: &str = "telos/contexts/billing/notions/Refund.tel";
-
+/// A valid unrelated notion used to test recovery ownership.
 fn refund_payload() -> String {
     json!({
         "owner": "billing",
@@ -766,24 +799,10 @@ fn refund_payload() -> String {
     .to_string()
 }
 
-/// The composed scenario the whole carry-over exists for: an out-of-protocol
-/// edit, adopted into CHG-0001 and left there, must not be laundered into the
-/// seal by the reconcile of some *other*, unrelated change.
-///
-/// Gate 1 admits drift any open change claims -- deliberately, so that a
-/// concurrent change (implementing changes drift their code files for
-/// their whole life) never holds an unrelated transaction hostage. What must
-/// not follow is that CHG-0002's seal records CHG-0001's never-approved
-/// bytes: it would leave the project `coherent` the moment CHG-0001 was
-/// abandoned, with an edit nobody ever reviewed permanently sealed -- exactly
-/// the invariant enforced by canonical emission and sealing.
-///
-/// So the drifted path is carried over at its previously sealed OID, and the
-/// drift outlives the reconcile: still claimed (hence `changing`), still
-/// there when the claim goes (hence `drifted`), and sealed for real only by
-/// the ordinary adopt/approve/reconcile loop that reviews it.
+/// An unrelated draft may be prepared, but cannot inherit execution authority
+/// while an adopted out-of-protocol edit still needs recovery.
 #[test]
-fn a_concurrent_reconcile_carries_over_another_changes_adopted_drift() {
+fn unrelated_execution_waits_for_the_adopted_edit_to_be_reconciled() {
     let tmp = with_fixture();
     let dir = tmp.path();
     commit(dir);
@@ -805,67 +824,40 @@ fn a_concurrent_reconcile_carries_over_another_changes_adopted_drift() {
     run_ok(dir, &["adopt", "--json"]);
     assert_eq!(state(dir)["state"], json!("changing"));
 
-    // --- an unrelated change, opened after it, goes all the way through ---
+    // --- unrelated execution waits for the approved recovery -------------
     run_ok(dir, &["change", "open", "record refunds", "--json"]);
     stage(
         dir,
-        &["add", "notion", "--change", "CHG-0002", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000002",
+            "--json",
+        ],
         &refund_payload(),
     );
-    run_ok(dir, &["change", "approve", "CHG-0002", "--json"]);
-    run_ok(dir, &["change", "reconcile", "CHG-0002", "--json"]);
-
-    // Its own file is sealed the ordinary way -- the carry-over is surgical.
-    assert_eq!(
-        lock_oid(dir, REFUND).as_deref(),
-        Some(&*hash_object(dir, REFUND))
+    let lock_before = read(dir, LOCK);
+    run_err(
+        dir,
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000002",
+            "--json",
+        ],
+        "TELOS_PLAN_NOT_APPROVED",
     );
-    // CHG-0001's path is not: the seal still records the *old* bytes.
-    assert_eq!(
-        lock_oid(dir, INVOICE),
-        Some(sealed_oid.clone()),
-        "the reconcile sealed bytes nobody approved"
-    );
-    assert!(
-        !read(dir, LOCK).contains(&drifted_oid),
-        "the drifted OID reached the lock through some other entry"
-    );
-    // ... and the working tree still holds them, untouched.
-    assert!(read(dir, INVOICE).contains(HAND_EDITED_DEF));
-
-    // So the drift survived the reconcile: claimed, hence `changing`.
-    let after = state(dir);
-    assert_eq!(after["state"], json!("changing"));
-    assert_eq!(
-        after["changes"],
-        json!([{ "id": "CHG-0001", "status": "drafted", "obligations": ["approve", "reconcile"] }])
-    );
-    assert_eq!(after["drift"], json!(null));
-
-    // --- dropping the claim resurfaces it rather than laundering it -------
-    run_ok(dir, &["change", "abandon", "CHG-0001", "--json"]);
-    let abandoned = state(dir);
-    assert_eq!(abandoned["state"], json!("drifted"));
-    assert_eq!(abandoned["drift"]["paths"], json!([INVOICE]));
-
-    // --- and the ordinary loop is what seals it, bytes and all ------------
-    run_ok(dir, &["adopt", "--json"]);
-    approve_and_reconcile(dir, "CHG-0003");
-
-    assert_eq!(state(dir)["state"], json!("coherent"));
-    assert!(read(dir, INVOICE).contains(HAND_EDITED_DEF));
-    let now = hash_object(dir, INVOICE);
-    assert_ne!(now, sealed_oid, "the reviewed bytes are the new ones");
-    assert_eq!(lock_oid(dir, INVOICE).as_deref(), Some(&*now));
+    assert_eq!(read(dir, LOCK), lock_before);
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000002");
+    assert_eq!(state(dir)["state"], "coherent");
 }
 
-/// The carry-over of *absence*: a spec file some other change adopted but
-/// never reconciled was never in the seal to begin with, so a concurrent
-/// reconcile must leave it out rather than record it -- otherwise the same
-/// laundering happens one level down, with `Untracked` drift instead of
-/// `Modified`.
+/// Untracked adopted content also requires its own approved recovery before
+/// an unrelated task can execute and seal the repository.
 #[test]
-fn a_concurrent_reconcile_leaves_another_changes_untracked_file_unsealed() {
+fn unrelated_execution_waits_for_the_adopted_new_file_to_be_reconciled() {
     let tmp = with_fixture();
     let dir = tmp.path();
 
@@ -875,29 +867,34 @@ fn a_concurrent_reconcile_leaves_another_changes_untracked_file_unsealed() {
     run_ok(dir, &["change", "open", "record refunds", "--json"]);
     stage(
         dir,
-        &["add", "notion", "--change", "CHG-0002", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000002",
+            "--json",
+        ],
         &refund_payload(),
     );
-    run_ok(dir, &["change", "approve", "CHG-0002", "--json"]);
-    run_ok(dir, &["change", "reconcile", "CHG-0002", "--json"]);
-
-    assert_eq!(
-        lock_oid(dir, ROGUE),
-        None,
-        "a file only another change claims must not enter the seal"
+    let lock_before = read(dir, LOCK);
+    run_err(
+        dir,
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000002",
+            "--json",
+        ],
+        "TELOS_PLAN_NOT_APPROVED",
     );
-    assert_eq!(state(dir)["state"], json!("changing"));
-
-    run_ok(dir, &["change", "abandon", "CHG-0001", "--json"]);
-    let abandoned = state(dir);
-    assert_eq!(abandoned["state"], json!("drifted"));
-    assert_eq!(abandoned["drift"]["paths"], json!([ROGUE]));
+    assert_eq!(read(dir, LOCK), lock_before);
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000002");
+    assert_eq!(state(dir)["state"], "coherent");
 }
 
-/// Full reconciliation deliberately re-proves the whole tree from disk and
-/// seals what it finds, including open adopt-changes. It is total proof, not a
-/// bypass: the drift it seals has passed every applicable gate, which is more
-/// than the per-change path asks of anything.
+/// A separately approved full recovery re-proves the complete observed tree.
+/// Prepared adoption drafts remain visible after that attributed recovery.
 #[test]
 fn a_full_reseal_seals_disk_truth_even_under_an_open_adopt_change() {
     let tmp = with_fixture();
@@ -915,7 +912,7 @@ fn a_full_reseal_seals_disk_truth_even_under_an_open_adopt_change() {
 
     assert_eq!(lock_oid(dir, INVOICE), Some(drifted_oid));
     // The change is still open and still claims the path (full reconciliation leaves open
-    // changes alone), so the project is `changing` -- but its op is now a
+    // drafts alone), so the project is `changing` -- but its op is now a
     // no-op against a seal that already holds those bytes.
     assert_eq!(state(dir)["state"], json!("changing"));
 }
@@ -943,6 +940,17 @@ fn revert_restores_a_modified_file_and_deletes_an_untracked_one() {
         json!({ "restored": [INVOICE], "deleted": [ROGUE] })
     );
     assert_eq!(envelope["next_actions"], json!(["telos status"]));
+    assert_eq!(state(dir)["state"], json!("changing"));
+    let (_, task) = telos_core::plans::store::active(dir).unwrap().unwrap();
+    run_ok(
+        dir,
+        &[
+            "change",
+            "reconcile",
+            task.change.as_deref().unwrap(),
+            "--json",
+        ],
+    );
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert_eq!(read(dir, INVOICE), sealed);
     assert!(!dir.join(ROGUE).exists(), "the untracked file must be gone");
@@ -968,6 +976,17 @@ fn revert_restores_deleted_spec_and_code_files() {
         result,
         json!({ "restored": [CODE, CON_0003], "deleted": [] })
     );
+    assert_eq!(state(dir)["state"], json!("changing"));
+    let (_, task) = telos_core::plans::store::active(dir).unwrap().unwrap();
+    run_ok(
+        dir,
+        &[
+            "change",
+            "reconcile",
+            task.change.as_deref().unwrap(),
+            "--json",
+        ],
+    );
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert_eq!(read(dir, CON_0003), sealed_constraint);
     assert_eq!(read(dir, CODE), sealed_code);
@@ -988,6 +1007,17 @@ fn revert_restores_an_init_sealed_file_on_a_project_never_committed() {
     let result = run_ok(dir, &["revert", "--json"])["result"].clone();
 
     assert_eq!(result, json!({ "restored": [INVOICE], "deleted": [] }));
+    assert_eq!(state(dir)["state"], json!("changing"));
+    let (_, task) = telos_core::plans::store::active(dir).unwrap().unwrap();
+    run_ok(
+        dir,
+        &[
+            "change",
+            "reconcile",
+            task.change.as_deref().unwrap(),
+            "--json",
+        ],
+    );
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert_eq!(read(dir, INVOICE), sealed);
 }
@@ -1004,7 +1034,7 @@ fn revert_restores_reconciled_spec_and_code_on_a_project_never_committed() {
     append(dir, INVOICE, "\n");
     append(dir, CODE, "// adopted\n");
     run_ok(dir, &["adopt", "--json"]);
-    approve_and_reconcile(dir, "CHG-0001");
+    approve_and_reconcile(dir, "CHG-00000000-0000-0000-0000-000000000001");
     assert_eq!(state(dir)["state"], json!("coherent"));
     let sealed_invoice = read(dir, INVOICE);
     let sealed_code = read(dir, CODE);
@@ -1018,6 +1048,17 @@ fn revert_restores_reconciled_spec_and_code_on_a_project_never_committed() {
     assert_eq!(
         result,
         json!({ "restored": [CODE, INVOICE], "deleted": [] })
+    );
+    assert_eq!(state(dir)["state"], json!("changing"));
+    let (_, task) = telos_core::plans::store::active(dir).unwrap().unwrap();
+    run_ok(
+        dir,
+        &[
+            "change",
+            "reconcile",
+            task.change.as_deref().unwrap(),
+            "--json",
+        ],
     );
     assert_eq!(state(dir)["state"], json!("coherent"));
     assert_eq!(read(dir, INVOICE), sealed_invoice);
@@ -1039,4 +1080,10 @@ fn revert_after_git_pruned_the_sealed_blob_is_refused() {
     let error = run_err(dir, &["revert", "--json"], "TELOS_GIT_ERROR");
 
     assert_eq!(error["hint"], json!(SEALED_HINT));
+}
+
+fn prepared_change_is_empty(root: &Path) -> bool {
+    let ws = telos_core::workspace::Workspace::discover(root).unwrap();
+    telos_core::changes::read_change(&ws, telos_core::ids::ChangeId(1))
+        .is_ok_and(|c| c.ops.is_empty())
 }

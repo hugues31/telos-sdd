@@ -423,8 +423,10 @@ impl<'a> Lexer<'a> {
     /// `FromStr` error, which already names the expected `PREFIX-NNNN`
     /// form) rather than being silently re-lexed as separate tokens.
     fn lex_id_lit(&mut self, start: u32) -> Result<Token, Diagnostic> {
+        let uuid = self.slice(start, self.pos as u32) == "CHG";
         self.advance(); // '-'
-        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit() || (uuid && (c.is_ascii_hexdigit() || c == '-')))
+        {
             self.advance();
         }
         let span = self.make_span(start);
@@ -774,7 +776,7 @@ mod tests {
             TokKind::IdLit(EntityRef::Constraint(ConstraintId(3)))
         );
         assert_eq!(
-            lex("CHG-0007").unwrap()[0].kind,
+            lex("CHG-00000000-0000-0000-0000-000000000007").unwrap()[0].kind,
             TokKind::IdLit(EntityRef::Change(ChangeId(7)))
         );
     }

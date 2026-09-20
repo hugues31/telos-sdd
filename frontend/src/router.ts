@@ -16,6 +16,8 @@ import {
 const HEADER_OFFSET = 56;
 
 const routes: RouteRecordRaw[] = [
+  { path: '/plans', name: 'plans', component: () => import('./pages/PlansPage.vue') },
+  { path: '/plan/:id', name: 'plan-detail', component: () => import('./pages/PlanPage.vue') },
   { path: '/', name: 'dashboard', component: () => import('./pages/DashboardPage.vue') },
   { path: '/contexts', name: 'contexts', component: () => import('./pages/ContextsPage.vue') },
   { path: '/intents', name: 'intents', component: () => import('./pages/IntentsPage.vue') },

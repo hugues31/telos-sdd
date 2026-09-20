@@ -72,7 +72,7 @@ pub fn list_change_ids(ws: &Workspace) -> Result<Vec<ChangeId>, TelosError> {
 
 /// Reads and parses `telos/changes/<id>.tel`.
 ///
-/// A missing file is `TelosReferenceUnknown`, “unknown change `CHG-9999`” --
+/// A missing file is `TelosReferenceUnknown`, “unknown change `CHG-00000000-0000-0000-0000-00000000270f`” --
 /// with a `closest is CHG-NNNN` hint when at least one other change exists,
 /// by numeric distance to `id`, the same policy `show`/`impact` use for an
 /// unknown intent id. A present but unparsable file is reported through
@@ -93,10 +93,25 @@ pub fn read_change(ws: &Workspace, id: ChangeId) -> Result<Change, TelosError> {
 /// `telos/changes/` first if it does not exist yet, the same as
 /// [`crate::counters::write_counters`].
 pub fn write_change(ws: &Workspace, c: &Change) -> Result<(), TelosError> {
-    let dir = changes_dir(ws);
-    fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
-    let path = change_path(ws, c.id);
-    fs::write(&path, emit_change(c)).map_err(|e| io_err(&path, e))
+    write_change_with_counters(ws, c, None)
+}
+
+/// Publish an allocated delta and its counters in the same recoverable transaction.
+pub fn write_change_with_counters(
+    ws: &Workspace,
+    c: &Change,
+    counters: Option<&crate::counters::Counters>,
+) -> Result<(), TelosError> {
+    let writer = crate::transaction::Writer::acquire(&ws.repo_root)?;
+    let mut writes = vec![(repo_path_for(c.id), Some(emit_change(c).into_bytes()))];
+    if let Some(counters) = counters {
+        writes.push((
+            RepoPath::new("telos/changes/counters.toml"),
+            Some(crate::counters::emit_counters(counters).into_bytes()),
+        ));
+    }
+    writer.publish(writes)?;
+    Ok(())
 }
 
 /// Deletes `telos/changes/<id>.tel` -- the terminal step of both a
@@ -274,7 +289,7 @@ fn io_err(path: &Path, e: std::io::Error) -> TelosError {
     )
 }
 
-/// “unknown change `CHG-9999`”, with a numeric-nearest-id hint when at
+/// “unknown change `CHG-00000000-0000-0000-0000-00000000270f`”, with a numeric-nearest-id hint when at
 /// least one other change exists -- the same shape and algorithm as the
 /// CLI's `nearest_id` for an unknown intent/scenario/constraint id, kept
 /// here rather than shared because it is `telos-core` that owns the change
@@ -370,7 +385,7 @@ mod tests {
                 status: ChangeStatus::Open,
                 claims: BTreeSet::new(),
                 obligations: vec![
-                    "abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()
+                    "abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel is unparseable)".to_string()
                 ],
             }
         );

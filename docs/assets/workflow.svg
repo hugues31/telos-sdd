@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title description">
   <title id="title">The Telos development workflow</title>
-  <desc id="description">Five steps move from defining software intent, through review and implementation, to test evidence and a Git-sealed state. If the code or specification later drifts, Telos sends the change back for review.</desc>
+  <desc id="description">Brainstorm the request, approve a scoped plan, execute resumable tasks, record evidence, and retain provenance. Scope changes require a new plan approval.</desc>
 
   <defs>
     <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
@@ -60,8 +60,8 @@
     <text class="number" x="72" y="129" text-anchor="middle">1</text>
     <text class="step" x="98" y="129">DEFINE</text>
     <path class="icon" d="M106 160 h46 l18 18 v45 h-64 z M152 160 v19 h18 M118 193 h40 M118 207 h30"/>
-    <text class="title" x="138" y="258" text-anchor="middle">Capture intent</text>
-    <text class="body" x="138" y="283" text-anchor="middle">Describe behavior, scenarios</text>
+    <text class="title" x="138" y="258" text-anchor="middle">Brainstorm intent</text>
+    <text class="body" x="138" y="283" text-anchor="middle">Clarify goals, scenarios</text>
     <text class="body" x="138" y="302" text-anchor="middle">and architecture rules.</text>
   </g>
 
@@ -74,8 +74,8 @@
       <path d="M354 178 h28 M354 190 h18 M352 205 l9 9 22-24"/>
     </g>
     <text class="title" x="368" y="249" text-anchor="middle">Approve the</text>
-    <text class="title" x="368" y="270" text-anchor="middle">change</text>
-    <text class="body" x="368" y="293" text-anchor="middle">Inspect the diff and impact</text>
+    <text class="title" x="368" y="270" text-anchor="middle">plan</text>
+    <text class="body" x="368" y="293" text-anchor="middle">Review tasks and scope</text>
     <text class="body" x="368" y="311" text-anchor="middle">before implementation.</text>
   </g>
 
@@ -84,10 +84,10 @@
     <text class="number" x="532" y="129" text-anchor="middle">3</text>
     <text class="step" x="558" y="129">BUILD</text>
     <path class="icon" d="M571 172 l-18 18 18 18 M625 172 l18 18-18 18 M611 163 l-25 55"/>
-    <text class="title" x="598" y="249" text-anchor="middle">Share focused</text>
-    <text class="title" x="598" y="270" text-anchor="middle">context</text>
+    <text class="title" x="598" y="249" text-anchor="middle">Resume approved</text>
+    <text class="title" x="598" y="270" text-anchor="middle">tasks</text>
     <text class="body" x="598" y="293" text-anchor="middle">A developer or coding agent</text>
-    <text class="body" x="598" y="311" text-anchor="middle">builds the approved intent.</text>
+    <text class="body" x="598" y="311" text-anchor="middle">checkpoints each task.</text>
   </g>
 
   <g aria-label="Step four: prove">

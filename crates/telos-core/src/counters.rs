@@ -75,25 +75,18 @@ pub fn read_counters(ws: &Workspace) -> Result<Counters, TelosError> {
 /// `telos/changes/` first if it does not exist yet: `telos init` creates it
 /// up front, but nothing else requires that to already be true here.
 pub fn write_counters(ws: &Workspace, c: &Counters) -> Result<(), TelosError> {
-    let dir = changes_dir(ws);
-    fs::create_dir_all(&dir).map_err(|e| {
-        TelosError::new(
-            ErrorCode::TelosInternal,
-            format!("failed to create {}: {e}", dir.display()),
-        )
-    })?;
+    crate::transaction::Writer::acquire(&ws.repo_root)?.publish(vec![(
+        crate::ids::RepoPath::new("telos/changes/counters.toml"),
+        Some(emit_counters(c).into_bytes()),
+    )])?;
+    Ok(())
+}
 
-    let path = counters_path(ws);
-    let content = format!(
+pub(crate) fn emit_counters(c: &Counters) -> String {
+    format!(
         "intent = {}\nscenario = {}\nconstraint = {}\nchange = {}\n",
         c.intent, c.scenario, c.constraint, c.change
-    );
-    fs::write(&path, content).map_err(|e| {
-        TelosError::new(
-            ErrorCode::TelosInternal,
-            format!("failed to write {}: {e}", path.display()),
-        )
-    })
+    )
 }
 
 /// The highest id of each kind actually in use: the sealed model's own
@@ -124,7 +117,9 @@ pub fn floors(model: &TelosModel, open: &[Change], sealed_by: Option<ChangeId>) 
     }
 
     for change in open {
-        floor.change = floor.change.max(change.id.0);
+        // Change identities are UUIDs. The counter only tracks allocations;
+        // it no longer participates in their identity or collision handling.
+        floor.change = floor.change.saturating_add(1);
         for op in &change.ops {
             match op {
                 StagedOp::AddIntent(intent)
@@ -156,8 +151,8 @@ pub fn floors(model: &TelosModel, open: &[Change], sealed_by: Option<ChangeId>) 
         }
     }
 
-    if let Some(id) = sealed_by {
-        floor.change = floor.change.max(id.0);
+    if sealed_by.is_some() {
+        floor.change = floor.change.saturating_add(1);
     }
 
     floor
@@ -200,9 +195,9 @@ impl Alloc {
         ConstraintId(self.counters.constraint)
     }
 
-    pub fn next_change(&mut self) -> ChangeId {
-        self.counters.change += 1;
-        ChangeId(self.counters.change)
+    pub fn next_change(&mut self) -> Result<ChangeId, TelosError> {
+        self.counters.change = self.counters.change.saturating_add(1);
+        ChangeId::allocate()
     }
 
     /// The current counters, ready to persist via [`write_counters`].
@@ -316,7 +311,7 @@ mod tests {
 
     fn drafted_change(id: u32, ops: Vec<StagedOp>) -> Change {
         Change {
-            id: ChangeId(id),
+            id: ChangeId(id.into()),
             motivation: "x".to_string(),
             status: ChangeStatus::Drafted,
             approved_digest: None,
@@ -367,7 +362,7 @@ mod tests {
 
         assert_eq!(floor.intent, 99);
         assert_eq!(floor.scenario, 500);
-        assert_eq!(floor.change, 5);
+        assert_eq!(floor.change, 1);
     }
 
     #[test]
@@ -421,7 +416,7 @@ mod tests {
                 intent: 0,
                 scenario: 0,
                 constraint: 0,
-                change: 9,
+                change: 1,
             }
         );
     }
@@ -431,17 +426,17 @@ mod tests {
     #[test]
     fn floors_includes_sealed_by_in_the_change_floor() {
         let model = TelosModel::default();
-        assert_eq!(floors(&model, &[], Some(ChangeId(4))).change, 4);
+        assert_eq!(floors(&model, &[], Some(ChangeId(4))).change, 1);
     }
 
     #[test]
-    fn floors_takes_the_max_of_open_change_ids_and_sealed_by() {
+    fn floors_counts_open_changes_and_the_seal() {
         let model = TelosModel::default();
         let change = drafted_change(2, vec![]);
 
         assert_eq!(
             floors(&model, std::slice::from_ref(&change), Some(ChangeId(10))).change,
-            10
+            2
         );
         assert_eq!(floors(&model, &[change], Some(ChangeId(1))).change, 2);
     }
@@ -503,7 +498,7 @@ mod tests {
         assert_eq!(alloc.next_intent(), IntentId(43));
         assert_eq!(alloc.next_scenario(), ScenarioId(108));
         assert_eq!(alloc.next_constraint(), ConstraintId(4));
-        assert_eq!(alloc.next_change(), ChangeId(1));
+        assert_ne!(alloc.next_change().unwrap(), alloc.next_change().unwrap());
     }
 
     #[test]

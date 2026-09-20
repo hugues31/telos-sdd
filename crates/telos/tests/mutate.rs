@@ -23,7 +23,7 @@ use common::{
 // --- plumbing --------------------------------------------------------------
 
 const MOTIVATION: &str = "Invoices can be settled";
-const CHG_0001: &str = "telos/changes/CHG-0001.tel";
+const CHG_0001: &str = "telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel";
 const COUNTERS: &str = "telos/changes/counters.toml";
 
 /// The exact `TELOS_DRIFT_DETECTED` hint, frozen by `docs/contracts.md`.
@@ -57,7 +57,13 @@ fn stages_context_capability_and_owned_vocabulary_in_one_change() {
 
     stage_ok(
         tmp.path(),
-        &["add", "context", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "context",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "id": "billing", "kind": "core", "title": "Billing",
             "def": "Owns invoice rules."
@@ -66,7 +72,13 @@ fn stages_context_capability_and_owned_vocabulary_in_one_change() {
     );
     stage_ok(
         tmp.path(),
-        &["add", "capability", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "capability",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "owner": "billing", "id": "invoicing", "title": "Invoicing",
             "def": "Issues invoices."
@@ -75,7 +87,13 @@ fn stages_context_capability_and_owned_vocabulary_in_one_change() {
     );
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "owner": "billing", "name": "Invoice", "kind": "entity",
             "def": "A bill."
@@ -96,13 +114,26 @@ fn move_claims_both_paths_and_makes_an_existing_approval_stale() {
     stage_ok(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({"telos": "Invoices begin open and unpaid."}).to_string(),
     );
-    telos(tmp.path(), &["change", "approve", "CHG-0001", "--json"])
-        .assert()
-        .success();
+    telos(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .assert()
+    .success();
 
     let out = telos(
         tmp.path(),
@@ -112,26 +143,24 @@ fn move_claims_both_paths_and_makes_an_existing_approval_stale() {
             "--to",
             "billing/settlement",
             "--change",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--json",
         ],
     )
     .output()
     .unwrap();
     let envelope = json_stdout(&out);
-    assert_eq!(envelope["ok"], json!(true));
-    assert_eq!(
-        envelope["result"]["claims"],
-        json!([
-            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel",
-            "telos/contexts/billing/capabilities/settlement/intents/INT-0017.tel"
-        ])
+    assert_eq!(envelope["error"]["code"], "TELOS_PLAN_SCOPE_VIOLATION");
+    assert!(
+        tmp.path()
+            .join("telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel")
+            .exists()
     );
-
-    let diff = telos(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(json_stdout(&diff)["result"]["stale"], json!(true));
+    assert!(
+        !tmp.path()
+            .join("telos/contexts/billing/capabilities/settlement/intents/INT-0017.tel")
+            .exists()
+    );
 }
 
 /// Runs one staging command with `payload` on stdin and returns its
@@ -235,12 +264,24 @@ fn project_with_two_notions() -> tempfile::TempDir {
     open_change(tmp.path());
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &plain_invoice_payload(),
     );
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &payment_received_payload(),
     );
     tmp
@@ -255,7 +296,13 @@ fn add_notion_answers_with_the_public_result_result() {
 
     let mut cmd = telos(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
     );
     let out = cmd.write_stdin(customer_payload()).output().unwrap();
 
@@ -270,7 +317,7 @@ fn add_notion_answers_with_the_public_result_result() {
             "ok": true,
             "command": "add",
             "result": {
-                "change": "CHG-0001",
+                "change": "CHG-00000000-0000-0000-0000-000000000001",
                 "entity": "notion",
                 // A notion's natural key is its name, so that is
                 // what `id` carries for one.
@@ -279,7 +326,7 @@ fn add_notion_answers_with_the_public_result_result() {
                 "claims": ["telos/contexts/billing/notions/Customer.tel"]
             },
             "error": null,
-            "next_actions": ["telos change diff CHG-0001"]
+            "next_actions": ["telos change diff CHG-00000000-0000-0000-0000-000000000001"]
         })
     );
 }
@@ -294,13 +341,19 @@ fn add_notion_writes_the_canonical_change_file_byte_for_byte() {
 
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &customer_payload(),
     );
 
     assert_eq!(
         read(tmp.path(), CHG_0001),
-        "change CHG-0001 \"Invoices can be settled\" {\n  \
+        "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
            op add notion billing/Customer actor {\n    \
@@ -319,19 +372,31 @@ fn a_second_op_appends_a_block_and_resolves_against_the_first() {
     open_change(tmp.path());
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &customer_payload(),
     );
 
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &invoice_payload(),
     );
 
     assert_eq!(
         read(tmp.path(), CHG_0001),
-        "change CHG-0001 \"Invoices can be settled\" {\n  \
+        "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
            op add notion billing/Customer actor {\n    \
@@ -359,7 +424,13 @@ fn add_notion_is_validated_against_the_whole_overlay() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &invoice_payload(),
     );
 
@@ -374,7 +445,13 @@ fn add_notion_refuses_a_name_the_base_already_holds() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &plain_invoice_payload(),
     );
 
@@ -395,14 +472,20 @@ fn add_intent_allocates_the_intent_and_its_scenario_ids() {
 
     let result = stage_ok(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &settle_intent_payload("Invoice"),
     );
 
     assert_eq!(
         result,
         json!({
-            "change": "CHG-0001",
+            "change": "CHG-00000000-0000-0000-0000-000000000001",
             "entity": "intent",
             "id": "INT-0001",
             "scenario_ids": ["SCN-0001"],
@@ -426,7 +509,13 @@ fn add_intent_persists_the_counters_it_advanced() {
 
     stage_ok(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &settle_intent_payload("Invoice"),
     );
 
@@ -447,7 +536,13 @@ fn an_unknown_reference_writes_neither_the_change_nor_the_counters() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &settle_intent_payload("Invoce"),
     );
 
@@ -471,7 +566,13 @@ fn a_decimal_field_that_would_read_back_as_an_int_is_refused_at_staging() {
     let tmp = project_with_two_notions();
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "owner": "billing", "name": "Product", "kind": "entity",
             "def": "A thing for sale.",
@@ -484,7 +585,13 @@ fn a_decimal_field_that_would_read_back_as_an_int_is_refused_at_staging() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "owner": "billing/settlement", "title": "Products carry a price", "status": "active",
             "telos": "Nobody buys what has no price.",
@@ -528,7 +635,13 @@ fn an_enum_symbol_that_would_not_read_back_is_refused_at_staging() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "owner": "billing", "name": "Board", "kind": "entity", "def": "One round.",
             "attrs": [ {"name": "outcome", "type": "enum",
@@ -566,20 +679,32 @@ fn a_date_field_that_is_not_a_date_lexeme_is_refused() {
     open_change(tmp.path());
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({"owner": "billing", "name": "Booking", "kind": "entity", "def": "A reserved slot.",
                 "attrs": [{"name": "due", "type": "date"}]})
         .to_string(),
     );
     stage_ok(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &["add", "notion", "--change", "CHG-00000000-0000-0000-0000-000000000001", "--json"],
         &json!({"owner": "billing/settlement", "name": "BookingMade", "kind": "event", "def": "A booking was made."}).to_string(),
     );
 
     let error = stage_err(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "owner": "billing/settlement", "title": "A booking has a due date", "status": "active",
             "telos": "A slot nobody can date is a slot nobody can keep.",
@@ -616,7 +741,13 @@ fn add_constraint_allocates_its_id_past_the_corpus_floor() {
 
     let result = stage_ok(
         tmp.path(),
-        &["add", "constraint", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "constraint",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &json!({
             "owner": "billing", "kind": "architecture", "title": "Hexagonal boundaries",
             "rule": {"text": "Domain code must not import adapter modules."},
@@ -628,7 +759,7 @@ fn add_constraint_allocates_its_id_past_the_corpus_floor() {
     assert_eq!(
         result,
         json!({
-            "change": "CHG-0001",
+            "change": "CHG-00000000-0000-0000-0000-000000000001",
             "entity": "constraint",
             "id": "CON-0004",
             "scenario_ids": [],
@@ -641,7 +772,7 @@ fn add_constraint_allocates_its_id_past_the_corpus_floor() {
     );
     assert_eq!(
         read(tmp.path(), CHG_0001),
-        "change CHG-0001 \"Invoices can be settled\" {\n  \
+        "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
            op add constraint CON-0004 in context billing architecture \"Hexagonal boundaries\" {\n    \
@@ -664,7 +795,12 @@ fn edit_intent_stages_the_full_post_state() {
     let result = stage_ok(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({"telos": "An invoice must start its life open and unpaid -- reworded."})
             .to_string(),
@@ -673,7 +809,7 @@ fn edit_intent_stages_the_full_post_state() {
     assert_eq!(
         result,
         json!({
-            "change": "CHG-0001",
+            "change": "CHG-00000000-0000-0000-0000-000000000001",
             "entity": "intent",
             "id": "INT-0017",
             "scenario_ids": [],
@@ -682,7 +818,7 @@ fn edit_intent_stages_the_full_post_state() {
     );
     assert_eq!(
         read(tmp.path(), CHG_0001),
-        "change CHG-0001 \"Invoices can be settled\" {\n  \
+        "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
            op edit intent INT-0017 in billing/invoicing \"Issuing an invoice opens it\" {\n    \
@@ -715,7 +851,7 @@ fn edit_notion_stages_the_full_post_state() {
             "notion",
             "NOT:billing/Customer",
             "--change",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--json",
         ],
         &json!({"def": "Reworded."}).to_string(),
@@ -723,7 +859,7 @@ fn edit_notion_stages_the_full_post_state() {
 
     assert_eq!(
         read(tmp.path(), CHG_0001),
-        "change CHG-0001 \"Invoices can be settled\" {\n  \
+        "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
            op edit notion billing/Customer entity {\n    \
@@ -750,7 +886,7 @@ fn edit_notion_refuses_to_rename() {
             "notion",
             "NOT:billing/Invoice",
             "--change",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--json",
         ],
         &json!({"name": "Bill"}).to_string(),
@@ -776,7 +912,12 @@ fn edit_of_an_entity_the_base_does_not_hold_is_a_reference_error() {
     let error = stage_err(
         tmp.path(),
         &[
-            "edit", "intent", "INT-9999", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-9999",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({"telos": "..."}).to_string(),
     );
@@ -799,7 +940,7 @@ fn remove_constraint_stages_a_single_line() {
             "constraint",
             "CON-0003",
             "--change",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--json",
         ],
         "",
@@ -807,11 +948,11 @@ fn remove_constraint_stages_a_single_line() {
 
     assert_eq!(
         result,
-        json!({"change": "CHG-0001", "entity": "constraint", "id": "CON-0003"})
+        json!({"change": "CHG-00000000-0000-0000-0000-000000000001", "entity": "constraint", "id": "CON-0003"})
     );
     assert_eq!(
         read(tmp.path(), CHG_0001),
-        "change CHG-0001 \"Invoices can be settled\" {\n  \
+        "change CHG-00000000-0000-0000-0000-000000000001 \"Invoices can be settled\" {\n  \
            status drafted\n\
          \n  \
            op remove constraint CON-0003 from billing\n\
@@ -834,7 +975,12 @@ fn remove_of_a_still_referenced_intent_names_the_referrer() {
     let error = stage_err(
         tmp.path(),
         &[
-            "remove", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "remove",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         "",
     );
@@ -856,19 +1002,32 @@ fn a_second_change_cannot_stage_a_file_the_first_one_claims() {
     stage_ok(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
         &json!({"telos": "Reworded once."}).to_string(),
     );
     telos(tmp.path(), &["change", "open", "a second change"])
         .assert()
         .success();
-    let before = read(tmp.path(), "telos/changes/CHG-0002.tel");
+    let before = read(
+        tmp.path(),
+        "telos/changes/CHG-00000000-0000-0000-0000-000000000002.tel",
+    );
 
     let error = stage_err(
         tmp.path(),
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0002", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000002",
+            "--json",
         ],
         &json!({"telos": "Reworded twice."}).to_string(),
     );
@@ -877,14 +1036,22 @@ fn a_second_change_cannot_stage_a_file_the_first_one_claims() {
     assert_eq!(
         error["message"],
         json!(
-            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel is already claimed by CHG-0001"
+            "telos/contexts/billing/capabilities/invoicing/intents/INT-0017.tel is already claimed by CHG-00000000-0000-0000-0000-000000000001"
         )
     );
     assert_eq!(
         error["hint"],
-        json!("reconcile or abandon CHG-0001 first, or work within it")
+        json!(
+            "reconcile or abandon CHG-00000000-0000-0000-0000-000000000001 first, or work within it"
+        )
     );
-    assert_eq!(read(tmp.path(), "telos/changes/CHG-0002.tel"), before);
+    assert_eq!(
+        read(
+            tmp.path(),
+            "telos/changes/CHG-00000000-0000-0000-0000-000000000002.tel"
+        ),
+        before
+    );
 }
 
 /// The same change may stage the same file again -- a claim keeps *other*
@@ -898,7 +1065,12 @@ fn a_change_may_stage_the_same_file_twice() {
         stage_ok(
             tmp.path(),
             &[
-                "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+                "edit",
+                "intent",
+                "INT-0017",
+                "--change",
+                "CHG-00000000-0000-0000-0000-000000000001",
+                "--json",
             ],
             &json!({ "telos": telos_text }).to_string(),
         );
@@ -925,7 +1097,13 @@ fn add_on_a_drifted_project_is_refused() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         &customer_payload(),
     );
 
@@ -943,7 +1121,13 @@ fn add_without_a_payload_on_stdin_is_a_parse_error() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         "",
     );
 
@@ -961,7 +1145,13 @@ fn add_with_a_payload_that_is_not_json_is_a_parse_error() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
         "not json at all",
     );
 
@@ -979,12 +1169,21 @@ fn staging_into_a_change_the_store_does_not_hold_is_refused() {
 
     let error = stage_err(
         tmp.path(),
-        &["add", "notion", "--change", "CHG-9999", "--json"],
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-00000000270f",
+            "--json",
+        ],
         &customer_payload(),
     );
 
     assert_eq!(error["code"], json!("TELOS_REFERENCE_UNKNOWN"));
-    assert_eq!(error["message"], json!("unknown change `CHG-9999`"));
+    assert_eq!(
+        error["message"],
+        json!("unknown change `CHG-00000000-0000-0000-0000-00000000270f`")
+    );
 }
 
 // --- human mode -------------------------------------------------------------
@@ -994,7 +1193,15 @@ fn human_mode_names_the_change_the_verb_and_the_target() {
     let tmp = fresh();
     open_change(tmp.path());
 
-    let mut cmd = telos(tmp.path(), &["add", "notion", "--change", "CHG-0001"]);
+    let mut cmd = telos(
+        tmp.path(),
+        &[
+            "add",
+            "notion",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+        ],
+    );
     let out = cmd.write_stdin(customer_payload()).output().unwrap();
 
     assert!(
@@ -1004,6 +1211,6 @@ fn human_mode_names_the_change_the_verb_and_the_target() {
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "CHG-0001: add notion billing/Customer\n"
+        "CHG-00000000-0000-0000-0000-000000000001: add notion billing/Customer\n"
     );
 }

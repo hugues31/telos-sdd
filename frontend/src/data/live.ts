@@ -137,6 +137,33 @@ function isCoverageRow(value: unknown): boolean {
   );
 }
 
+function isPlan(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.progress) || !isRecord(value.brief)) return false;
+  const p = value.progress;
+  return typeof value.id === 'string' && typeof value.title === 'string' && typeof value.goal === 'string'
+    && isCount(value.revision) && isCount(value.version) && typeof value.digest === 'string'
+    && isOneOf(value.state, ['draft','ready','approved','running','paused','blocked','completed','cancelled'])
+    && typeof value.approved === 'boolean' && typeof value.last_activity === 'string'
+    && isNullableString(value.current_task) && isStringArray(value.scope) && isStringArray(value.success_criteria)
+    && isCount(p.done) && isCount(p.total) && (p.done as number) <= (p.total as number)
+    && (p.percent === null ? p.total === 0 : isCount(p.percent) && p.total !== 0 && p.percent === Math.floor(100 * (p.done as number) / (p.total as number)))
+    && typeof value.brief.summary === 'string' && isStringArray(value.brief.exclusions)
+    && isArrayOf(value.brief.decisions, d => isRecord(d) && ['id','text','state','source'].every(k => typeof d[k] === 'string'))
+    && isArrayOf(value.brief.questions, q => isRecord(q) && typeof q.id === 'string' && typeof q.text === 'string' && typeof q.blocking === 'boolean' && isNullableString(q.answer))
+    && isArrayOf(value.tasks, t => isRecord(t) && ['id','title','kind','next_action','spec_delta'].every(k => typeof t[k] === 'string')
+      && isOneOf(t.state,['todo','in_progress','blocked','done','cancelled']) && isNullableString(t.change) && isNullableString(t.blocker)
+      && [t.depends_on,t.targets,t.allowed_paths,t.acceptance].every(isStringArray))
+    && isArrayOf(value.events, e => isRecord(e) && ['id','at','kind'].every(k => typeof e[k] === 'string') && isCount(e.version) && isCount(e.revision) && isNullableString(e.task) && isRecord(e.data));
+}
+
+function isReceipt(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const fileState = (s: unknown) => s === null || (isRecord(s) && typeof s.oid === 'string' && typeof s.mode === 'string');
+  return ['id','plan','task','at'].every(k => typeof value[k] === 'string') && isCount(value.revision) && isNullableString(value.head)
+    && [value.files,value.observed_files].every(files => isArrayOf(files, f => isRecord(f) && typeof f.path === 'string' && fileState(f.before) && fileState(f.after)))
+    && isArrayOf(value.entities, e => isRecord(e) && ['uid','selector','kind','path'].every(k => typeof e[k] === 'string') && isNullableString(e.previous_selector));
+}
+
 function isCoverage(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
@@ -436,6 +463,9 @@ function isTelosPayload(value: unknown): value is TelosPayload {
   }
 
   return (
+    isArrayOf(snapshot.plans, isPlan) &&
+    isArrayOf(snapshot.history, isReceipt) &&
+    isStringArray(snapshot.unplanned) &&
     isDashboard(snapshot.dashboard) &&
     isCoverage(snapshot.coverage) &&
     isArrayOf(snapshot.contexts, isContext) &&

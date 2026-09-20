@@ -77,7 +77,19 @@ pub fn run(ctx: &Ctx) -> CmdResult {
         ProjectStateKind::Coherent => Vec::new(),
     };
 
+    let plans = telos_core::plans::store::list(&project.ws.repo_root)?
+        .iter()
+        .map(telos_core::plans::model::Plan::view)
+        .collect::<Result<Vec<_>, _>>()?;
+    let governance = match telos_core::plans::ledger::verify(&project.ws.repo_root) {
+        Ok(ledger) => {
+            json!({"state":"managed","changes":telos_core::inventory::changes(&ledger.current,&telos_core::inventory::capture(&project.ws.repo_root)?)})
+        }
+        Err(error) => json!({"state":"unverified","error":error.message}),
+    };
     let result = json!({
+        "plans": plans,
+        "governance": governance,
         "state": report.state,
         "changes": report.open_changes,
         "drift": drift_value,

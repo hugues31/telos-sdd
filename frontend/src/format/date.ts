@@ -1,4 +1,4 @@
-export function formatLocalDate(value: string, locales?: Intl.LocalesArgument): string {
+export function formatLocalDate(value: string, locales: Intl.LocalesArgument = 'en-GB'): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (!match) return value;
 

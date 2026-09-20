@@ -16,6 +16,9 @@ use crate::projection::{applicable_constraints, implementations, proofs};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ViewSnapshot {
+    pub(crate) plans: Vec<telos_core::plans::model::PlanView>,
+    pub(crate) history: Vec<telos_core::plans::ledger::Receipt>,
+    pub(crate) unplanned: Vec<String>,
     pub(crate) dashboard: DashboardView,
     pub(crate) coverage: CoverageView,
     pub(crate) contexts: Vec<ContextView>,
@@ -204,6 +207,42 @@ pub(crate) struct GraphEdgeView {
 }
 
 impl ViewSnapshot {
+    pub(crate) fn with_work(
+        mut self,
+        root: &std::path::Path,
+    ) -> Result<Self, telos_core::error::TelosError> {
+        self.plans = telos_core::plans::store::list(root)?
+            .iter()
+            .map(telos_core::plans::model::Plan::view)
+            .collect::<Result<Vec<_>, _>>()?;
+        if root.join(telos_core::plans::ledger::PATH).exists() {
+            let ledger = telos_core::plans::ledger::verify(root)?;
+            self.history = telos_core::plans::ledger::receipts(root)?;
+            let active = telos_core::plans::store::active(root)?;
+            self.unplanned = telos_core::inventory::changes(
+                &ledger.current,
+                &telos_core::inventory::capture(root)?,
+            )
+            .into_iter()
+            .filter(|f| {
+                active.as_ref().is_none_or(|(p, t)| {
+                    !p.view().is_ok_and(|v| v.approved)
+                        || !telos_core::plans::model::matches_path(
+                            &p.revision().definition.scope,
+                            &f.path,
+                        )
+                        || !telos_core::plans::model::matches_path(
+                            &t.definition.allowed_paths,
+                            &f.path,
+                        )
+                })
+            })
+            .map(|f| f.path)
+            .collect();
+        }
+        Ok(self)
+    }
+
     pub(crate) fn build(state: &StateReport, model: &TelosModel) -> Self {
         let notions = model
             .domain_notions
@@ -459,6 +498,9 @@ impl ViewSnapshot {
         };
 
         Self {
+            plans: vec![],
+            history: vec![],
+            unplanned: vec![],
             dashboard: DashboardView {
                 state: state_kind(state.state).to_string(),
                 drift: state

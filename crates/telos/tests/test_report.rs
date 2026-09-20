@@ -58,7 +58,10 @@ fn open_change(dir: &Path) {
     .output()
     .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(json_stdout(&out)["result"]["id"], json!("CHG-0001"));
+    assert_eq!(
+        json_stdout(&out)["result"]["id"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
 }
 
 fn unchanged_scn_0091() -> Value {
@@ -91,7 +94,12 @@ fn stage_new_scenarios(dir: &Path, count: usize) -> Vec<String> {
     let out = telos(
         dir,
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
     )
     .write_stdin(payload)
@@ -107,9 +115,17 @@ fn stage_new_scenarios(dir: &Path, count: usize) -> Vec<String> {
 }
 
 fn approve(dir: &Path) {
-    let out = telos(dir, &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        dir,
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
 }
 
@@ -123,7 +139,7 @@ fn append_test_fns(dir: &Path, names: &[&str]) {
 }
 
 /// A report project one `telos test` away from its first witness:
-/// `CHG-0001` approved with `SCN-0108` staged on `INT-0017`, and
+/// `CHG-00000000-0000-0000-0000-000000000001` approved with `SCN-0108` staged on `INT-0017`, and
 /// `scn_0108_x` written into the sealed test file.
 fn approved_with_report() -> TempDir {
     let tmp = with_report_fixture("strict");
@@ -145,7 +161,8 @@ fn blob_oid(dir: &Path, path: &str) -> String {
 }
 
 fn change_file(dir: &Path) -> String {
-    fs::read_to_string(dir.join("telos/changes/CHG-0001.tel")).unwrap()
+    fs::read_to_string(dir.join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"))
+        .unwrap()
 }
 
 fn not_executed_envelope(message: String) -> Value {
@@ -200,13 +217,13 @@ fn a_passed_testcase_named_after_the_scenario_is_green_with_one_executed() {
                 "scenario": SCN,
                 "witness": "green",
                 "test": format!("{BILLING_TEST}::{TEST_FN}"),
-                "change": "CHG-0001",
+                "change": "CHG-00000000-0000-0000-0000-000000000001",
                 "command": display(TEST_FN),
                 "evidence": "report",
                 "executed": 1,
             },
             "error": null,
-            "next_actions": ["telos change reconcile CHG-0001"]
+            "next_actions": ["telos change reconcile CHG-00000000-0000-0000-0000-000000000001"]
         })
     );
     let oid = blob_oid(tmp.path(), BILLING_TEST);
@@ -270,7 +287,9 @@ fn the_human_line_counts_the_executed_tests() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        format!("{SCN} green: {BILLING_TEST}::{TEST_FN} (recorded in CHG-0001, 1 test executed)\n")
+        format!(
+            "{SCN} green: {BILLING_TEST}::{TEST_FN} (recorded in CHG-00000000-0000-0000-0000-000000000001, 1 test executed)\n"
+        )
     );
 }
 
@@ -562,9 +581,17 @@ fn reconcile_reproves_every_impacted_scenario_in_the_report_and_seals_report_evi
     witness_pair_through_the_report(&tmp);
     write_report_fixture(tmp.path(), &impacted_all_passed());
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(out.status.success(), "{}", stderr(&out));
     // Three distinct targets: `tests/billing.rs` (SCN-0091), the sealed
@@ -591,9 +618,17 @@ fn gate_11_refuses_an_impacted_scenario_the_report_skipped() {
         ]),
     );
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(!out.status.success());
     assert_eq!(
@@ -606,7 +641,11 @@ fn gate_11_refuses_an_impacted_scenario_the_report_skipped() {
             "hint": RECONCILE_HINT,
         })
     );
-    assert!(tmp.path().join("telos/changes/CHG-0001.tel").exists());
+    assert!(
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel")
+            .exists()
+    );
 }
 
 #[test]
@@ -622,9 +661,17 @@ fn gate_11_keeps_the_integrity_violation_for_a_failed_impacted_test() {
         ]),
     );
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(!out.status.success());
     let error = json_stdout(&out)["error"].clone();
@@ -650,9 +697,17 @@ fn gate_11_surfaces_run_proofs_own_error_for_an_unremovable_stale_report() {
     fs::remove_file(tmp.path().join(REPORT)).unwrap();
     fs::create_dir(tmp.path().join(REPORT)).unwrap();
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(!out.status.success(), "{}", stderr(&out));
     let error = json_stdout(&out)["error"].clone();
@@ -667,7 +722,7 @@ fn gate_11_surfaces_run_proofs_own_error_for_an_unremovable_stale_report() {
 /// Hand-writes an exit-status red/green pair into the change file, the way
 /// a journal taken before the report was configured would look.
 fn journal_exit_status_pair(dir: &Path) {
-    let path = dir.join("telos/changes/CHG-0001.tel");
+    let path = dir.join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel");
     let oid = blob_oid(dir, BILLING_TEST);
     let src = fs::read_to_string(&path)
         .unwrap()
@@ -693,9 +748,17 @@ fn gate_8_refuses_an_exit_status_witness_when_a_report_is_configured() {
     journal_exit_status_pair(tmp.path());
     write_report_fixture(tmp.path(), &impacted_all_passed());
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(!out.status.success());
     assert_eq!(
@@ -718,9 +781,17 @@ fn gate_8_warns_about_an_exit_status_witness_under_advisory_policy() {
     journal_exit_status_pair(tmp.path());
     write_report_fixture(tmp.path(), &impacted_all_passed());
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
@@ -733,7 +804,7 @@ fn gate_8_warns_about_an_exit_status_witness_under_advisory_policy() {
 /// report pair, the way a stray leftover from before the report was
 /// configured would look.
 fn append_exit_status_red_line(dir: &Path) {
-    let path = dir.join("telos/changes/CHG-0001.tel");
+    let path = dir.join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel");
     let oid = blob_oid(dir, BILLING_TEST);
     let src = fs::read_to_string(&path).unwrap();
     let (body, _) = src
@@ -758,9 +829,17 @@ fn gate_8_ignores_an_extra_exit_status_run_when_the_report_pair_is_intact() {
     append_exit_status_red_line(tmp.path());
     write_report_fixture(tmp.path(), &impacted_all_passed());
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(out.status.success(), "{}", stderr(&out));
 }
@@ -768,7 +847,7 @@ fn gate_8_ignores_an_extra_exit_status_run_when_the_report_pair_is_intact() {
 /// Hand-writes a lone exit-status red witness -- no matching green -- the
 /// way a red taken before the report was configured would look.
 fn write_exit_status_red_line(dir: &Path) {
-    let path = dir.join("telos/changes/CHG-0001.tel");
+    let path = dir.join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel");
     let oid = blob_oid(dir, BILLING_TEST);
     let src = fs::read_to_string(&path)
         .unwrap()
@@ -799,9 +878,17 @@ fn gate_8_refuses_an_exit_status_red_followed_by_a_report_backed_green() {
     assert!(out.status.success(), "{}", stderr(&out));
     write_report_fixture(tmp.path(), &impacted_all_passed());
 
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
 
     assert!(!out.status.success());
     assert_eq!(
@@ -987,9 +1074,17 @@ fn grouped_reds_then_grouped_greens_reconcile_on_one_frozen_file() {
             ("scn_0109_x", "passed"),
         ]),
     );
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(json_stdout(&out)["result"]["witness_warnings"], json!([]));
     telos(tmp.path(), &["check", "--sealed"]).assert().success();
@@ -1021,9 +1116,17 @@ fn adding_a_grouped_test_after_the_first_red_invalidates_the_shared_file() {
             .success();
     }
     let before = fs::read(tmp.path().join("telos/telos.lock")).unwrap();
-    let out = telos(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        tmp.path(),
+        &[
+            "change",
+            "reconcile",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
     assert_eq!(json_stdout(&out)["error"]["code"], "TELOS_TEST_SEALED");
     assert_eq!(
         fs::read(tmp.path().join("telos/telos.lock")).unwrap(),

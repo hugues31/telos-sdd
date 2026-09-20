@@ -244,6 +244,9 @@ export interface GraphEdgeView {
 // --- snapshot -------------------------------------------------------------
 
 export interface ViewSnapshot {
+  plans: PlanView[];
+  history: ReceiptView[];
+  unplanned: string[];
   dashboard: DashboardView;
   coverage: CoverageView;
   contexts: ContextView[];
@@ -255,4 +258,60 @@ export interface ViewSnapshot {
   proofs: ProofView[];
   nodes: GraphNodeView[];
   edges: GraphEdgeView[];
+}
+
+export interface PlanEvent {
+  id: string;
+  at: string;
+  version: number;
+  revision: number;
+  task: string | null;
+  kind: string;
+  data: Record<string, unknown>;
+}
+
+export interface PlanTask {
+  id: string;
+  title: string;
+  kind: string;
+  state: 'todo' | 'in_progress' | 'blocked' | 'done' | 'cancelled';
+  depends_on: string[];
+  targets: string[];
+  allowed_paths: string[];
+  acceptance: string[];
+  next_action: string;
+  change: string | null;
+  blocker: string | null;
+  spec_delta: string;
+}
+
+export interface PlanView {
+  id: string;
+  title: string;
+  goal: string;
+  revision: number;
+  version: number;
+  digest: string;
+  state: 'draft' | 'ready' | 'approved' | 'running' | 'paused' | 'blocked' | 'completed' | 'cancelled';
+  approved: boolean;
+  progress: { done: number; total: number; percent: number | null };
+  current_task: string | null;
+  last_activity: string;
+  tasks: PlanTask[];
+  brief: { summary: string; exclusions: string[]; decisions: { id: string; text: string; state: string; source: string }[]; questions: { id: string; text: string; blocking: boolean; answer: string | null }[] };
+  success_criteria: string[];
+  scope: string[];
+  events: PlanEvent[];
+}
+
+export interface ReceiptView {
+  id: string;
+  plan: string;
+  task: string;
+  revision: number;
+  at: string;
+  head: string | null;
+  files: { path: string; before: { oid: string; mode: string } | null; after: { oid: string; mode: string } | null }[];
+  observed_files: ReceiptView["files"];
+  entities: { uid: string; selector: string; previous_selector: string | null; kind: string; path: string }[];
 }

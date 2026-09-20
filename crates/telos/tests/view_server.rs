@@ -653,7 +653,7 @@ fn live_view_observes_drifted_and_changing_projects() {
     assert_eq!(payload["snapshot"]["dashboard"]["state"], "changing");
     assert_eq!(
         payload["snapshot"]["dashboard"]["open_changes"][0]["id"],
-        "CHG-0001"
+        "CHG-00000000-0000-0000-0000-000000000001"
     );
     changing_server.stop();
     assert_eq!(telos_bytes(changing.path()), before_changing_server);

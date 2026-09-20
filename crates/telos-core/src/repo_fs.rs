@@ -18,10 +18,146 @@ pub(crate) struct RepoFs {
 }
 
 impl RepoFs {
+    pub(crate) fn list_files(&self, path: &RepoPath) -> Result<Vec<String>, TelosError> {
+        path.validate()?;
+        let components = Path::new(path.as_str())
+            .components()
+            .map(|c| c.as_os_str().to_owned())
+            .collect::<Vec<_>>();
+        let Some(dir) = self.open_parent(&components, false, path)? else {
+            return Ok(vec![]);
+        };
+        let mut names = Vec::new();
+        for entry in dir.entries().map_err(|e| io_error("list", Some(path), e))? {
+            let entry = entry.map_err(|e| io_error("list entry", Some(path), e))?;
+            names.push(
+                entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| unsafe_path(path))?,
+            );
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    pub(crate) fn writer_lock(&self) -> Result<std::fs::File, TelosError> {
+        let path = RepoPath::new("telos/.runtime/write.lock");
+        let (parents, name) = split(&path)?;
+        let parent = self
+            .open_parent(&parents, true, &path)?
+            .expect("created parent");
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .follow(FollowSymlinks::No);
+        let file = parent
+            .open_with(name, &options)
+            .map_err(|e| unsafe_io_path("open writer lock", &path, e))?
+            .into_std();
+        if !file
+            .metadata()
+            .map_err(|e| io_error("inspect lock", Some(&path), e))?
+            .is_file()
+        {
+            return Err(unsafe_path(&path));
+        }
+        file.try_lock().map_err(|e| {
+            TelosError::new(
+                ErrorCode::TelosWorkspaceBusy,
+                format!("another Telos writer holds this worktree: {e}"),
+            )
+            .hint("wait for the current command; a terminated process releases its lock")
+        })?;
+        Ok(file)
+    }
+
+    pub(crate) fn validate_writable(&self, path: &RepoPath) -> Result<(), TelosError> {
+        self.read_optional(path)?;
+        let (parents, name) = split(path)?;
+        if let Some(parent) = self.open_parent(&parents, false, path)? {
+            #[cfg(unix)]
+            if parent
+                .dir_metadata()
+                .map_err(|e| io_error("inspect parent", Some(path), e))?
+                .permissions()
+                .readonly()
+            {
+                return Err(io_error(
+                    "write read-only directory",
+                    Some(path),
+                    io::Error::new(io::ErrorKind::PermissionDenied, "directory is read-only"),
+                ));
+            }
+            if let Ok(metadata) = parent.symlink_metadata(name)
+                && metadata.permissions().readonly()
+            {
+                return Err(io_error(
+                    "replace read-only file",
+                    Some(path),
+                    io::Error::new(io::ErrorKind::PermissionDenied, "file is read-only"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn atomic_write(&self, path: &RepoPath, bytes: &[u8]) -> Result<(), TelosError> {
+        path.validate()?;
+        // Reject symlinks and non-files even though rename itself could replace them.
+        self.read_optional(path)?;
+        let (parents, name) = split(path)?;
+        let parent = self
+            .open_parent(&parents, true, path)?
+            .expect("created parent");
+        let temporary = format!(".{}.tmp", crate::work::new_id("write")?);
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        let result = (|| {
+            let mut file = parent
+                .open_with(&temporary, &options)
+                .map_err(|e| unsafe_io_path("prepare write", path, e))?;
+            if let Ok(metadata) = parent.symlink_metadata(&name) {
+                if metadata.permissions().readonly() {
+                    return Err(io_error(
+                        "replace read-only file",
+                        Some(path),
+                        io::Error::new(io::ErrorKind::PermissionDenied, "file is read-only"),
+                    ));
+                }
+                file.set_permissions(metadata.permissions())
+                    .map_err(|e| io_error("preserve permissions", Some(path), e))?;
+            }
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|e| io_error("sync write", Some(path), e))?;
+            parent
+                .rename(&temporary, &parent, &name)
+                .map_err(|e| io_error("publish write", Some(path), e))?;
+            sync_directory(&parent).map_err(|e| io_error("sync parent", Some(path), e))
+        })();
+        if result.is_err() {
+            let _ = parent.remove_file(&temporary);
+        }
+        result
+    }
+
     pub(crate) fn open(root: &Path) -> Result<Self, TelosError> {
         Dir::open_ambient_dir(root, ambient_authority())
             .map(|root| Self { root })
             .map_err(|error| io_error("open repository root", None, error))
+    }
+
+    pub(crate) fn validate_parents(&self, path: &RepoPath) -> Result<(), TelosError> {
+        path.validate()?;
+        let (parents, _) = split(path)?;
+        self.open_parent(&parents, false, path)?;
+        Ok(())
     }
 
     pub(crate) fn read_optional(&self, path: &RepoPath) -> Result<Option<Vec<u8>>, TelosError> {
@@ -59,6 +195,7 @@ impl RepoFs {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn write(&self, path: &RepoPath, bytes: &[u8]) -> Result<(), TelosError> {
         path.validate()?;
         let (parents, name) = split(path)?;
@@ -92,7 +229,7 @@ impl RepoFs {
             return Ok(());
         };
         match parent.remove_file(&name) {
-            Ok(()) => Ok(()),
+            Ok(()) => sync_directory(&parent).map_err(|e| io_error("sync deletion", Some(path), e)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(unsafe_io_path("delete", path, error)),
         }
@@ -118,6 +255,8 @@ impl RepoFs {
                     current
                         .create_dir(component)
                         .map_err(|error| unsafe_io_path("create directory", path, error))?;
+                    sync_directory(&current)
+                        .map_err(|error| io_error("sync directory creation", Some(path), error))?;
                     current = current
                         .open_dir_nofollow(component)
                         .map_err(|error| unsafe_io_path("open directory", path, error))?;
@@ -127,6 +266,14 @@ impl RepoFs {
         }
         Ok(Some(current))
     }
+}
+
+fn sync_directory(dir: &Dir) -> io::Result<()> {
+    #[cfg(unix)]
+    dir.open(".")?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 fn split(path: &RepoPath) -> Result<(Vec<OsString>, OsString), TelosError> {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import HistoryPanel from '../components/HistoryPanel.vue';
 import { computed } from 'vue';
 
 import EmptyState from '../components/EmptyState.vue';
@@ -47,6 +48,7 @@ function coverage(proved: number, scenarios: number): number {
           </dl>
         </header>
         <p>{{ context.definition }}</p>
+        <HistoryPanel :target="context.id" />
         <ProgressBar
           :value="coverage(context.health.proved_scenarios, context.health.scenarios)"
           :label="`${context.title} scenario proof coverage`"

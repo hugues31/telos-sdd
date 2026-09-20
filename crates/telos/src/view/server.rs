@@ -566,10 +566,13 @@ fn process_watch_work(root: &FsPath, state: &SharedState, work: WatchWork) {
 }
 
 fn build_snapshot(ctx: &Ctx) -> Result<(PathBuf, ViewSnapshot), TelosError> {
+    let ws = telos_core::workspace::Workspace::discover(&ctx.cwd)?;
+    let _reader = telos_core::transaction::Writer::acquire(&ws.repo_root)?;
     let project = project(ctx)?;
     let model = project.ws.load_model().map_err(diagnostics_to_error)?;
     let root = project.ws.repo_root.clone();
-    Ok((root, ViewSnapshot::build(&project.state, &model)))
+    let snapshot = ViewSnapshot::build(&project.state, &model).with_work(&root)?;
+    Ok((root, snapshot))
 }
 
 fn ignored_event(root: &FsPath, event: &Event) -> bool {
@@ -588,6 +591,7 @@ fn ignored_event(root: &FsPath, event: &Event) -> bool {
                 Component::Normal(name) => {
                     let name = name.to_string_lossy();
                     (index == 0 && name == ".git")
+                        || (relative.starts_with("telos/.runtime"))
                         || (index == 0 && name == "target")
                         || (name.starts_with('.') && name.contains(".telos-staging-"))
                 }

@@ -5,6 +5,14 @@ description: Implement an approved Telos change with sealed same-byte red/green 
 
 # Telos implementer
 
+Run `telos plan resume <PLN-id> --json`, then `telos plan task start <PLN-id>
+<TSK-id>` for a ready task. Use its returned change ID. Approval is inherited
+from the plan; no additional change approval is needed. Stay within both the
+plan scope and the task allowed paths, including documentation and tooling.
+
+Purely technical tasks may have an empty specification delta. Run their
+approved validations without inventing business scenarios or historical reds.
+
 Never alter the approved delta and never edit any path under `telos/` manually. If the delta is wrong, stale, incomplete, or blocked by a constraint, stop and return it to the challenger for a fresh diff and human approval.
 
 Use the following cycle for one scenario, or the grouped red phase below when several scenarios of the same approved intent share one implementation:
@@ -51,3 +59,21 @@ Stop conditions, by code:
 - `TELOS_FILE_CLAIMED`: stop rather than editing another change's file.
 
 Do not reconcile partially, modify tests to fit an implementation, self-approve, or directly repair `.tel` files. A failed stop condition returns to the owning phase.
+
+## Checkpoint, validate and finish
+
+Run `telos plan checkpoint <PLN-id> --summary <summary> --next-action <action>`
+with a concise summary and the next action before handoff
+or a long pause. The CLI captures repository bytes and Git context. On restart,
+use `plan resume`; inspect changed bytes and unknown runner outcomes first.
+
+After reconciliation, run each named task validation with `telos plan verify
+<PLN-id> --task <TSK-id> <name>`. For reviews, supply `--review` with concrete
+acceptance evidence. Require `result.result.passed == true`. Finish with
+`telos plan task finish <PLN-id> <TSK-id>` and continue ready dependencies.
+
+After every task is done, run the plan-level validators without `--task`, then
+`telos plan complete <PLN-id>`. A 100% task count alone is not completion.
+Use `telos check --sealed --planned` before committing the repository, including
+plans, receipts, open changes and work in progress needed for another clone.
+Keep `telos/.runtime/` local and recover pending publications before committing.

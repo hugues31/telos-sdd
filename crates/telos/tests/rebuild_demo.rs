@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use common::{repo, telos};
+use common::{raw_telos as telos, repo};
 
 const INT_0017: &str = "INT-0017";
 const INT_0042: &str = "INT-0042";
@@ -432,17 +432,24 @@ fn implement_batch(
     target_dir: &Path,
     batch: Batch<'_>,
 ) -> (Value, Value, Value, Value) {
+    let title = format!("Rebuild {}", batch.intent);
+    let plan = result(root, target_dir, &["plan", "open", &title, "--json"])["plan"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let definition = json!({"title":title,"request":"Reconstruct the Billing specification","goal":"Implement the approved scenario","success_criteria":["Scenario passes and architecture is respected"],"brief":{"summary":"Rebuild from the existing accepted Billing contracts","brainstormed":true},"scope":["Cargo.toml","Cargo.lock","src/**","tests/**","telos/contexts/**"],"tasks":[{"id":"TSK-001","title":title,"kind":"behavior","allowed_paths":["Cargo.toml","Cargo.lock","src/**","tests/**","telos/contexts/**"],"targets":[batch.intent,batch.scenario],"acceptance":["Same-byte red and green witnesses"],"validation":[{"kind":"scenario","id":batch.scenario}]}],"validation":[{"kind":"review","name":"acceptance"}]});
+    result_stdin(
+        root,
+        target_dir,
+        &["plan", "edit", &plan, "--json"],
+        &definition,
+    );
     let opened = result(
         root,
         target_dir,
-        &[
-            "change",
-            "open",
-            &format!("rebuild {}", batch.intent),
-            "--json",
-        ],
+        &["plan", "task", "prepare", &plan, "TSK-001", "--json"],
     );
-    let change = opened["id"].as_str().expect("change id").to_owned();
+    let change = opened["result"]["change"].as_str().unwrap().to_owned();
 
     let staged = result_stdin(
         root,
@@ -522,20 +529,32 @@ fn implement_batch(
         assert_ne!(before, after, "the machine check must be staged");
     }
 
-    let digest = diff["digest"].as_str().expect("diff digest");
-    let approved = result(
+    result(
+        root,
+        target_dir,
+        &["plan", "task", "import", &plan, "TSK-001", "--json"],
+    );
+    let digest = result(root, target_dir, &["plan", "diff", &plan, "--json"])["digest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    result(
         root,
         target_dir,
         &[
-            "change",
+            "plan",
             "approve",
-            &change,
+            &plan,
             "--expected-digest",
-            digest,
+            &digest,
             "--json",
         ],
     );
-    assert_eq!(approved["digest"], diff["digest"]);
+    result(
+        root,
+        target_dir,
+        &["plan", "task", "start", &plan, "TSK-001", "--json"],
+    );
 
     let progress_before = result(root, target_dir, &["rebuild", "status", "--json"]);
     assert_eq!(
@@ -625,6 +644,46 @@ fn implement_batch(
     assert_eq!(progress["scenarios_green"], json!(batch.expected_green));
     assert_eq!(progress["scenarios_total"], json!(2));
 
+    result(
+        root,
+        target_dir,
+        &[
+            "plan",
+            "verify",
+            &plan,
+            "--task",
+            "TSK-001",
+            batch.scenario,
+            "--json",
+        ],
+    );
+    result(
+        root,
+        target_dir,
+        &["plan", "task", "finish", &plan, "TSK-001", "--json"],
+    );
+    result(
+        root,
+        target_dir,
+        &[
+            "plan",
+            "verify",
+            &plan,
+            "acceptance",
+            "--review",
+            "Scenario and architecture assertions pass",
+            "--json",
+        ],
+    );
+    result(root, target_dir, &["plan", "complete", &plan, "--json"]);
+    // Per-run identities are intentionally random; compare the behavioral
+    // observations after checking that witnesses belong to this exact change.
+    assert_eq!(red["change"], change);
+    assert_eq!(green["change"], change);
+    let mut red = red;
+    let mut green = green;
+    red["change"] = json!("<change-uuid>");
+    green["change"] = json!("<change-uuid>");
     (progress_before, red, green, progress)
 }
 
@@ -790,7 +849,7 @@ fn relative_files(root: &Path) -> BTreeSet<String> {
             let entry = entry.expect("read reconstructed entry");
             let path = entry.path();
             let relative = path.strip_prefix(root).unwrap();
-            if relative.starts_with(".git") {
+            if relative.starts_with(".git") || relative.starts_with("telos/.runtime") {
                 continue;
             }
             if entry
@@ -875,14 +934,9 @@ fn reconstruct(target_dir: &Path) -> Observations {
     assert_eq!(initial_status["scenarios_total"], json!(2));
     assert_eq!(initial_status["scenarios"][0]["tests"], json!([]));
     assert_eq!(initial_status["scenarios"][1]["tests"], json!([]));
-    let bootstrapped = result(
-        root,
-        target_dir,
-        &["change", "reconcile", "--full", "--json"],
-    );
-    assert_eq!(bootstrapped["ops_applied"], json!(0));
-    assert_eq!(bootstrapped["checks_run"], json!(0));
-    assert_eq!(bootstrapped["tests_run"], json!(0));
+    let bootstrapped = result(root, target_dir, &["init", "--from-spec", "--json"]);
+    assert_eq!(bootstrapped["observed"], true);
+    assert_eq!(bootstrapped["sealed"], true);
     assert!(root.join("telos/telos.lock").exists());
     assert!(!root.join(CARGO_MANIFEST).exists());
     assert!(!root.join(CARGO_LOCK).exists());
@@ -982,7 +1036,7 @@ fn reconstruct(target_dir: &Path) -> Observations {
             .all(|entry| { entry.unwrap().file_name() == "counters.toml" })
     );
 
-    let expected_files = BTreeSet::from([
+    let mut expected_files = BTreeSet::from([
         "Cargo.lock".to_owned(),
         "Cargo.toml".to_owned(),
         "README.md".to_owned(),
@@ -1005,6 +1059,25 @@ fn reconstruct(target_dir: &Path) -> Observations {
         "telos/telos.lock".to_owned(),
         "telos/telos.toml".to_owned(),
     ]);
+    expected_files.insert("telos/.gitignore".into());
+    expected_files.insert("telos/ledger.tel".into());
+    let plans = result(root, target_dir, &["plan", "list", "--json"]);
+    let history = result(root, target_dir, &["history", "--json"]);
+    assert_eq!(history["history"].as_array().unwrap().len(), 2);
+    for receipt in history["history"].as_array().unwrap() {
+        expected_files.insert(format!(
+            "telos/history/{}.tel",
+            receipt["id"].as_str().unwrap()
+        ));
+    }
+    for plan in plans
+        .as_array()
+        .or_else(|| plans["plans"].as_array())
+        .unwrap()
+    {
+        expected_files.insert(format!("telos/plans/{}.tel", plan["id"].as_str().unwrap()));
+        assert_eq!(plan["state"], "completed");
+    }
     assert_eq!(relative_files(root), expected_files);
 
     Observations {

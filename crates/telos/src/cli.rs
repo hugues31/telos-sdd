@@ -28,17 +28,26 @@ struct Cli {
     /// Answer with the JSON envelope instead of human-readable text.
     #[arg(long, global = true)]
     json: bool,
+    /// Replay identity for a mutation or execution attempt.
+    #[arg(long, global = true)]
+    request_id: Option<String>,
+    /// Expected owning plan journal version.
+    #[arg(long, global = true)]
+    expected_version: Option<u64>,
 
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Print the telos version.
     Version,
     /// Create `telos/` in this git repository and seal it.
     Init {
+        /// Observe and seal a copied current-format specification corpus.
+        #[arg(long, conflicts_with_all = ["agents", "ci"])]
+        from_spec: bool,
         /// Install integrations for these comma-delimited agent hosts.
         #[arg(long, value_delimiter = ',', value_parser = parse_agent_host)]
         agents: Vec<AgentHost>,
@@ -54,13 +63,13 @@ enum Command {
     },
     /// Print the project's canonical configuration, or stage a complete edit.
     Config {
-        /// The change to stage into (`CHG-0001`).
+        /// The change to stage into (`CHG-00000000-0000-0000-0000-000000000001`).
         #[arg(long)]
         change: Option<String>,
     },
     /// Print the bounded-context map, or stage its complete replacement.
     Map {
-        /// The change to stage into (`CHG-0001`). The map DSL is read on stdin.
+        /// The change to stage into (`CHG-00000000-0000-0000-0000-000000000001`). The map DSL is read on stdin.
         #[arg(long)]
         change: Option<String>,
     },
@@ -83,13 +92,27 @@ enum Command {
         /// Also require the project to be sealed and unmodified.
         #[arg(long)]
         sealed: bool,
+        /// Verify whole-repository attribution to approved plans.
+        #[arg(long)]
+        planned: bool,
+        /// Trusted CI base commit; reject rewritten history.
+        #[arg(long, requires = "planned")]
+        base: Option<String>,
     },
     /// Print one entity's canonical block and its relations.
     Show {
         /// A typed id (`INT-0042`, `SCN-0107`, `CON-0003`) or a bare notion
         /// name (`Invoice`).
         target: String,
+        #[arg(long)]
+        history: bool,
     },
+    /// Persist and execute a resumable native plan.
+    Plan(commands::plan::PlanArgs),
+    /// Query retained plan, entity or file provenance.
+    History { target: Option<String> },
+    /// Finish an interrupted atomic publication.
+    Recover,
     /// List every entity of one kind, sorted by its natural key.
     List {
         /// Which kind of entity to list.
@@ -134,7 +157,7 @@ enum Command {
     Add {
         /// What kind of entity to add.
         kind: EntityKind,
-        /// The change to stage into (`CHG-0001`).
+        /// The change to stage into (`CHG-00000000-0000-0000-0000-000000000001`).
         #[arg(long)]
         change: String,
     },
@@ -144,7 +167,7 @@ enum Command {
         kind: EntityKind,
         /// The entity's natural key (`Invoice`, `INT-0042`, `CON-0003`).
         key: String,
-        /// The change to stage into (`CHG-0001`).
+        /// The change to stage into (`CHG-00000000-0000-0000-0000-000000000001`).
         #[arg(long)]
         change: String,
     },
@@ -155,13 +178,13 @@ enum Command {
         /// Destination owner (`context`, `context/capability`, or `project`).
         #[arg(long)]
         to: String,
-        /// The change to stage into (`CHG-0001`).
+        /// The change to stage into (`CHG-00000000-0000-0000-0000-000000000001`).
         #[arg(long)]
         change: String,
     },
     /// Capture the project's drift as staged operations of a change.
     Adopt {
-        /// Append the operations to this change (`CHG-0001`) instead of
+        /// Append the operations to this change (`CHG-00000000-0000-0000-0000-000000000001`) instead of
         /// opening a new one.
         #[arg(long, value_name = "CHG-NNNN")]
         into: Option<String>,
@@ -207,7 +230,7 @@ enum Command {
         kind: EntityKind,
         /// The entity's natural key (`Invoice`, `INT-0042`, `CON-0003`).
         key: String,
-        /// The change to stage into (`CHG-0001`).
+        /// The change to stage into (`CHG-00000000-0000-0000-0000-000000000001`).
         #[arg(long)]
         change: String,
     },
@@ -217,6 +240,9 @@ impl Command {
     /// The name this command answers under in the envelope's `command` key.
     fn name(&self) -> &'static str {
         match self {
+            Command::Plan(..) => "plan",
+            Command::History { .. } => "history",
+            Command::Recover => "recover",
             Command::Version => "version",
             Command::Init { .. } => "init",
             Command::AgentGuard { .. } => "agent-guard",
@@ -258,7 +284,11 @@ impl Command {
 /// way -- success on stdout, errors on stderr -- so a shell pipeline is
 /// never fed an error message as if it were data.
 pub fn run() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Command::Plan(args) = &mut cli.command {
+        args.request_id = cli.request_id.clone();
+        args.expected_version = cli.expected_version;
+    }
 
     if let Command::AgentGuard { host } = &cli.command {
         return commands::agents::guard::run(*host);
@@ -277,7 +307,80 @@ pub fn run() -> ExitCode {
     }
 
     let name = cli.command.name();
-    let res = execute(&cli.command);
+    let res = (|| {
+        use commands::journal::Owner;
+        let payload = match &cli.command {
+            Command::Add { .. }
+            | Command::Edit { .. }
+            | Command::Config { change: Some(_) }
+            | Command::Map { change: Some(_) } => Some(stdin_payload()?),
+            Command::Plan(args)
+                if matches!(args.command, commands::plan::PlanCommand::Edit { .. }) =>
+            {
+                Some(stdin_payload()?)
+            }
+            _ => None,
+        };
+        let owner = match &cli.command {
+            Command::Test { .. }
+            | Command::Bind { .. }
+            | Command::Revert { .. }
+            | Command::Change {
+                change: ChangeCommand::Reconcile { .. },
+            } => Some(Owner::Active),
+            command if cli.request_id.is_some() || cli.expected_version.is_some() => {
+                match command {
+                    Command::Add { change, .. }
+                    | Command::Edit { change, .. }
+                    | Command::Move { change, .. }
+                    | Command::Remove { change, .. }
+                    | Command::Config {
+                        change: Some(change),
+                    }
+                    | Command::Map {
+                        change: Some(change),
+                    }
+                    | Command::Adopt {
+                        into: Some(change), ..
+                    }
+                    | Command::Change {
+                        change: ChangeCommand::Approve { id: change, .. },
+                    }
+                    | Command::Change {
+                        change: ChangeCommand::Abandon { id: change },
+                    } => Some(Owner::Change(change)),
+                    Command::Change {
+                        change:
+                            ChangeCommand::Open {
+                                plan: Some(plan),
+                                task: Some(task),
+                                ..
+                            },
+                    } => Some(Owner::Task(plan, task)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(owner) = owner {
+            let ws = telos_core::workspace::Workspace::discover(&ctx()?.cwd)?;
+            let _writer = telos_core::transaction::Writer::acquire(&ws.repo_root)?;
+            let generated = telos_core::work::new_id("REQ")?;
+            let operation =
+                serde_json::json!({"command":format!("{:?}",cli.command),"payload":payload})
+                    .to_string();
+            commands::journal::run(
+                &ws.repo_root,
+                owner,
+                &operation,
+                cli.request_id.as_deref().unwrap_or(&generated),
+                cli.expected_version,
+                || execute(&cli.command, payload.as_deref()),
+            )
+        } else {
+            execute(&cli.command, payload.as_deref())
+        }
+    })();
     let failed = res.is_err();
 
     let (text, code) = render(name, res, cli.json);
@@ -289,19 +392,35 @@ pub fn run() -> ExitCode {
     code
 }
 
-fn execute(command: &Command) -> CmdResult {
+fn execute(command: &Command, payload: Option<&str>) -> CmdResult {
+    let _reader = if !matches!(
+        command,
+        Command::Recover | Command::Init { .. } | Command::Version
+    ) {
+        telos_core::workspace::Workspace::discover(&ctx()?.cwd)
+            .ok()
+            .map(|ws| telos_core::transaction::Writer::acquire(&ws.repo_root))
+            .transpose()?
+    } else {
+        None
+    };
+
     match command {
         Command::Version => commands::version(),
-        Command::Init { agents, ci } => commands::init::run(&ctx()?, agents, *ci),
+        Command::Init {
+            agents,
+            ci,
+            from_spec,
+        } => {
+            if *from_spec {
+                commands::init::from_spec(&ctx()?)
+            } else {
+                commands::init::run(&ctx()?, agents, *ci)
+            }
+        }
         Command::AgentGuard { .. } => unreachable!("agent guard returned before dispatch"),
-        Command::Config { change } => {
-            let payload = change.as_ref().map(|_| stdin_payload()).transpose()?;
-            commands::config::run(&ctx()?, change.as_deref(), payload.as_deref())
-        }
-        Command::Map { change } => {
-            let payload = change.as_ref().map(|_| stdin_payload()).transpose()?;
-            commands::map::run(&ctx()?, change.as_deref(), payload.as_deref())
-        }
+        Command::Config { change } => commands::config::run(&ctx()?, change.as_deref(), payload),
+        Command::Map { change } => commands::map::run(&ctx()?, change.as_deref(), payload),
         Command::Status => commands::status::run(&ctx()?),
         Command::View {
             export: Some(destination),
@@ -319,8 +438,31 @@ fn execute(command: &Command) -> CmdResult {
         Command::View { export: None, .. } => {
             unreachable!("live view returned before ordinary dispatch")
         }
-        Command::Check { sealed } => commands::check::run(&ctx()?, *sealed),
-        Command::Show { target } => commands::show::run(&ctx()?, target),
+        Command::Check {
+            sealed,
+            planned,
+            base,
+        } => {
+            let context = ctx()?;
+            if *planned || *sealed {
+                let ws = telos_core::workspace::Workspace::discover(&context.cwd)?;
+                telos_core::plans::ledger::require_clean(&ws.repo_root)?;
+                if let Some(base) = base {
+                    telos_core::plans::ledger::check_base(&ws.repo_root, base)?;
+                }
+            }
+            commands::check::run(&context, *sealed)
+        }
+        Command::Plan(args) => commands::plan::run(&ctx()?, args, payload),
+        Command::History { target } => commands::plan::history(&ctx()?, target.as_deref()),
+        Command::Recover => commands::plan::recover(&ctx()?),
+        Command::Show { target, history } => {
+            if *history {
+                commands::plan::history(&ctx()?, Some(target))
+            } else {
+                commands::show::run(&ctx()?, target)
+            }
+        }
         Command::List {
             kind,
             context,
@@ -332,10 +474,10 @@ fn execute(command: &Command) -> CmdResult {
         Command::Rebuild { rebuild } => commands::rebuild::run(&ctx()?, rebuild),
         Command::Change { change } => commands::change::run(&ctx()?, change),
         Command::Add { kind, change } => {
-            commands::mutate::add(&ctx()?, *kind, change, &stdin_payload()?)
+            commands::mutate::add(&ctx()?, *kind, change, payload.unwrap_or_default())
         }
         Command::Edit { kind, key, change } => {
-            commands::mutate::edit(&ctx()?, *kind, key, change, &stdin_payload()?)
+            commands::mutate::edit(&ctx()?, *kind, key, change, payload.unwrap_or_default())
         }
         Command::Move { target, to, change } => {
             commands::mutate::move_entity(&ctx()?, target, to, change)

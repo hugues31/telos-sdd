@@ -101,7 +101,8 @@ pub fn drift_token(
         .collect::<Vec<_>>();
     let live_oids = git.blob_oids(&live_paths)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"telos-drift-v2\0");
+    hasher.update(b"telos-drift-v3\0");
+    hasher.update(crate::work::digest(&crate::inventory::capture(&ws.repo_root)?)?.as_bytes());
     hasher.update(lock.spec_digest.as_bytes());
     hasher.update(b"\0");
     for (table, entries) in [(b's', &lock.spec), (b'c', &lock.code)] {

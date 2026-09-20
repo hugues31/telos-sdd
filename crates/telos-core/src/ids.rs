@@ -188,7 +188,47 @@ macro_rules! entity_id {
 entity_id!(IntentId, "INT");
 entity_id!(ScenarioId, "SCN");
 entity_id!(ConstraintId, "CON");
-entity_id!(ChangeId, "CHG");
+/// A branch-safe change identity. Small constructor values remain useful in
+/// deterministic fixtures; the public spelling is always a UUID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChangeId(pub u128);
+
+impl ChangeId {
+    pub fn allocate() -> Result<Self, TelosError> {
+        crate::work::new_id("CHG")?.parse()
+    }
+}
+
+impl fmt::Display for ChangeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let h = format!("{:032x}", self.0);
+        write!(
+            f,
+            "CHG-{}-{}-{}-{}-{}",
+            &h[..8],
+            &h[8..12],
+            &h[12..16],
+            &h[16..20],
+            &h[20..]
+        )
+    }
+}
+
+impl FromStr for ChangeId {
+    type Err = TelosError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        crate::work::validate_id("CHG", value)?;
+        u128::from_str_radix(&value[4..].replace('-', ""), 16)
+            .map(Self)
+            .map_err(|e| TelosError::new(ErrorCode::TelosParseError, e.to_string()))
+    }
+}
+
+impl Serialize for ChangeId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
 
 macro_rules! domain_id {
     ($name:ident, $noun:literal) => {
@@ -650,9 +690,20 @@ mod tests {
 
     #[test]
     fn change_id_round_trips_through_display_and_from_str() {
-        assert_eq!("CHG-0007".parse::<ChangeId>().unwrap(), ChangeId(7));
-        assert_eq!(ChangeId(7).to_string(), "CHG-0007");
-        assert_eq!(serde_json::to_string(&ChangeId(7)).unwrap(), "\"CHG-0007\"");
+        assert_eq!(
+            "CHG-00000000-0000-0000-0000-000000000007"
+                .parse::<ChangeId>()
+                .unwrap(),
+            ChangeId(7)
+        );
+        assert_eq!(
+            ChangeId(7).to_string(),
+            "CHG-00000000-0000-0000-0000-000000000007"
+        );
+        assert_eq!(
+            serde_json::to_string(&ChangeId(7)).unwrap(),
+            "\"CHG-00000000-0000-0000-0000-000000000007\""
+        );
     }
 
     // --- NotionName ---
@@ -705,7 +756,9 @@ mod tests {
             EntityRef::Constraint(ConstraintId(1))
         );
         assert_eq!(
-            "CHG-0001".parse::<EntityRef>().unwrap(),
+            "CHG-00000000-0000-0000-0000-000000000001"
+                .parse::<EntityRef>()
+                .unwrap(),
             EntityRef::Change(ChangeId(1))
         );
     }

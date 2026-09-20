@@ -1,56 +1,22 @@
-//! `telos adopt [--into CHG-NNNN]`: the exit from drift that captures the
-//! current bytes.
-//!
-//! Drift is refused everywhere else -- `change open`, the staging verbs,
-//! `approve`, `reconcile` -- and this is one of the two commands that
-//! makes those refusals cheap rather than punitive: an edit made outside the
-//! protocol is not lost, it is *routed back in*. Every drifted path becomes a
-//! staged op of a change, and from there the ordinary loop applies: `change
-//! diff` to review it, `change approve` to freeze it, `change reconcile` to
-//! seal it.
-//!
-//! The flow mirrors [`crate::commands::mutate`]'s, and for the same reason:
-//! nothing reaches the disk until everything has been decided.
-//!
-//! 1. **State first.** Drift is what this command acts on, so its absence is
-//!    the one refusal that comes before any work.
-//! 2. **The plan is built** ([`plan_adopt`]) from the *unclaimed* drift only
-//!    -- a path an open change already claims is that change in progress,
-//!    never adopted twice.
-//! 3. **The target change is chosen**: a new one, or `--into`'s.
-//! 4. **One file, one change**: the claim gate, against every *other*
-//!    open change.
-//! 5. **The whole delta is validated** ([`validate_ops_idempotent`]) --
-//!    including the ops the target change already held.
-//! 6. **Only then does anything reach the disk**, change file first,
-//!    `counters.toml` second.
-//!
-//! After a successful `adopt` the project is `changing`, not `coherent`: the
-//! drift is claimed now, so it stops counting as drift, but nothing has been
-//! resealed. That is the point -- `adopt` captures, `reconcile` seals.
+//! Capture observed specification drift into a prepared recovery-plan change.
+//! Adoption preserves bytes and stages their semantic delta for plan review;
+//! only approved recovery execution may later reconcile that delta.
 
 use serde_json::json;
 
 use telos_core::adopt::plan_adopt;
 use telos_core::changes::{read_change, scan_changes, write_change};
-use telos_core::counters::write_counters;
 use telos_core::error::{ErrorCode, TelosError};
-use telos_core::model::{Change, ChangeStatus};
+use telos_core::model::ChangeStatus;
 use telos_core::overlay::validate_ops_idempotent;
 use telos_core::state::{compute_state, drift_token};
 
 use crate::commands::change::parse_change_id;
 use crate::commands::mutate::require_unclaimed;
-use crate::commands::{Ctx, allocator, diagnostics_to_error, project, require_drift};
+use crate::commands::{Ctx, diagnostics_to_error, project, require_drift};
 use crate::envelope::{CmdResult, Outcome};
 
-/// The motivation a change opened by `adopt` carries. A change file must say
-/// why it exists, and “somebody edited the spec outside the protocol”
-/// is the honest answer -- the review that follows is where a better one
-/// gets written, if the caller wants one.
-const MOTIVATION: &str = "adopted drift";
-
-/// `telos adopt`, and `telos adopt --into CHG-NNNN`.
+/// `telos adopt --into CHG-<uuid>` captures drift into its recovery task.
 pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdResult {
     // A malformed id is the caller's mistake and saying so needs no
     // workspace -- the same order `change abandon` and the staging verbs
@@ -60,6 +26,27 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
     let project = project(ctx)?;
     require_drift(&project, "adopt")?;
     let authorized_state = require_expected_state(&project, expected_state)?;
+    let id = into.ok_or_else(|| {
+        TelosError::new(
+            ErrorCode::TelosPlanRequired,
+            "adoption requires --into a prepared recovery-plan change",
+        )
+    })?;
+    let owned = read_change(&project.ws, id)?;
+    let (owner, task) =
+        telos_core::plans::actions::require_change_contract(&project.ws.repo_root, &owned, false)?;
+    if task.definition.kind != telos_core::plans::model::TaskKind::Recovery {
+        return Err(TelosError::new(
+            ErrorCode::TelosPlanScopeViolation,
+            "adoption requires a recovery task",
+        ));
+    }
+    telos_core::plans::ledger::require_scope(
+        &project.ws.repo_root,
+        &owner,
+        &task.definition,
+        &telos_core::inventory::capture(&project.ws.repo_root)?,
+    )?;
 
     // Before the allocator, deliberately: [`allocator`] loads the model, and
     // a spec that does not parse is exactly what an unparseable drifted file
@@ -72,24 +59,7 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
         &project.state.drift,
     )?;
 
-    let (mut change, alloc) = match into {
-        Some(id) => (read_change(&project.ws, id)?, None),
-        None => {
-            let mut alloc = allocator(&project.ws, &project.lock)?;
-            let id = alloc.next_change();
-            (
-                Change {
-                    id,
-                    motivation: MOTIVATION.to_string(),
-                    status: ChangeStatus::Open,
-                    approved_digest: None,
-                    ops: Vec::new(),
-                    journal: Vec::new(),
-                },
-                Some(alloc),
-            )
-        }
-    };
+    let mut change = owned;
 
     // Defensively exclude claimed paths: they are never unclaimed drift, so
     // `plan_adopt` cannot have produced one -- unless a change file was
@@ -113,11 +83,6 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
     require_unchanged_state(&project, &authorized_state)?;
 
     write_change(&project.ws, &change)?;
-    // Only a *new* change spent an id; `--into` reuses one that was
-    // allocated and persisted when it was opened.
-    if let Some(alloc) = &alloc {
-        write_counters(&project.ws, &alloc.counters())?;
-    }
 
     let id = change.id;
     Ok(Outcome {
@@ -125,7 +90,8 @@ pub fn run(ctx: &Ctx, into: Option<&str>, expected_state: Option<&str>) -> CmdRe
         human: format!("{id}: adopted {adopted} drifted path(s)"),
         next_actions: vec![
             format!("telos change diff {id}"),
-            format!("telos change approve {id}"),
+            format!("telos plan task import {} {}", owner.id, task.definition.id),
+            format!("telos plan diff {}", owner.id),
         ],
     })
 }

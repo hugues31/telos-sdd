@@ -141,6 +141,9 @@ fn fixture_without_runner() -> TempDir {
         .unwrap()
         .write(&ws.lock_path())
         .unwrap();
+    fs::remove_file(tmp.path().join(telos_core::plans::ledger::PATH)).unwrap();
+    fs::remove_dir_all(tmp.path().join("telos/plans")).unwrap();
+    telos_core::plans::ledger::bootstrap(tmp.path()).unwrap();
     tmp
 }
 
@@ -153,7 +156,10 @@ fn open_change(dir: &Path) {
     .output()
     .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(json_stdout(&out)["result"]["id"], json!("CHG-0001"));
+    assert_eq!(
+        json_stdout(&out)["result"]["id"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
 }
 
 /// `SCN-0091` exactly as the corpus declares it: re-supplied unchanged so
@@ -189,7 +195,12 @@ fn stage_new_scenario(dir: &Path) -> String {
     let out = telos(
         dir,
         &[
-            "edit", "intent", "INT-0017", "--change", "CHG-0001", "--json",
+            "edit",
+            "intent",
+            "INT-0017",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
         ],
     )
     .write_stdin(payload)
@@ -210,9 +221,17 @@ fn stage_new_scenario(dir: &Path) -> String {
 }
 
 fn approve(dir: &Path) -> Value {
-    let out = telos(dir, &["change", "approve", "CHG-0001", "--json"])
-        .output()
-        .unwrap();
+    let out = telos(
+        dir,
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .output()
+    .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     json_stdout(&out)
 }
@@ -227,7 +246,7 @@ fn append_test_fn(dir: &Path) {
     fs::write(&path, src).unwrap();
 }
 
-/// A project one `telos test` away from its first witness: `CHG-0001`
+/// A project one `telos test` away from its first witness: `CHG-00000000-0000-0000-0000-000000000001`
 /// approved with a brand-new `SCN-0108` staged on `INT-0017`, and the
 /// matching test function written into the sealed test file.
 fn approved_with_a_drifted_test() -> TempDir {
@@ -279,7 +298,8 @@ fn error_of(dir: &Path, args: &[&str]) -> Value {
 
 /// The whole change file, as text.
 fn change_file(dir: &Path) -> String {
-    fs::read_to_string(dir.join("telos/changes/CHG-0001.tel")).unwrap()
+    fs::read_to_string(dir.join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"))
+        .unwrap()
 }
 
 // --- the happy paths --------------------------------------------------------
@@ -326,13 +346,13 @@ fn test_records_a_green_witness_with_the_canonical_result() {
                 "scenario": SCN,
                 "witness": "green",
                 "test": format!("{BILLING_TEST}::{TEST_FN}"),
-                "change": "CHG-0001",
+                "change": "CHG-00000000-0000-0000-0000-000000000001",
                 "command": RUNNER,
                 "evidence": "exit-status",
                 "executed": null,
             },
             "error": null,
-            "next_actions": ["telos change reconcile CHG-0001"]
+            "next_actions": ["telos change reconcile CHG-00000000-0000-0000-0000-000000000001"]
         })
     );
 }
@@ -461,7 +481,7 @@ fn test_moves_the_owner_to_implementing_and_the_project_to_changing() {
     assert_eq!(envelope["result"]["drift"], Value::Null);
     assert_eq!(
         envelope["result"]["changes"],
-        json!([{ "id": "CHG-0001", "status": "implementing", "obligations": ["reconcile"] }])
+        json!([{ "id": "CHG-00000000-0000-0000-0000-000000000001", "status": "implementing", "obligations": ["reconcile"] }])
     );
 }
 
@@ -472,15 +492,30 @@ fn journalling_a_run_leaves_the_approval_fresh() {
     let tmp = approved_with_a_drifted_test();
     // Read back rather than re-approved: the project is drifted on the test
     // file at this point, and `approve` is gated on that.
-    let approved_digest = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"])["result"]
-        ["approved_digest"]
+    let approved_digest = run_json(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )["result"]["approved_digest"]
         .clone();
 
     telos(tmp.path(), &["test", SCN, "--json"])
         .output()
         .unwrap();
 
-    let envelope = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
+    let envelope = run_json(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    );
     assert_eq!(envelope["result"]["stale"], json!(false));
     assert_eq!(envelope["result"]["approved_digest"], approved_digest);
     assert_eq!(envelope["result"]["status"], json!("implementing"));
@@ -522,8 +557,15 @@ fn reapproving_after_implementation_refreshes_the_digest_but_keeps_implementing(
         .output()
         .unwrap();
 
-    let first_digest = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"])
-        ["result"]["approved_digest"]
+    let first_digest = run_json(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )["result"]["approved_digest"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -534,36 +576,29 @@ fn reapproving_after_implementation_refreshes_the_digest_but_keeps_implementing(
             "intent",
             BOUND_INTENT,
             "--change",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--json",
         ],
     )
     .write_stdin(r#"{"telos":"The implementation was re-reviewed."}"#)
     .output()
     .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-
-    let stale = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
-    assert_eq!(stale["result"]["status"], json!("implementing"));
-    assert_eq!(stale["result"]["stale"], json!(true));
-    assert_eq!(stale["result"]["approved_digest"], json!(first_digest));
-
-    let reapproval = approve(tmp.path());
-    let refreshed_digest = reapproval["result"]["digest"].as_str().unwrap().to_owned();
-    assert_eq!(reapproval["result"]["status"], json!("implementing"));
-    assert_ne!(refreshed_digest, first_digest);
-
-    let fresh = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
-    assert_eq!(fresh["result"]["status"], json!("implementing"));
-    assert_eq!(fresh["result"]["stale"], json!(false));
-    assert_eq!(fresh["result"]["approved_digest"], json!(refreshed_digest));
     assert_eq!(
-        fresh["next_actions"],
-        json!(["telos change reconcile CHG-0001"])
+        json_stdout(&out)["error"]["code"],
+        "TELOS_PLAN_SCOPE_VIOLATION"
     );
-
-    let reconciled = run_json(tmp.path(), &["change", "reconcile", "CHG-0001", "--json"]);
-    assert_eq!(reconciled["ok"], json!(true), "{reconciled}");
+    let fresh = run_json(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    );
+    assert_eq!(fresh["result"]["status"], "implementing");
+    assert_eq!(fresh["result"]["approved_digest"], first_digest);
+    assert_eq!(fresh["result"]["stale"], false);
 }
 
 // --- gates checked before any write ------------------------------------------
@@ -612,11 +647,13 @@ fn test_on_a_drafted_owner_asks_for_the_approval_first() {
     assert_eq!(error["code"], json!("TELOS_CHANGE_STATE_INVALID"));
     assert_eq!(
         error["message"],
-        json!("change CHG-0001 is not approved; approve it first")
+        json!("change CHG-00000000-0000-0000-0000-000000000001 is not approved; approve it first")
     );
     assert_eq!(
         error["hint"],
-        json!("run `telos change diff CHG-0001` then `telos change approve CHG-0001`")
+        json!(
+            "review the plan owning CHG-00000000-0000-0000-0000-000000000001, approve its digest, then run `telos plan task start <plan> <task>`"
+        )
     );
 }
 
@@ -787,7 +824,7 @@ fn test_all_runs_every_scenario_that_owes_a_witness() {
                 "scenario": SCN,
                 "witness": "green",
                 "test": format!("{BILLING_TEST}::{TEST_FN}"),
-                "change": "CHG-0001",
+                "change": "CHG-00000000-0000-0000-0000-000000000001",
                 "command": RUNNER,
                 "evidence": "exit-status",
                 "executed": null,
@@ -857,9 +894,9 @@ const BOUND_INTENT: &str = "INT-0042";
 /// gate has nothing to find.
 const UNOWNED_INTENT: &str = "INT-0017";
 
-/// Stages a no-op `edit intent INT-0042` into `CHG-0001`. An empty patch
+/// Stages a no-op `edit intent INT-0042` into `CHG-00000000-0000-0000-0000-000000000001`. An empty patch
 /// payload keeps every field exactly as `patch_intent`'s base default
-/// leaves it, so the only effect of this call is making `CHG-0001` the
+/// leaves it, so the only effect of this call is making `CHG-00000000-0000-0000-0000-000000000001` the
 /// intent's owner.
 fn edit_int_0042(dir: &Path) {
     let out = telos(
@@ -869,7 +906,7 @@ fn edit_int_0042(dir: &Path) {
             "intent",
             BOUND_INTENT,
             "--change",
-            "CHG-0001",
+            "CHG-00000000-0000-0000-0000-000000000001",
             "--json",
         ],
     )
@@ -879,7 +916,7 @@ fn edit_int_0042(dir: &Path) {
     assert!(out.status.success(), "{}", stderr(&out));
 }
 
-/// A project one `telos bind` away from its first binding: `CHG-0001`
+/// A project one `telos bind` away from its first binding: `CHG-00000000-0000-0000-0000-000000000001`
 /// approved, owning `INT-0042` through a no-op edit.
 fn approved_owning_int_0042() -> TempDir {
     let tmp = with_fixture();
@@ -925,7 +962,7 @@ fn stage_new_intent(dir: &Path, change: &str) -> String {
 }
 
 /// `telos change open`, not asserting which id comes back -- unlike
-/// [`open_change`], usable once `CHG-0001` is no longer guaranteed to be
+/// [`open_change`], usable once `CHG-00000000-0000-0000-0000-000000000001` is no longer guaranteed to be
 /// the next one (a fixture that already reconciled and closed an earlier
 /// change).
 fn open_change_any(dir: &Path, motivation: &str) -> String {
@@ -939,7 +976,7 @@ fn open_change_any(dir: &Path, motivation: &str) -> String {
         .to_string()
 }
 
-/// `telos change approve <id>`, for a change id other than `CHG-0001`.
+/// `telos change approve <id>`, for a change id other than `CHG-00000000-0000-0000-0000-000000000001`.
 fn approve_id(dir: &Path, id: &str) {
     let out = telos(dir, &["change", "approve", id, "--json"])
         .output()
@@ -1016,12 +1053,12 @@ fn bind_records_a_new_file_with_the_canonical_result() {
             "ok": true,
             "command": "bind",
             "result": {
-                "change": "CHG-0001",
+                "change": "CHG-00000000-0000-0000-0000-000000000001",
                 "path": NEW_CODE_FILE,
                 "intent": BOUND_INTENT,
             },
             "error": null,
-            "next_actions": ["telos change reconcile CHG-0001"]
+            "next_actions": ["telos change reconcile CHG-00000000-0000-0000-0000-000000000001"]
         })
     );
 }
@@ -1060,7 +1097,7 @@ fn bind_moves_the_owner_to_implementing() {
     assert_eq!(envelope["result"]["state"], json!("changing"));
     assert_eq!(
         envelope["result"]["changes"],
-        json!([{ "id": "CHG-0001", "status": "implementing", "obligations": ["reconcile"] }])
+        json!([{ "id": "CHG-00000000-0000-0000-0000-000000000001", "status": "implementing", "obligations": ["reconcile"] }])
     );
 }
 
@@ -1069,8 +1106,15 @@ fn bind_moves_the_owner_to_implementing() {
 #[test]
 fn bind_leaves_the_approval_fresh() {
     let tmp = approved_owning_int_0042();
-    let approved_digest = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"])["result"]
-        ["approved_digest"]
+    let approved_digest = run_json(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )["result"]["approved_digest"]
         .clone();
     fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
 
@@ -1078,7 +1122,15 @@ fn bind_leaves_the_approval_fresh() {
         .output()
         .unwrap();
 
-    let envelope = run_json(tmp.path(), &["change", "diff", "CHG-0001", "--json"]);
+    let envelope = run_json(
+        tmp.path(),
+        &[
+            "change",
+            "diff",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    );
     assert_eq!(envelope["result"]["stale"], json!(false));
     assert_eq!(envelope["result"]["approved_digest"], approved_digest);
     assert_eq!(envelope["result"]["status"], json!("implementing"));
@@ -1199,11 +1251,13 @@ fn bind_on_a_drafted_owner_asks_for_the_approval_first() {
     assert_eq!(error["code"], json!("TELOS_CHANGE_STATE_INVALID"));
     assert_eq!(
         error["message"],
-        json!("change CHG-0001 is not approved; approve it first")
+        json!("change CHG-00000000-0000-0000-0000-000000000001 is not approved; approve it first")
     );
     assert_eq!(
         error["hint"],
-        json!("run `telos change diff CHG-0001` then `telos change approve CHG-0001`")
+        json!(
+            "review the plan owning CHG-00000000-0000-0000-0000-000000000001, approve its digest, then run `telos plan task start <plan> <task>`"
+        )
     );
 }
 
@@ -1311,7 +1365,7 @@ fn bind_refuses_unclaimed_drift_elsewhere() {
 fn bind_on_an_intent_only_the_open_change_knows_about() {
     let tmp = with_fixture();
     open_change(tmp.path());
-    let new_intent = stage_new_intent(tmp.path(), "CHG-0001");
+    let new_intent = stage_new_intent(tmp.path(), "CHG-00000000-0000-0000-0000-000000000001");
     approve(tmp.path());
     fs::write(tmp.path().join(NEW_CODE_FILE), "// new\n").unwrap();
 
@@ -1323,7 +1377,7 @@ fn bind_on_an_intent_only_the_open_change_knows_about() {
     assert_eq!(
         json_stdout(&out)["result"],
         json!({
-            "change": "CHG-0001",
+            "change": "CHG-00000000-0000-0000-0000-000000000001",
             "path": NEW_CODE_FILE,
             "intent": new_intent,
         })

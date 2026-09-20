@@ -71,7 +71,7 @@ where
     project.parsed = scan.parsed;
     require_no_unclaimed_drift(&project)?;
     require_no_open_changes(&project)?;
-    let snapshot = ViewSnapshot::build(&project.state, &model);
+    let snapshot = ViewSnapshot::build(&project.state, &model).with_work(&project.ws.repo_root)?;
     let files = export_snapshot(&snapshot, destination.as_ref())?;
     let files: Vec<String> = files
         .iter()

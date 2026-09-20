@@ -68,6 +68,7 @@ fn stage(ctx: &Ctx, change: &str, raw: &str) -> CmdResult {
     let project = project(ctx)?;
     require_no_unclaimed_drift(&project)?;
     let mut change = read_change(&project.ws, id)?;
+    telos_core::plans::actions::require_change_contract(&project.ws.repo_root, &change, false)?;
     if !matches!(change.status, ChangeStatus::Open | ChangeStatus::Drafted) {
         return Err(TelosError::new(
             ErrorCode::TelosChangeStateInvalid,

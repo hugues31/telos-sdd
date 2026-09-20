@@ -355,7 +355,7 @@ fn invoicing_owner() -> Owner {
 
 fn drafted_change(id: u32, ops: Vec<StagedOp>) -> Change {
     Change {
-        id: ChangeId(id),
+        id: ChangeId(id.into()),
         motivation: "x".to_string(),
         status: ChangeStatus::Drafted,
         approved_digest: None,
@@ -482,7 +482,8 @@ fn compute_state_reports_an_unparseable_change_file_as_changing_with_an_abandon_
 
     fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
     fs::write(
-        tmp.path().join("telos/changes/CHG-0001.tel"),
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"),
         b"\x00not even a change file{{{".as_slice(),
     )
     .unwrap();
@@ -497,7 +498,7 @@ fn compute_state_reports_an_unparseable_change_file_as_changing_with_an_abandon_
         vec![ChangeSummary {
             id: ChangeId(1),
             status: "open".to_string(),
-            obligations: vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()],
+            obligations: vec!["abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel is unparseable)".to_string()],
         }]
     );
 }
@@ -515,7 +516,8 @@ fn compute_state_reports_invalid_utf8_change_bytes_as_changing_never_an_error() 
 
     fs::create_dir_all(tmp.path().join("telos/changes")).unwrap();
     fs::write(
-        tmp.path().join("telos/changes/CHG-0001.tel"),
+        tmp.path()
+            .join("telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel"),
         b"\xff\xfe garbage".as_slice(),
     )
     .unwrap();
@@ -530,7 +532,7 @@ fn compute_state_reports_invalid_utf8_change_bytes_as_changing_never_an_error() 
         vec![ChangeSummary {
             id: ChangeId(1),
             status: "open".to_string(),
-            obligations: vec!["abandon (telos/changes/CHG-0001.tel is unparseable)".to_string()],
+            obligations: vec!["abandon (telos/changes/CHG-00000000-0000-0000-0000-000000000001.tel is unparseable)".to_string()],
         }]
     );
 }

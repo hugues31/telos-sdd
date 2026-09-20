@@ -32,7 +32,7 @@ fn version_flag_prints_telos_version() {
     telos(tmp.path(), &["--version"])
         .assert()
         .success()
-        .stdout("telos 0.14.0\n");
+        .stdout(concat!("telos ", env!("CARGO_PKG_VERSION"), "\n"));
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn version_subcommand_prints_telos_version() {
     telos(tmp.path(), &["version"])
         .assert()
         .success()
-        .stdout("telos 0.14.0\n");
+        .stdout(concat!("telos ", env!("CARGO_PKG_VERSION"), "\n"));
 }
 
 #[test]
@@ -54,7 +54,10 @@ fn version_subcommand_json_reports_the_crate_version() {
         "expected exit 0, got {:?}",
         out.status
     );
-    assert_eq!(json_stdout(&out)["result"]["version"], json!("0.14.0"));
+    assert_eq!(
+        json_stdout(&out)["result"]["version"],
+        json!(env!("CARGO_PKG_VERSION"))
+    );
 }
 
 // --- init: the happy path ----------------------------------------------

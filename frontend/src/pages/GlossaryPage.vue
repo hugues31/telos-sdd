@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import HistoryPanel from '../components/HistoryPanel.vue';
 import { computed, ref } from 'vue';
 
 import EmptyState from '../components/EmptyState.vue';
@@ -93,6 +94,7 @@ const groups = computed(() => groupNotions(filteredNotions.value));
               <KindPill :kind="notion.kind" />
             </header>
             <p>{{ notion.definition }}</p>
+          <HistoryPanel :target="notion.name" />
 
             <div class="glossary-card__consumers">
               <h4>Used by</h4>

@@ -333,8 +333,8 @@ fn lock_write_renders_sealed_by_as_a_change_id_string() {
     let text = fs::read_to_string(&path).unwrap();
 
     assert!(
-        text.contains("sealed_by = \"CHG-0007\""),
-        "expected sealed_by = \"CHG-0007\", got:\n{text}"
+        text.contains("sealed_by = \"CHG-00000000-0000-0000-0000-000000000007\""),
+        "expected sealed_by = \"CHG-00000000-0000-0000-0000-000000000007\", got:\n{text}"
     );
 }
 

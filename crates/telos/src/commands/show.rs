@@ -91,7 +91,7 @@ fn show_capability(model: &TelosModel, id: &CapabilityRef) -> CmdResult {
     ))
 }
 
-/// `show CHG-0001`: the change's own fields, its ops as descriptors, and
+/// `show CHG-00000000-0000-0000-0000-000000000001`: the change's own fields, its ops as descriptors, and
 /// the text of its file.
 ///
 /// `canonical` is the file's actual bytes (the result schema: "the file text"),
@@ -106,7 +106,7 @@ fn show_capability(model: &TelosModel, id: &CapabilityRef) -> CmdResult {
 /// when it matters.
 ///
 /// The parse is still what produces `entity`: [`read_change`] is what turns
-/// an unknown id into the store's “unknown change `CHG-9999`” and a
+/// an unknown id into the store's “unknown change `CHG-00000000-0000-0000-0000-00000000270f`” and a
 /// corrupted one into a parse error, so nothing here reports fields off a
 /// file it did not first validate.
 ///

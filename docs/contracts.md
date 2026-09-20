@@ -1,30 +1,47 @@
-# telos CLI contracts
+# Telos CLI contracts
 
-This document is the frozen reference for everything an agent or other tool
-routes on without interpretation: the `--json` envelope shape, the 18 error
-codes and their canonical hints, the `status --json` schema, `check`'s
-semantics, and the whole change/transaction surface (`show`,
-`change open|list|abandon|diff|approve|reconcile`,
-`add`/`edit`/`remove`, `adopt`, `revert`), including the JSON payload
-schemas `add`/`edit` read from stdin. The 0.7 freeze also includes typed
-configuration, live/export view, rebuild planning/progress, and resumable
-GitHub CI initialization. Nothing here is prose to be summarized by an LLM —
-it is matched on literally (`error.code ==
-"TELOS_DRIFT_DETECTED"`, `result.state == "drifted"`), the same way a
-compiler's exit code is.
+This document describes **0.15.0**. Native plans govern all repository changes;
+there is no migration from earlier workspace formats. See [Native plans](plans.md)
+for the complete workflow and [the implementation design](superpowers/specs/2026-09-20-native-plans-resume-provenance-design.md)
+for record invariants and recovery behavior.
 
-Everything below is locked by a test in `crates/telos/tests/`. If this
-document and the code ever disagree, the code is the bug — but so is a
-future change to the code that isn't reflected here.
+## Native plan authority
 
-## Inspection scope metadata: additive contract revision in 0.14.0
+Every versioned repository file belongs to an approved plan task. A plan stores
+its brief, user decisions, blocking questions, scope, dependency graph,
+specification deltas, validations and append-only progress in `telos/plans/`.
+The dedicated `telos-brainstormer` runs before the challenger for new requests.
 
-`status.result.coverage_scope` and successful `check.result.scope` are new
-required metadata in this revision. Existing result fields, counter meanings,
-error codes, and the five-key envelope remain unchanged. Consumers that
-validate the exact set of result keys must update their schemas; consumers
-should allow additional result metadata. This is an explicit extension of
-the previously frozen result schemas, not a change to validation or proof gates.
+`plan open`, `edit`, `diff`, `approve`, `resume`, `checkpoint`, `pause`, `continue`,
+`cancel`, `verify`, `complete`, `integrate` and `task prepare|import|start|finish|block|unblock`
+are first-class commands. A new revision invalidates approval; checkpoints do not.
+Only one task executes per worktree. Covered changes inherit plan approval.
+Approved deltas cannot be extended by staging more operations. Completed tasks
+are immutable. A 100% task count still requires final validation and completion.
+
+Plan, change, event and entity identities are UUIDs. A plan-local task uses
+`TSK-NNN`. `--request-id` replays completed mutations with matching input;
+`--expected-version` detects stale journal writes. Interrupted runners are
+unknown until explicitly inspected/retried. `plan resume` does not run tests.
+
+Receipts in `telos/history/` retain reconciled changes, semantic entity identities,
+file transitions, dates, tasks and approval digests. `telos/ledger.tel` is replayed
+and verified from the observed baseline. `history` and `show --history` expose
+that provenance. Initialization records observation, never an invented past
+implementation date. A completed task's successor can change an entity while
+retaining its identity; deletion and recreation create a new identity.
+
+`check --planned --base <trusted-SHA>` verifies repository attribution and
+historical prefixes. The initial bootstrap must be reviewed as a trusted baseline.
+Generated work records are validated by their protocol; ordinary files under
+those directories remain governed. No SQLite state is needed for recovery.
+
+A durable journal publishes specification, seal, receipt, ledger, plan progress
+and change removal together. `recover` completes a committed publication or
+removes an uncommitted preparation. Conflicting external bytes are preserved.
+
+Inspection metadata distinguishes disk validation from pending overlays:
+`coverage_scope` and `checked_scope` are descriptive and never certify a draft.
 
 ## The `--json` envelope
 
@@ -75,8 +92,8 @@ envelope surface.
 |---|---|
 | `version` | `telos version` |
 | `init` | `telos init` |
-| `config` | `telos config [--change CHG-NNNN]` |
-| `map` | `telos map [--change CHG-NNNN]` |
+| `config` | `telos config [--change CHG-<uuid>]` |
+| `map` | `telos map [--change CHG-<uuid>]` |
 | `status` | `telos status` |
 | `view` | `telos view [--port N] [--export DIR] [--open]` |
 | `check` | `telos check [--sealed]` |
@@ -91,9 +108,12 @@ envelope surface.
 | `edit` | `telos edit` |
 | `move` | `telos move` |
 | `remove` | `telos remove` |
-| `adopt` | `telos adopt [--into CHG-NNNN] [--expected-state SHA256]` |
+| `adopt` | `telos adopt [--into CHG-<uuid>] [--expected-state SHA256]` |
 | `revert` | `telos revert [--expected-state SHA256]` |
 | `test` | `telos test` |
+| `plan` | `telos plan ...` |
+| `history` | `telos history [target]` |
+| `recover` | `telos recover` |
 | `bind` | `telos bind` |
 
 ### The error body
@@ -120,10 +140,10 @@ envelope surface.
 
 ## Error codes
 
-The eighteen codes below are stable. Strict TDD reconciliation uses
+The codes below are the current public set. Strict TDD reconciliation uses
 `TELOS_SCENARIO_RED_EXPECTED` and `TELOS_TEST_SEALED`; test discovery uses
-`TELOS_TEST_NOT_FOUND`. Variants are never renamed or removed, only added —
-this is the whole contract agent tooling routes on.
+`TELOS_TEST_NOT_FOUND`. Consumers route on codes rather than message wording. Breaking changes are
+explicitly allowed during 0.x releases.
 
 ### Canonical error-code set
 
@@ -138,6 +158,8 @@ this is the whole contract agent tooling routes on.
 | `TELOS_CONSTRAINT_FAILED` |
 | `TELOS_CHANGE_STATE_INVALID` |
 | `TELOS_FILE_CLAIMED` |
+| `TELOS_LAYOUT_VIOLATION` |
+| `TELOS_CONTEXT_BOUNDARY_VIOLATION` |
 | `TELOS_NOT_INITIALIZED` |
 | `TELOS_ALREADY_INITIALIZED` |
 | `TELOS_PARSE_ERROR` |
@@ -147,19 +169,31 @@ this is the whole contract agent tooling routes on.
 | `TELOS_INTERNAL` |
 | `TELOS_TEST_NOT_FOUND` |
 | `TELOS_TEST_NOT_EXECUTED` |
+| `TELOS_PLAN_REQUIRED` |
+| `TELOS_PLAN_NOT_APPROVED` |
+| `TELOS_PLAN_SCOPE_VIOLATION` |
+| `TELOS_PLAN_DEPENDENCY_UNMET` |
+| `TELOS_PLAN_VALIDATION_FAILED` |
+| `TELOS_PLAN_VERSION_STALE` |
+| `TELOS_REQUEST_ID_CONFLICT` |
+| `TELOS_UNPLANNED_CHANGE` |
+| `TELOS_RECOVERY_REQUIRED` |
+| `TELOS_RECOVERY_CONFLICT` |
+| `TELOS_HISTORY_CONFLICT` |
+| `TELOS_WORKSPACE_BUSY` |
 
 ### Detailed emission cases
 
 | Emission | When | Hint |
 |---|---|---|
-| `TELOS_DRIFT_DETECTED` | The project's state is `drifted` — *not* merely "not `coherent`": a `changing` project (an open change, nothing unclaimed) does **not** trigger this code, only genuine unclaimed drift does (a sealed path modified or missing, or an unsealed spec file on disk). Emitted by `check --sealed`; it also gates `change open`, `add`/`edit`/`remove`, `change approve`, and `change reconcile` *without* `--full` (`--full` never reads the lock, so it is exempt — see the `change reconcile` section below). `change diff`/`list`/`abandon`, `status`, `check` without `--sealed`, and `show` never gate on it — they read, or they clean up, and a drifted project is exactly when a caller needs them most. | `` run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert` `` |
-| `TELOS_APPROVAL_STALE` | `change reconcile`'s digest gate: a change's approval no longer matches its ops digest, because the delta was staged into again (`add`/`edit`/`remove`) after `telos change approve` — staging into an approved change is deliberately allowed. | `` re-approve with `telos change approve CHG-0001` `` (id-carrying, not a bare instruction to re-run `diff`) |
+| `TELOS_DRIFT_DETECTED` | The project's state is `drifted` — *not* merely "not `coherent`": a `changing` project (an open change, nothing unclaimed) does **not** trigger this code, only genuine unclaimed drift does (a sealed path modified or missing, or an unsealed spec file on disk). Whole-repository `check --sealed` may report `TELOS_UNPLANNED_CHANGE` first; functional drift also gates `change open`, `add`/`edit`/`remove`, `change approve`, and `change reconcile` *without* `--full` (`--full` never reads the lock, so it is exempt — see the `change reconcile` section below). `change diff`/`list`/`abandon`, `status`, `check` without `--sealed`, and `show` never gate on it — they read, or they clean up, and a drifted project is exactly when a caller needs them most. | `` run `telos status` to see drifted paths; capture with `telos adopt` or restore with `telos revert` `` |
+| `TELOS_APPROVAL_STALE` | `change reconcile`'s digest gate: a change's approval no longer matches its ops digest, because its reviewed revision or baseline changed. Staging into an approved task is refused. | `` review and approve a fresh plan revision `` (id-carrying, not a bare instruction to re-run `diff`) |
 | `TELOS_REFERENCE_UNKNOWN` | A reference in the spec — a notion, an attribute, an enum symbol, or an intent/scenario/constraint id — does not resolve. Emitted by the semantic pass on `load_model` and also rejected at write time (`add`/`edit` payloads and the whole delta a staged change describes). | None. The engine folds its best guess directly into `message` (`` ; closest is `Invoice` ``) when one is close enough; there is nothing to add. |
 | `TELOS_REFERENCE_UNKNOWN` | A `show`/`impact` argument, or `query`'s `--using`/`--triggered-by`, is a well-formed id or notion name that resolves to nothing in the loaded spec (message `` unknown notion `Invoice` ``, `` unknown intent `INT-9999` ``, `` unknown scenario `SCN-9999` ``, or `` unknown constraint `CON-9999` ``). | `` closest is `Invoice` `` (edit distance, for a notion name, backtick-quoted) or `closest is INT-0042` (numeric distance, for a typed id, *not* backtick-quoted) — present only when a candidate is close enough; `null` otherwise. |
 | `TELOS_REFERENCE_UNKNOWN` | A `show`/`impact` argument is neither a typed id nor a valid notion name at all (message `` cannot parse `x` as an id or notion name ``). | None. |
 | `TELOS_REFERENCE_UNKNOWN` | An `impact` argument names a change (`CHG-…`) — a change is a transaction record, not a node of the spec graph, so it has no relations to walk (message `` `impact` does not apply to changes ``). `show CHG-…`, unlike `impact`, *does* resolve — it reads the change store directly rather than the graph; see the `show` section below. | None. |
-| `TELOS_REFERENCE_UNKNOWN` | `change abandon`/`change diff`/`change approve`/`change reconcile <id>`/`add\|edit\|remove --change`/`adopt --into` is given a value that does not even parse as a `CHG-NNNN` id — a distinct, earlier check from the next row's "well-formed but unknown" (message `` cannot parse `x` as a change id ``). The same family covers `edit`/`remove`'s `<key>` argument for an intent or a constraint (message `` cannot parse `x` as an intent id `` / `` cannot parse `x` as a constraint id ``) and a notion (message `` cannot parse `x` as a notion name ``) — one dedicated message per expected kind, since the command already knows which kind it asked for. | None. |
-| `TELOS_REFERENCE_UNKNOWN` | `show`/`change abandon`/`change diff`/`change approve`/`change reconcile <id>`/`add\|edit\|remove --change`/`adopt --into` name a well-formed `CHG-NNNN` id the store does not hold (message `` unknown change `CHG-9999` ``). | `closest is CHG-0001` (numeric distance) — present only when another change exists; `null` otherwise. |
+| `TELOS_REFERENCE_UNKNOWN` | `change abandon`/`change diff`/`change approve`/`change reconcile <id>`/`add\|edit\|remove --change`/`adopt --into` is given a value that does not even parse as a `CHG-<uuid>` id — a distinct, earlier check from the next row's "well-formed but unknown" (message `` cannot parse `x` as a change id ``). The same family covers `edit`/`remove`'s `<key>` argument for an intent or a constraint (message `` cannot parse `x` as an intent id `` / `` cannot parse `x` as a constraint id ``) and a notion (message `` cannot parse `x` as a notion name ``) — one dedicated message per expected kind, since the command already knows which kind it asked for. | None. |
+| `TELOS_REFERENCE_UNKNOWN` | `show`/`change abandon`/`change diff`/`change approve`/`change reconcile <id>`/`add\|edit\|remove --change`/`adopt --into` name a well-formed `CHG-<uuid>` id the store does not hold (message `` unknown change `CHG-00000000-0000-0000-0000-00000000270f` ``). | `closest is CHG-00000000-0000-0000-0000-000000000001` (numeric distance) — present only when another change exists; `null` otherwise. |
 | `TELOS_SCENARIO_RED_EXPECTED` | `reconcile` under `policy.tdd = "strict"` requires an intact sealed red witness for a scenario before its green run; none exists. | Run `telos test SCN-…` to record a red witness before implementing. |
 | `TELOS_TEST_SEALED` | The bytes of a test file sealed as a red witness changed before the scenario went green — the witness no longer proves anything. | The red witness is invalid; run `telos test SCN-…` again on the current bytes before reconciling. |
 | `TELOS_TEST_NOT_FOUND` | No `[test] cmd` is configured; discovery finds zero or more than one file containing the scenario's `scn_NNNN` convention; or `--file` names no file. | The exact cases follow this table. |
@@ -168,11 +202,11 @@ this is the whole contract agent tooling routes on.
 | `TELOS_TEST_NOT_EXECUTED` | Gate 11 or `--full` with `[test] report` configured: a run's report does not prove an impacted (respectively active) scenario (message `` the test run for `<target>` did not execute SCN-NNNN: <reason> ``, `<target>` being `the whole suite` under `--full`). | `` run the configured executable with the displayed arguments and inspect the report, then reconcile again `` |
 | `TELOS_ORPHAN_CODE` | `change reconcile`'s unbound-code gate, evaluated over the delta's post model: a file matched by `[code]`/`[tests]` globs in `telos.toml` is not covered by any `implements`/`proves` binding (message names which of the two families and the binding relation it's missing). | Bind it with `telos bind <path> <INT-id>`, or remove it from the `telos.toml` globs if it isn't spec-governed. |
 | `TELOS_CONSTRAINT_FAILED` | `change reconcile`'s constraint-checks gate: a constraint's `check` shell command exited non-zero, or could not even be spawned (message `` CON-0001 check failed: `<cmd>` ``). The command's own output is deliberately *not* included — it is not reproducible across machines (a git version, a locale, `$PATH`), so it cannot be frozen contract. | Run the constraint's `check` command directly to see its output. |
-| `TELOS_CHANGE_STATE_INVALID` | `change reconcile <id>` on a change whose status is not `approved`/`implementing` (message `` change CHG-0001 is not approved; approve it first ``). | `` run `telos change diff CHG-0001` then `telos change approve CHG-0001` `` |
-| `TELOS_CHANGE_STATE_INVALID` | `change approve` on a change with no staged ops — `open`, with nothing added yet (message `` change CHG-0001 has no staged operations ``). | `stage operations with telos add\|edit\|remove first` |
+| `TELOS_CHANGE_STATE_INVALID` | `change reconcile <id>` on a change whose status is not `approved`/`implementing` (message `` change CHG-00000000-0000-0000-0000-000000000001 is not approved; approve it first ``). | `` review the plan owning CHG-00000000-0000-0000-0000-000000000001, approve its digest, then run `telos plan task start <plan> <task>` `` |
+| `TELOS_CHANGE_STATE_INVALID` | `change approve` on a change with no staged ops — `open`, with nothing added yet (message `` change CHG-00000000-0000-0000-0000-000000000001 has no staged operations ``). | `stage operations with telos add\|edit\|remove first` |
 | `TELOS_CHANGE_STATE_INVALID` | `adopt`/`revert` run when the project has *not* drifted — both commands exist only to leave the drifted state (message `` nothing to adopt: the project has not drifted `` or `` nothing to revert: the project has not drifted ``). | `` run `telos status` to see the project's state `` |
 | `TELOS_CHANGE_STATE_INVALID` | `check --sealed` on a project that is `changing` — "sealed and unmodified" cannot be true while a change is open, and that is a different remedy from drift, hence its own code (message `open changes; reconcile or abandon them`). | `` run `telos change list` `` |
-| `TELOS_FILE_CLAIMED` | A file targeted by `add`/`edit`/`remove`, or by `adopt`'s plan, is already claimed by a different, concurrently open change — one file, one change (message `` <path> is already claimed by CHG-0001 `` — the path is **not** backtick-quoted inside the message). | `` reconcile or abandon CHG-0001 first, or work within it `` (id-carrying) |
+| `TELOS_FILE_CLAIMED` | A file targeted by `add`/`edit`/`remove`, or by `adopt`'s plan, is already claimed by a different, concurrently open change — one file, one change (message `` <path> is already claimed by CHG-00000000-0000-0000-0000-000000000001 `` — the path is **not** backtick-quoted inside the message). | `` reconcile or abandon CHG-00000000-0000-0000-0000-000000000001 first, or work within it `` (id-carrying) |
 | `TELOS_NOT_INITIALIZED` | No `telos/telos.toml` found walking up from the current directory. | `` run `telos init` at the repository root `` |
 | `TELOS_NOT_INITIALIZED` | `telos/telos.toml` exists, but `telos.lock` is missing (`status`, `check --sealed`). `telos init` always seals, so this is not "unsealed" — it's abnormal. | `` the project was never sealed; run `telos init` in a fresh repository or restore telos.lock from git `` |
 | `TELOS_ALREADY_INITIALIZED` | `telos init` run on a project that already has `telos/telos.toml`. | `` project already initialized; see `telos status` `` |
@@ -181,7 +215,7 @@ this is the whole contract agent tooling routes on.
 | `TELOS_INTEGRITY_VIOLATION` | An integrity violation with no dedicated hint: `seal` finding a binding to a code file that doesn't exist on disk, an entity declared twice, or `remove`/`adopt` leaving a still-referenced entity behind (`cannot remove <entity>: <referrer>`). | None today — `message` names the offending path or entity. |
 | `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s accept-OID gate: an `accept` op's path changed, or vanished, since `adopt` recorded its OID (message `` `<path>` changed since it was accepted `` or `` `<path>` was accepted but no longer exists ``). | `` re-run `telos adopt` to accept the current bytes of `<path>` `` |
 | `TELOS_INTEGRITY_VIOLATION` | `change reconcile`'s test gate: the `[test] cmd` run for an impacted scenario's `proves` target (or, under `--full`, the whole suite once when at least one intent is active) failed. Without `[test] report`, that run exited non-zero. With `[test] report` configured, a testcase named after the impacted (respectively active) scenario failed in that run's report (message `` the test run for `<target>` failed: `<substituted cmd>` ``). A runner that cannot be spawned, or a stale report that cannot be removed before the run, is `TELOS_INTERNAL` instead — `run_proof`'s own message — not this code. A full reconcile with only draft/deprecated intents invokes no runner. The command's own stdout/stderr is deliberately not included, for the same reproducibility reason as `TELOS_CONSTRAINT_FAILED`. | `run the configured executable with the displayed arguments, then reconcile again` |
-| `TELOS_CHANGE_STATE_INVALID` | `change approve <id> --expected-digest <digest>` reaches a mutation boundary whose live delta digest differs (message `` change CHG-0001 no longer matches the expected digest ``). The check is repeated after validation immediately before the write. | `` run `telos change diff` again and review the new digest `` |
+| `TELOS_CHANGE_STATE_INVALID` | `change approve <id> --expected-digest <digest>` reaches a mutation boundary whose live delta digest differs (message `` change CHG-00000000-0000-0000-0000-000000000001 no longer matches the expected digest ``). The check is repeated after validation immediately before the write. | `` run `telos change diff` again and review the new digest `` |
 | `TELOS_CHANGE_STATE_INVALID` | `adopt` or `revert` reaches a mutation boundary whose exact sealed lock plus sorted drift paths/kinds differs from `--expected-state` (message `` project drift no longer matches the expected state token ``). | `` run `telos status` again and review the new drift scope `` |
 | `TELOS_INTEGRITY_VIOLATION` | An `edit notion` payload changes the notion's `name` — a staged op cannot rename an entity, since the op's target path is derived from the entity's identity (message `` cannot rename notion `<from>` to `<to>` ``). | `` stage `remove notion <from>` and an `add` of the new one instead `` |
 | `TELOS_INTEGRITY_VIOLATION` | `adopt` cannot express the deletion of a file that carries no entity of its own: a bound code file (message `` cannot adopt: bound file `<path>` was deleted ``) or an unbound opaque file such as `telos.toml` (message `` cannot adopt: `<path>` was deleted ``). | `` restore it with `telos revert`, or remove its binding `` for a bound file; `` restore it with `telos revert` `` for an unbound one. |
@@ -269,7 +303,7 @@ reconcile (from the effective configuration), and `--full` all write
 - `changes` — open changes, best-effort (an unparseable change file still
   appears, with `status: "open"` and an `abandon` obligation, rather than
   blocking `status`). Contains one item per open change:
-  `{"id": "CHG-0007", "status": "implementing", "obligations": ["..."]}`.
+  `{"id": "CHG-00000000-0000-0000-0000-000000000007", "status": "implementing", "obligations": ["..."]}`.
   `obligations` is the frozen, status-keyed list of what remains — see the
   `change` section below.
 - `drift` — `null` when `state` isn't `"drifted"`; otherwise:
@@ -308,7 +342,7 @@ reconcile (from the effective configuration), and `--full` all write
 `["telos adopt --expected-state sha256:...", "telos revert --expected-state sha256:..."]`
 when `state` is `"drifted"`, using the exact same `drift.token` in both;
 `["telos change list"]` when `state` is `"changing"`, followed by one
-`telos change abandon CHG-NNNN` per open change whose file does not parse
+`telos change abandon CHG-<uuid>` per open change whose file does not parse
 (ascending by id) — the one command that can clear that change's obligation
 without a hand edit; `[]` when `"coherent"`.
 
@@ -400,7 +434,7 @@ requires job `sealed`.
 ## `show <id|Name>`
 
 Prints one entity's canonical block plus its relations. `target` is a typed
-id (`INT-0042`, `SCN-0107`, `CON-0003`, `CHG-0001`) or a bare notion name
+id (`INT-0042`, `SCN-0107`, `CON-0003`, `CHG-00000000-0000-0000-0000-000000000001`) or a bare notion name
 (`Invoice`); anything else is `` cannot parse `x` as an id or notion name ``
 (`TELOS_REFERENCE_UNKNOWN`, no hint).
 
@@ -437,8 +471,8 @@ id (`INT-0042`, `SCN-0107`, `CON-0003`, `CHG-0001`) or a bare notion name
   report — the key is still present, so a consumer reads every `show`
   answer the same way regardless of what it was pointed at.
 
-`show CHG-9999` (a change id the store does not hold) is
-`TELOS_REFERENCE_UNKNOWN`, `` unknown change `CHG-9999` ``, with a
+`show CHG-00000000-0000-0000-0000-00000000270f` (a change id the store does not hold) is
+`TELOS_REFERENCE_UNKNOWN`, `` unknown change `CHG-00000000-0000-0000-0000-00000000270f` ``, with a
 numeric-nearest hint when another change exists. `next_actions` is always
 `[]`.
 
@@ -514,7 +548,7 @@ run returns:
 
 ```json
 {"scenario":"SCN-0108","witness":"red|green",
- "test":"tests/billing.rs::scn_0108_x","change":"CHG-0001",
+ "test":"tests/billing.rs::scn_0108_x","change":"CHG-00000000-0000-0000-0000-000000000001",
  "command":"cargo nextest run --profile telos scn_0108_x",
  "evidence":"report|exit-status","executed":1}
 ```
@@ -525,7 +559,7 @@ testcases named after the scenario that ran (passed plus failed) under
 evidence word: `` run  SCN-0108 green "tests/billing.rs::scn_0108_x" "<oid>" report ``.
 
 Red returns `next_actions: ["telos test SCN-0108"]`; green returns
-`["telos change reconcile CHG-0001"]`. `test --all` witnesses every scenario
+`["telos change reconcile CHG-00000000-0000-0000-0000-000000000001"]`. `test --all` witnesses every scenario
 an open approved/implementing change owes, in scenario-id order, as
 `{"runs":[…]}`, and has no next action. It requires exactly one of a
 scenario and `--all` (usage errors remain exit 2 without an envelope).
@@ -631,10 +665,10 @@ an outside owner. The ownership change must add or edit the intent, never
 merely remove it. Its result is:
 
 ```json
-{"change":"CHG-0001","path":"src/billing/invoice.rs","intent":"INT-0042"}
+{"change":"CHG-00000000-0000-0000-0000-000000000001","path":"src/billing/invoice.rs","intent":"INT-0042"}
 ```
 
-`next_actions` is `["telos change reconcile CHG-0001"]`. Like `test`, bind
+`next_actions` is `["telos change reconcile CHG-00000000-0000-0000-0000-000000000001"]`. Like `test`, bind
 admits drift only of its exact claimed path, transitions `approved` to
 `implementing`, and leaves the approval digest fresh. Rebinding the identical
 `(path, intent)` pair is idempotent: it returns the same result and adds no
@@ -676,19 +710,16 @@ status-keyed list of what remains before a change is done
 A change file that fails to parse at all is a different, best-effort case
 (`open_change_infos`, not `Change::obligations`): it still gets an entry,
 `status: "open"`, empty `claims`, and the one-item obligations list
-`["abandon (telos/changes/CHG-NNNN.tel is unparseable)"]` — `abandon`
+`["abandon (telos/changes/CHG-<uuid>.tel is unparseable)"]` — `abandon`
 because it is the one command that clears it: the file is never repaired by
 hand, and `change abandon` does not need it to parse.
 
-### `change open <motivation>`
+### `change open <motivation> --plan <PLN-id> --task <TSK-id>`
 
-Allocates the next `CHG-NNNN`, writes an empty change. Gated on *unclaimed
-drift only* (`TELOS_DRIFT_DETECTED` when the project's state is `drifted`)
-— **not** on `changing`: a second, third, … change may `open` freely while
-another is already in flight, as long as nothing is unclaimed drift.
-
-`result`: `{"id": "CHG-0001", "status": "open"}`. `next_actions`:
-`["telos add intent --change CHG-0001"]`.
+Prepares the named task's draft change and returns `id`, `status`, `plan` and
+`task`. Missing ownership is `TELOS_PLAN_REQUIRED`. This is equivalent to
+`plan task prepare`; normal execution uses `plan task start` after approval.
+Multiple drafts can coexist, but only one task owns execution in a worktree.
 
 ### `change list`
 
@@ -703,16 +734,12 @@ available in every project state.
 
 ### `change abandon <id>`
 
-Deletes the change's file without reading it: abandoning means throwing
-the change away, and nothing about that decision depends on the file's
-content — so a change whose file no longer parses (a truncated write, a bad
-merge of `telos/changes/`) is abandoned like any other, instead of
-`TELOS_PARSE_ERROR` blocking the one command that can clear its obligation.
-A mistyped id still gets `` unknown change `CHG-9999` `` (from the delete
-itself), never a silent no-op. Not gated on drift — abandoning is one of the
-two ways out of a mess, not more mutation of the spec.
+Retains the complete draft bytes in the owning plan's abandonment event, then
+removes the open file atomically. It can retain an unparseable draft. Dirty
+repository work must first be resolved; abandoning does not discard user files.
+An unattached identity is `TELOS_PLAN_REQUIRED`.
 
-`result`: `{"id": "CHG-0001", "status": "abandoned"}`. `next_actions`: `[]`.
+`result`: `{"id": "CHG-<uuid>", "status": "abandoned"}`. `next_actions`: `[]`.
 
 ### `change diff <id>`
 
@@ -728,7 +755,7 @@ caller most needs to see it.
 `result`:
 ```json
 {
-  "id": "CHG-0001", "status": "drafted", "digest": "sha256:...",
+  "id": "CHG-00000000-0000-0000-0000-000000000001", "status": "drafted", "digest": "sha256:...",
   "approved_digest": null, "stale": false,
   "ops": [
     {"n": 1, "op": "add", "entity": "notion", "key": "Invoice",
@@ -738,47 +765,32 @@ caller most needs to see it.
 ```
 `before`/`after` are canonical emitted text — `null` for `remove`'s `after`
 and `accept`'s `after`, and `null` for `before` when the base holds nothing
-at that path yet. `next_actions`:
-`["telos change approve CHG-0001 --expected-digest sha256:..."]` while
-`status` is `open`/`drafted`, or while `stale` is `true`, using the exact
-`result.digest`; otherwise
-`["telos change reconcile CHG-0001"]`.
+at that path yet. For a prepared draft, `next_actions` names
+`telos plan task import <plan> <task>` and `telos plan diff <plan>`.
+A stale executing change points to plan resume and review. An unchanged
+approved or implementing change points to `telos change reconcile <change>`.
 
 ### `change approve <id> [--expected-digest SHA256]`
 
-Freezes the change's ops digest — the review a later `reconcile` checks the
-base against. Gated on drift, like `open`. Refuses a change with zero
-staged ops: `TELOS_CHANGE_STATE_INVALID`, `` change CHG-0001 has no staged
-operations ``, hint `stage operations with telos add|edit|remove first`.
-Idempotent otherwise. Re-approval accepts both `approved` and `implementing`
-changes, preserves the entering status in `result.status` (`approved` or
-`implementing`), refreshes `approved_digest` from the current ops digest, and
-makes the next `change diff` report `stale: false`. In particular,
-re-approving after implementation evidence was journalled never moves an
-`implementing` change backward to `approved`.
+Verifies the exact delta and inherited approval of the executing plan task.
+It cannot independently authorize work. Empty staged changes use native task
+start directly. A mismatched plan delta is `TELOS_PLAN_SCOPE_VIOLATION`.
+Repeating this verification preserves `approved` or `implementing` status and
+the existing evidence. New scope requires `plan pause`, `plan edit`, `plan diff`
+and a new `plan approve --expected-digest` before more implementation.
 
-Generated skills and guards must pass `--expected-digest` with the exact value
-just displayed by `change diff`; a missing or stale value fails closed at the
-guard, and the command rejects a mismatch with `TELOS_CHANGE_STATE_INVALID`.
-The canonical illustrated spelling is
-`telos change approve CHG-0001 --expected-digest sha256:...`.
-The CLI keeps a deliberate interactive-human compatibility route when the flag
-is omitted: it binds itself to the digest first read, validates, then re-reads
-and compares that digest at the mutation boundary. Omitting the flag never
-authorizes a delta saved during validation, but automation must not rely on
-this compatibility route.
-
-`result`: `{"id": "CHG-0001", "digest": "sha256:...", "status": "approved"|"implementing"}`.
-`next_actions`: `["telos change reconcile CHG-0001"]`.
+The sole human approval command is
+`telos plan approve PLN-<uuid> --expected-digest sha256:...`.
 
 ### `change reconcile <id>|--full`
 
-Applies an approved change (writes its spec files, reseals, deletes the
-change file) — or, given `--full` instead of an id, re-proves the whole
-project from the files on disk and reseals it regardless of what
-`telos.lock` currently says.
+Requires an approved executing task and its exact delta, baseline and whole-repository
+scope. Applies its change (writes spec files, reseals, retains a receipt and removes the
+open change file) — or, given `--full` instead of an id, re-proves the whole
+project from disk inside an approved recovery or integration task with an empty
+delta. Anonymous full reconciliation is refused.
 
-`result` per invocation: `{"id": "CHG-0001"|null, "full": false|true, "ops_applied": 3, "checks_run": 1, "tests_run": 0, "witness_warnings": []}`.
+`result` per invocation: `{"id": "CHG-00000000-0000-0000-0000-000000000001"|null, "full": false|true, "ops_applied": 3, "checks_run": 1, "tests_run": 0, "witness_warnings": []}`.
 `id` is `null` (present, never absent) under `--full`; `full` is `false` by
 construction for an id invocation (clap refuses an id and `--full`
 together). `next_actions`: always `["telos status"]`.
@@ -792,8 +804,8 @@ which only happens if the complaint is always the *first* thing wrong:
 | # | Gate | Refusal |
 |---|---|---|
 | 1 | drift (unclaimed paths only — a path *any* open change claims is expected to differ, that is a change in progress, not damage; what another change claims is admissible here but not sealable here, see the carry-over below) | `TELOS_DRIFT_DETECTED`, message names the drifted paths, same frozen hint as `check --sealed` |
-| 2 | status (`approved`/`implementing` only) | `TELOS_CHANGE_STATE_INVALID`, `` change CHG-0001 is not approved; approve it first `` |
-| 3 | digest (the delta must still be the one that was approved) | `TELOS_APPROVAL_STALE`, `` re-approve with `telos change approve CHG-0001` `` |
+| 2 | status (`approved`/`implementing` only) | `TELOS_CHANGE_STATE_INVALID`, `` change CHG-00000000-0000-0000-0000-000000000001 is not approved; approve it first `` |
+| 3 | digest (the delta must still be the one that was approved) | `TELOS_APPROVAL_STALE`, `` review and approve a fresh plan revision `` |
 | 4 | accepted bytes (each `accept` op's blob OID must still match) | `TELOS_INTEGRITY_VIOLATION`, `` `<path>` changed since it was accepted `` / `` `<path>` was accepted but no longer exists `` |
 | 5 | effective configuration validation, then the overlay (the delta's post-spec must parse, resolve references, validate active intents and events, type-check literals, and preserve referential integrity) | invalid globs/configuration use their exact `TELOS_PARSE_ERROR` or `TELOS_INTEGRITY_VIOLATION`; otherwise whatever `TELOS_*` diagnostic the semantic pass raises first |
 | 6 | no unbound code, evaluated over the post model | `TELOS_ORPHAN_CODE` |
@@ -813,19 +825,21 @@ Telos hashes their deterministic post-state and revalidates both tables
 immediately before and after lock publication; any later edit is observable as
 drift rather than silently becoming part of the successful seal.
 
-Only once gate 11 passes does anything reach disk: the spec `.tel` files
-(through the emitter, in staged order), then the canonical folded per-context
-`bindings.tel` files, then `telos.lock`, then the change file's deletion.
-If ordinary reconciliation returns an error during publication, it restores
-all files it attempted to write or remove to their pre-call bytes, including
-the prior lock and any moved/deleted spec files. Newly created files, including
-journal-derived bindings, are removed. The change is deleted last and remains
-open on failure, so the same reviewed delta can be retried after fixing the
-cause. Restoration does not require a writable Git object store. The original
-error code/message are retained; if restoration itself fails, the error hint
-names every path requiring recovery. This is returned-error rollback, not
-crash durability: process termination/power loss still require Git recovery;
-empty directories and unreachable Git objects may remain.
+Only once every gate passes does Telos publish the deterministic spec and
+bindings, functional lock, retained receipt, updated ledger and plan event,
+and open-change removal. One durable transaction records preimages and
+postimages before publication. A durable commit decision precedes publication. Each
+replacement is atomic and flushed; removing the manifest marks completion
+only after every postimage is durable.
+
+A preflight failure leaves repository content unchanged. An interrupted or
+partially published transaction remains recoverable in `telos/.runtime/`.
+Normal readers and writers refuse while it is pending. `telos recover` rolls
+it forward from the recorded bytes. If a path matches neither its preimage
+nor its postimage, recovery reports a conflict and preserves the external
+edit. Repeating recovery is safe. After successful recovery, resume the plan
+to inspect any command whose response was lost; an unknown runner outcome
+is never silently treated as a pass or automatically rerun.
 
 `counters.toml` is never touched by reconcile — every id a transaction spends
 was already persisted when the op was staged. Journal records are digest-inert:
@@ -852,72 +866,41 @@ one of the four sentences of the `test` section — and hint
 The seal records `proof_evidence = "report"` from the effective
 configuration.
 
-#### The carry-over: drift another open change claims is never sealed here
+#### Whole-repository scope and publication
 
-Gate 1 admits drift *any* open change claims, not just this one's — a
-concurrent change (an implementing change drifts its code files for
-its whole life) must not hold an unrelated reconcile hostage. The seal draws
-the line the gate does not: **a spec or code path that is both drifted and
-claimed by another open change is sealed at its previously sealed OID**, not
-re-hashed from disk — and stays out of the new lock entirely if the previous
-lock never held it (an adopted-but-unreconciled untracked file). The drift
-therefore survives the reconcile and resurfaces the moment the claiming
-change goes: `status` still reports it, still claimed (so the project is
-`changing`, not `coherent`), and `change abandon` on the claiming change
-turns it straight back into `drifted`. Bytes that arrived out of protocol are
-sealed by the change that reviews them — an `adopt`/`approve`/`reconcile` of
-their own — and by nothing else. A change's *own* claims are re-hashed
-normally: its ops have just rewritten them, which is the point.
-
-`--full` is the deliberate exception and stays unchanged: it re-proves the
-whole tree from disk and seals what it finds, open adopt-changes included.
-That is total proof, not a bypass — the drift it seals has passed every gate
-a spec on its own can be held to: the applicable gates below, plus the whole
-suite once when at least one intent is active, or no runner invocation when
-all intents are draft/deprecated. This is why `--full` is the exit from a
-conflicted lock.
+The full tracked inventory is checked independently of code/test globs, including
+ignored tracked files, symlinks, executable modes and submodules. Receipt
+publication binds exact before/after contents to the approved plan and task.
+The snapshot captured before checks/tests must still match after execution;
+the seal records the exact executed code/proof OIDs.
 
 #### `--full`
 
-Structurally skips gates 1–4, 7, and 8 rather than passing them vacuously: there is
-no change, so no drift/status/digest/accept-OID judgement to make, and
-`--full` deliberately never reads `telos.lock` at all — a lock left
-conflicted by a merge, or a spec tree that was never sealed, is exactly what
-it exists for. Gates 5, 6, 9, 10, and 11 run, but adapted to having no delta
-to filter against: configuration validates before 5's disk model; 6 (orphan
-code) is unchanged; 9 requires all active proof bindings and a runner; 10
-runs the `check` of **every** constraint that has one. Gate 11 invokes
-`[test] cmd` with `{filter}` empty exactly once when the model contains at
-least one active intent, and zero times when all intents are draft/deprecated.
-With `[test] report` configured that single run's report is judged for every
-active scenario that has a `proves` binding, in scenario-id order, with the
-same two refusals as gate 11 and `<target>` being `the whole suite`.
-`result.ops_applied` is always `0` under `--full` (no ops — nothing was
-staged, the state was simply found and re-proved). Open changes are
-tolerated and left untouched (their files, still open), and the seal this
-produces has `sealed_by: null` — no transaction produced it.
-
-Full reconcile uses the same pre-execution spec/code snapshot and post-run
-OID equality checks. Its lock is built directly from that proven snapshot;
-it never re-hashes changed post-test bytes into a successful seal.
+Full reconciliation requires an approved recovery or integration task with an
+empty delta. It validates the entire current model, binding coverage and all
+executable constraints. It runs the whole suite once for active intents and zero
+times for a draft-only corpus. It records a normal receipt, removes its owning
+change, and sets the lock's `sealed_by` to that change UUID. The command's `id`
+field remains null for a full invocation; the receipt and lock identify its owner.
+Use `init --from-spec` for explicit initialization of a copied current-format corpus.
+Historical receipts and imported branch records must be retained and verified.
 
 ## `add`/`edit`/`remove <notion|intent|constraint>`
 
 Stages one operation into an open change; nothing is written under `telos/`
 until that change's `reconcile`. `add`/`edit` read a JSON payload from
-stdin (see the payload schemas below); `remove` takes no payload. `--change CHG-0001` is
+stdin (see the payload schemas below); `remove` takes no payload. `--change CHG-00000000-0000-0000-0000-000000000001` is
 required on all three.
 
-**No status gate.** Staging is allowed on `open` (which becomes `drafted`
-on the first op), on `drafted`, and on an already-`approved` change too —
-nothing is lost by staging into an approved change: the approval's digest
-stays as it was, `change diff` starts reporting `stale: true`, and
-`reconcile` refuses with `TELOS_APPROVAL_STALE` until the change is
-re-approved. Staleness is `reconcile`'s gate to enforce, not staging's to
-forbid.
+Staging requires a prepared task in an editable draft plan revision. The
+first operation changes the prepared change from `open` to `drafted`.
+An executing approved task has an immutable specification delta; attempts
+to stage additional operations are refused. To change it, pause the plan,
+revise its task definition, obtain approval for the new digest, and resume.
+The existing approval never authorizes the revised delta.
 
-Gated on unclaimed drift (`TELOS_DRIFT_DETECTED`) — staging on top of a base
-nobody reviewed is refused the same way `change open` is.
+Ordinary staging also refuses unclaimed specification drift. A recovery task
+must explicitly capture and review an existing out-of-protocol delta.
 
 ### Claims: one file, one change
 
@@ -926,9 +909,9 @@ id/name, never of where a file happens to sit). A change's *claims* are the
 set of those paths across every op it holds (`add` then `edit` of the same
 entity claims it once, not twice). A second, different open change may not
 stage an op whose target path is already claimed: `TELOS_FILE_CLAIMED`,
-`` <path> is already claimed by CHG-0001 `` (the path is bare, not
+`` <path> is already claimed by CHG-00000000-0000-0000-0000-000000000001 `` (the path is bare, not
 backtick-quoted, inside the message), hint `` reconcile or abandon
-CHG-0001 first, or work within it ``. A path a change claims is that change
+CHG-00000000-0000-0000-0000-000000000001 first, or work within it ``. A path a change claims is that change
 in progress, not drift — `compute_state` never reports a claimed path as
 drifted, so nothing stops a caller from staging further into that *same*
 change, or from any command that reads rather than mutates.
@@ -937,7 +920,7 @@ change, or from any command that reads rather than mutates.
 
 `add`/`edit` result (the IDs below are illustrative):
 ```json
-{"change": "CHG-0001", "entity": "intent", "id": "INT-0043", "scenario_ids": ["SCN-0108"], "claims": ["telos/contexts/billing/capabilities/settlement/intents/INT-0043.tel"]}
+{"change": "CHG-00000000-0000-0000-0000-000000000001", "entity": "intent", "id": "INT-0043", "scenario_ids": ["SCN-0108"], "claims": ["telos/contexts/billing/capabilities/settlement/intents/INT-0043.tel"]}
 ```
 Ownership is required in the relevant creation payloads; it is not a separate
 field of the `add`/`edit` result. `pack` exposes structured intent ownership.
@@ -946,25 +929,17 @@ kind but `add intent`/`edit intent` growing a scenario). `claims` is the
 *whole change's* claim set with the new op counted, not just this op's own
 path. `remove`: the shorter `{"change", "entity", "id"}` — no
 `scenario_ids` or `claims`. `next_actions` is always
-`["telos change diff CHG-0001"]`.
+`["telos change diff CHG-00000000-0000-0000-0000-000000000001"]`.
 
 ### Counters (`telos/changes/counters.toml`)
 
-Four persisted high-water marks — `intent`, `scenario`, `constraint`,
-`change` — **never decremented**: an id, once handed out, is never handed
-out again, so `remove`ing an entity or abandoning the change that added it
-never frees its id for reuse. The file is only a fast path, never the
-single source of truth: every allocation computes a *floor* fresh from the
-sealed model, every open change's ops, and (for `change`) the change ids on
-disk plus the change that produced the current seal, then starts from
-`max(persisted, floor)` — so a stale or missing `counters.toml` self-heals
-on the very next allocation rather than ever reissuing an id. Of the three
-entity counters, only `add intent`, `add constraint`, and an `edit intent`
-that grows a scenario ever mint an id; notions are named, not numbered, so
-no notion op touches a counter. The fourth counter, `change`, is minted by
-two different commands: `change open` always, and `adopt` too — but only
-when it opens a *new* change; `adopt --into` spends no id, since the change
-it appends to was already allocated and persisted when it was opened.
+Intent, scenario and constraint numeric IDs retain persistent allocation floors
+from the model and staged operations. Change identities are random UUIDs; the
+`change` counter is diagnostic rather than an identity allocator. A reconciled
+or abandoned UUID cannot be reused. Plans, events and entity identities are also
+allocated independently, avoiding branch counter collisions. Staging publishes
+newly allocated entity counters and the corresponding delta in the same durable
+transaction, so a crash cannot leave a partially written counter file.
 
 ### Payload schemas (`add`/`edit`)
 
@@ -993,7 +968,7 @@ entity's current value. `remove <kind> <key>` takes no payload.
 The following creation payloads form a complete bootstrap, in document order.
 Start in a fresh Git repository with `telos init` and
 `telos change open "Settle invoices"`. Pass each JSON block unchanged on stdin
-to `telos add <kind> --change CHG-0001 --json`, using the entity kind named
+to `telos add <kind> --change CHG-00000000-0000-0000-0000-000000000001 --json`, using the entity kind named
 above the block. Read allocated IDs from each response; this empty-project
 example allocates `INT-0001`, `SCN-0001`, and `CON-0001`. These commands only
 stage a proposal: implementation, proof configuration and approval still
@@ -1106,77 +1081,25 @@ is newly allocated; a scenario of the base absent from the new list is
 dropped. `"check": null` on a constraint explicitly clears it (an absent
 `check` leaves it untouched). **`remove`**: no payload.
 
-## `adopt [--into CHG-NNNN] [--expected-state SHA256]` / `revert [--expected-state SHA256]`
+## `adopt --into <CHG-id> [--expected-state SHA256]` / `revert [--expected-state SHA256]`
 
-The two exits from drift are to capture it or throw it away. Both are
-gated the opposite way from every mutating command above —
-`TELOS_CHANGE_STATE_INVALID`, `` nothing to adopt: the project has not
-drifted `` / `` nothing to revert: the project has not drifted ``, hint
-`` run `telos status` to see the project's state `` — since both exist only
-to leave a `drifted` project, never a `coherent` or `changing` one.
+Adoption requires a prepared recovery-plan task, captures its functional delta,
+and leaves it for import and approval. It never silently approves existing
+unplanned work. Use `telos adopt --expected-state sha256:...` with `--into`.
+Restoration requires an approved executing recovery task and the current token:
+`telos revert --expected-state sha256:...`. Reconcile its recovery change afterward.
+The token includes the full repository inventory and the live blob OID of every
+present drift entry. A stale token refuses without restoring files.
 
-Generated skills and guards always take the token from the same `status`
-response and invoke `telos adopt --expected-state sha256:...` or
-`telos revert --expected-state sha256:...` (with `--into` before or after the
-token where applicable). The command re-scans changes and re-hashes the exact
-drift scope at the mutation boundary; a stale token refuses before allocation,
-write, restore, or deletion. As with approval, a direct human may deliberately
-omit the compatibility flag; that route binds itself to the first observed
-token and still repeats the boundary check. Agent automation fails closed when
-the flag is missing.
-
-### `adopt`
-
-Turns every *unclaimed* drifted path into one staged op (`edit`/`add`/
-`remove`/`accept`, chosen by where the path is and how it drifted) of a
-change — a new one, or `--into`'s existing one. Canonicalizing: the op
-carries the re-parsed entity, so `reconcile` writes back canonical bytes
-and whatever whitespace the out-of-protocol edit introduced never reaches
-the seal. After a successful `adopt` the project is `changing`, not
-`coherent` — the drift is claimed, not yet resealed.
-
-`result`: `{"change": "CHG-0002", "ops": 1, "paths": ["telos/contexts/billing/notions/Invoice.tel"]}`.
-`next_actions`: `["telos change diff CHG-0002", "telos change approve CHG-0002"]`.
-
-Four refusals, each handing the caller a next step (frozen wordings in the
-error-code table above): a drifted `.tel` file that no longer parses
-(`TELOS_PARSE_ERROR`, hint `` fix the file or run `telos revert` ``); the
-deletion of a file that carries no entity of its own — a bound code file or
-an opaque file like `telos.toml` (`TELOS_INTEGRITY_VIOLATION`); a `.tel`
-file whose declared entity belongs at another path
-(`TELOS_INTEGRITY_VIOLATION`); a *missing* entity file whose file name is
-not even a valid identity, so not even its deletion can be expressed
-(`TELOS_INTEGRITY_VIOLATION`, message `` cannot read an entity identity
-from `<path>` ``, hint `` restore `<path>` with `telos revert` ``).
-
-### `revert`
-
-The mirror image: every sealed path is restored from the blob its OID
-names, every unsealed path is deleted. Destructive (no undo beyond what git
-already holds) and not atomic (a failure part-way leaves what was already
-restored restored — strictly closer to the seal than where it started, and
-safe to re-run). Needs the sealed content in the object store, and every
-seal puts it there (`git hash-object -w` at `init` and at each reconcile),
-so a project sealed but never committed reverts like any other. The objects
-stay unreachable until a commit names them; should git prune them first
-(`gc.pruneExpire`, two weeks by default), or should the lock predate this
-behaviour, `revert` gets **`TELOS_GIT_ERROR`** (not
-`TELOS_INTEGRITY_VIOLATION` — a missing blob is git's own diagnosis, `git
-cat-file blob` failing, not a spec integrity one) with the frozen
-`MISSING_BLOB_HINT` rather than silently restoring nothing.
-
-Every restoration/deletion uses the same validated repository path contract
-as `bind`, plus capability-rooted no-follow mutation. A symlink or parent-path
-substitution therefore refuses and never writes the outside target.
-
-`result`: `{"restored": ["telos/contexts/billing/notions/Invoice.tel"], "deleted": []}`.
-`next_actions`: `["telos status"]`.
+Automatic restoration covers regular files. Symlink, submodule and mode changes
+remain governed and require explicit restoration within the recovery scope.
+Both commands preserve plan history; neither bypasses plan approval.
 
 ## `init [--agents claude,codex] [--ci github]`
 
 `init` still creates and seals the empty Telos tree. With `--agents`, its
 comma-delimited host list is sorted and deduplicated, then it installs the
-same three canonical skill files — `telos`, `telos-challenger`, and
+same four canonical skill files — `telos`, `telos-brainstormer`, `telos-challenger`, and
 `telos-implementer` — for each requested host. Claude receives them under
 `.claude/skills/`; Codex receives them under `.agents/skills/` plus a managed
 Telos block in `AGENTS.md`. Existing host configuration is parsed before any
@@ -1202,28 +1125,13 @@ and trust the repository `.codex` layer, and verify the exact
 Until that review and trust is complete, `.codex/hooks.json` and
 `.codex/rules/telos.rules` must be treated as inactive. Once active, the guard
 refuses direct agent writes to the repository `telos/` tree and accepts only
-CLI-mediated mutations. Generated Codex rules request native human
-confirmation for `telos change approve`, `telos adopt`, and `telos revert`.
-Fresh Codex integrations also install native `prompt` rules for the exact
-`rtk telos ...` and `rtk proxy telos ...` spellings of those three actions.
-These wrappers preserve the same required digest/state token and human
-prompt; other wrappers, wrapper options, nesting and compound commands are
-refused with an explicit native-rule-coverage diagnostic.
+CLI-mediated mutations. Ordinary repository writes require an approved task
+whose path scope covers the edit. Generated Codex rules request native human
+confirmation only for `telos plan approve`. The exact `rtk telos ...` and
+`rtk proxy telos ...` spellings have matching native prompt rules. Unsupported
+wrappers fail closed. The shipped RTK rules must be installed and trusted.
 
-For an existing installation, updating the binary alone does **not** enable
-RTK decisions: the guard requires the intact shipped
-[`codex-rtk.rules`](../crates/telos/assets/codex-rtk.rules) block in
-`.codex/rules/telos.rules`. Copy that block into the existing Telos-owned
-section without removing unrelated rules, then review/trust the repository
-rules as above. Missing/outdated blocks are refused explicitly. Do not rerun
-`init` on an already initialized project or relax prompting to `allow`.
-Until the block is installed and active, projects that mandate RTK need an
-explicit project-instruction exception for the three direct human-action
-commands. Other project commands can continue using RTK.
-
-Before approval, the challenger presents `change diff`’s `result.digest` and
-passes that exact value as `--expected-digest`; before adopt/revert, the router
-presents the relevant drift paths/token and passes the exact `--expected-state`.
+Before approval, the challenger presents `plan diff` and its exact digest.
 The rules themselves are static prompts, while the token is a command argument
 the guard verifies independently. A token-less, stale, compound, nested, or
 environment-wrapped human-action command fails closed. The generated work pack
@@ -1232,8 +1140,7 @@ whole-spec or host-specific prompt dump.
 
 For a canonical token-bound human-action command, the guard independently
 reads the current repository state before it permits a decision prompt:
-approval context is `change CHG-NNNN digest sha256:...`; adopt/revert context contains
-the sorted current drift paths and the sealed spec digest. It never uses an
+approval context identifies the plan, revision, scope and digest. It never uses an
 agent-supplied tool description for either value, and denies the action if it
 cannot resolve that context. Claude returns its supported PreToolUse `ask`
 decision with this context in the reason. The official Codex PreToolUse hook
@@ -1281,7 +1188,7 @@ sealed consumers refuse legacy locks that fail either predicate.
 | `rebuild plan` | allow | allow | allow | refuse: TELOS_DRIFT_DETECTED |
 | `rebuild status` | allow | allow | allow | refuse: TELOS_DRIFT_DETECTED |
 
-### `config [--change CHG-NNNN]`
+### `config [--change CHG-<uuid>]`
 
 Read mode starts as soon as `telos/telos.toml` can be discovered and parsed.
 It deliberately does not require or inspect `telos.lock`, project state, the
@@ -1341,7 +1248,7 @@ reconcile's globs, test runner, and TDD policy.
   "ok": true,
   "command": "config",
   "result": {
-    "change": "CHG-0001",
+    "change": "CHG-00000000-0000-0000-0000-000000000001",
     "path": "telos/telos.toml",
     "config": {
       "code": {"globs": ["src/**/*.rs"]},
@@ -1352,7 +1259,7 @@ reconcile's globs, test runner, and TDD policy.
     }
   },
   "error": null,
-  "next_actions": ["telos change diff CHG-0001"]
+  "next_actions": ["telos change diff CHG-00000000-0000-0000-0000-000000000001"]
 }
 ```
 
@@ -1397,6 +1304,8 @@ The SPA owns navigation. Its six frontend routes are:
 | Page | Hash route |
 |---|---|
 | Dashboard | `#/` |
+| Plans | `#/plans` |
+| Plan detail | `#/plan/PLN-<uuid>` |
 | Intents | `#/intents` |
 | Intent detail | `#/intent/INT-NNNN` |
 | Graph | `#/graph` |
@@ -1787,9 +1696,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Telos v0.14.0
+        with:
+          fetch-depth: 0
+      - name: Install Telos v0.15.0
         run: |
-          version=0.14.0
+          version=0.15.0
           asset="telos_${version}_linux_amd64.tar.gz"
           base="https://github.com/hugues31/telos-sdd/releases/download/v${version}"
           cd "$RUNNER_TEMP"
@@ -1799,13 +1710,15 @@ jobs:
           tar -xzf "${asset}"
           install -D -m 0755 telos "$HOME/.local/bin/telos"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Verify sealed Telos state
-        run: telos check --sealed
+      - name: Verify planned and sealed repository state
+        env:
+          TELOS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: telos check --sealed --planned --base "$TELOS_BASE"
 ```
 
 The downloaded release version is derived from the CLI package version.
-Shipping 0.14.0 therefore requires release `v0.14.0` to carry the
-`telos_0.14.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
+Shipping 0.15.0 therefore requires release `v0.15.0` to carry the
+`telos_0.15.0_linux_amd64.tar.gz` and `checksums.txt` assets; without them the
 generated install step cannot succeed. The workflow reports a check but does
 not itself make GitHub treat it as required: repository branch protection
 must separately require job `sealed` before merges.
@@ -1823,12 +1736,11 @@ already configured as `cargo test {filter}`.
 On the untouched copy, `rebuild plan` orders `INT-0017` before `INT-0042` and
 `rebuild status` returns `0/2` without launching a process because neither
 scenario has a proof target. The first seal uses the real CLI spelling
-`telos change reconcile --full --json`. With no active intent and no
-constraint `check`, it returns `tests_run: 0`, `checks_run: 0`, creates the
-lock, and leaves measured progress `0/2`.
+`telos init --from-spec --json`. It observes the current-format specification,
+creates its lock and bootstrap plan, and leaves measured progress `0/2`.
 
 An external `telos-implementer` then executes ordinary prerequisite-ordered
-batches. CHG-0001 stages a real complete `INT-0017` `draft` → `active` edit
+batches, each with an approved native plan. The first task stages a real complete `INT-0017` `draft` → `active` edit
 and adds the machine `CON-0003.check`. Outside `telos/`, the implementer
 chooses and creates its own Cargo/source/test solution from the bounded context;
 the demo README contains no manifest, source, test, or extractable solution
@@ -1836,12 +1748,12 @@ bytes. The batch records an unchanged red-to-green witness, binds every covered
 implementation input to the intent, records the discovered `proves`, and
 reconciles to `1/2`.
 
-CHG-0002 stages the real `INT-0042` `draft` → `active` edit and follows the
+The second task stages the real `INT-0042` `draft` → `active` edit and follows the
 same red/green/bind/reconcile lifecycle. Real forbidden `crate::adapters`
 imports make the constraint return exact `TELOS_CONSTRAINT_FAILED`; removing
 only those imports lets the same approved change reconcile to `2/2`.
-Every `[tests]` file has a canonical proof binding, both changes disappear,
-and final `telos check --sealed` plus `rebuild status` prove the reconstructed
+Every `[tests]` file has a canonical proof binding, both open changes become retained receipts,
+and final `telos check --sealed --planned` plus `rebuild status` prove the reconstructed
 tree. Rebuild proves behavioral conformity; source-byte identity depends on
 how fully constraints capture architecture.
 
@@ -1856,6 +1768,6 @@ or that the demo disclosed a preferred solution.
 | Checkpoint | Intent statuses | tests_run | checks_run | Rebuild status |
 |---|---|---|---|---|
 | untouched spec-only | draft, draft | no process | no process | 0/2 |
-| change reconcile --full bootstrap | draft, draft | 0 | 0 | 0/2 |
-| CHG-0001 reconciled | active, draft | one distinct scenario proof | staged architecture check | 1/2 |
-| CHG-0002 reconciled | active, active | one distinct scenario proof | architecture check | 2/2 |
+| init --from-spec bootstrap | draft, draft | 0 | 0 | 0/2 |
+| First task reconciled | active, draft | one distinct scenario proof | staged architecture check | 1/2 |
+| Second task reconciled | active, active | one distinct scenario proof | architecture check | 2/2 |

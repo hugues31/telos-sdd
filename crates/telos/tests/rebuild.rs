@@ -484,7 +484,13 @@ fn changing_plan_and_status_include_an_added_intent_and_its_green_journal_proof(
     assert!(ok, "open failed: {opened:#}");
     let out = telos(
         tmp.path(),
-        &["add", "intent", "--change", "CHG-0001", "--json"],
+        &[
+            "add",
+            "intent",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
     )
     .write_stdin(
         json!({
@@ -513,7 +519,15 @@ fn changing_plan_and_status_include_an_added_intent_and_its_green_journal_proof(
     assert_eq!(added["result"]["id"], json!("INT-0043"));
     assert_eq!(added["result"]["scenario_ids"], json!(["SCN-0108"]));
 
-    let (ok, approved) = run(tmp.path(), &["change", "approve", "CHG-0001", "--json"]);
+    let (ok, approved) = run(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    );
     assert!(ok, "approve failed: {approved:#}");
     let test_path = tmp.path().join("tests/billing.rs");
     let mut source = fs::read_to_string(&test_path).unwrap();
@@ -528,7 +542,10 @@ fn changing_plan_and_status_include_an_added_intent_and_its_green_journal_proof(
     let added_step = &plan["result"]["steps"][2];
     assert_eq!(added_step["intent"], json!("INT-0043"));
     assert_eq!(added_step["requires"], json!(["INT-0042"]));
-    assert_eq!(added_step["pack"]["change"], json!("CHG-0001"));
+    assert_eq!(
+        added_step["pack"]["change"],
+        json!("CHG-00000000-0000-0000-0000-000000000001")
+    );
     assert_eq!(added_step["pack"]["scenarios"][0]["proved"], json!(true));
     assert_eq!(
         added_step["pack"]["bindings"]["proves"],
@@ -561,13 +578,14 @@ fn changing_plan_and_status_include_an_added_intent_and_its_green_journal_proof(
 #[test]
 fn rebuild_status_uses_the_approved_staged_runner() {
     let tmp = with_fixture_mut(|root| {
+        fs::write(root.join(".staged-green"), "green\n").unwrap();
         fs::write(
             root.join("tests/billing.rs"),
             "fn scn_0091() {}\nfn scn_0107_full_payment_settles_the_invoice() {}\n",
         )
         .unwrap();
     });
-    fs::write(tmp.path().join(".staged-green"), "green\n").unwrap();
+
     let (ok, opened) = run(
         tmp.path(),
         &[
@@ -585,12 +603,28 @@ fn rebuild_status_uses_the_approved_staged_runner() {
         "policy": {"tdd": "strict"},
         "agents": {"hosts": []}
     });
-    let output = telos(tmp.path(), &["config", "--change", "CHG-0001", "--json"])
-        .write_stdin(payload.to_string())
-        .output()
-        .unwrap();
+    let output = telos(
+        tmp.path(),
+        &[
+            "config",
+            "--change",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    )
+    .write_stdin(payload.to_string())
+    .output()
+    .unwrap();
     assert!(output.status.success(), "stage failed: {output:?}");
-    let (ok, approved) = run(tmp.path(), &["change", "approve", "CHG-0001", "--json"]);
+    let (ok, approved) = run(
+        tmp.path(),
+        &[
+            "change",
+            "approve",
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "--json",
+        ],
+    );
     assert!(ok, "approve failed: {approved:#}");
 
     let envelope = success(tmp.path(), &["rebuild", "status", "--json"]);
@@ -667,11 +701,11 @@ fn multi_change_plan_uses_each_public_owner_overlay_pack() {
     assert_plan_packs_equal_public_pack(tmp.path(), &plan);
     assert_eq!(
         plan["result"]["steps"][0]["pack"]["change"],
-        json!("CHG-0001")
+        json!("CHG-00000000-0000-0000-0000-000000000001")
     );
     assert_eq!(
         plan["result"]["steps"][1]["pack"]["change"],
-        json!("CHG-0002")
+        json!("CHG-00000000-0000-0000-0000-000000000002")
     );
 }
 
@@ -704,9 +738,17 @@ fn invalid_only_change_is_rejected_by_plan_and_status() {
         let tmp = with_fixture();
         let (ok, opened) = run(tmp.path(), &["change", "open", "Broken", "--json"]);
         assert!(ok, "open failed: {opened:#}");
-        corrupt_change(tmp.path(), "CHG-0001", "lowest broken");
+        corrupt_change(
+            tmp.path(),
+            "CHG-00000000-0000-0000-0000-000000000001",
+            "lowest broken",
+        );
 
-        assert_parse_error_from(tmp.path(), subcommand, "CHG-0001");
+        assert_parse_error_from(
+            tmp.path(),
+            subcommand,
+            "CHG-00000000-0000-0000-0000-000000000001",
+        );
     }
 }
 
@@ -719,10 +761,22 @@ fn valid_and_invalid_changes_report_the_lowest_invalid_id_for_both_subcommands()
         assert!(ok, "second open failed: {second:#}");
         let (ok, third) = run(tmp.path(), &["change", "open", "Broken third", "--json"]);
         assert!(ok, "third open failed: {third:#}");
-        corrupt_change(tmp.path(), "CHG-0002", "lowest broken");
-        corrupt_change(tmp.path(), "CHG-0003", "later broken");
+        corrupt_change(
+            tmp.path(),
+            "CHG-00000000-0000-0000-0000-000000000002",
+            "lowest broken",
+        );
+        corrupt_change(
+            tmp.path(),
+            "CHG-00000000-0000-0000-0000-000000000003",
+            "later broken",
+        );
 
-        assert_parse_error_from(tmp.path(), subcommand, "CHG-0002");
+        assert_parse_error_from(
+            tmp.path(),
+            subcommand,
+            "CHG-00000000-0000-0000-0000-000000000002",
+        );
     }
 }
 
@@ -746,7 +800,7 @@ fn conflicting_changes_fail_with_the_first_deterministic_integrity_error() {
     assert_eq!(
         envelope["error"]["message"],
         json!(format!(
-            "telos/contexts/billing/capabilities/settlement/intents/{first_intent}.tel is claimed by both CHG-0001 and CHG-0002"
+            "telos/contexts/billing/capabilities/settlement/intents/{first_intent}.tel is claimed by both CHG-00000000-0000-0000-0000-000000000001 and CHG-00000000-0000-0000-0000-000000000002"
         ))
     );
 }
@@ -799,7 +853,7 @@ fn tree_bytes(root: &Path) -> BTreeMap<String, Vec<u8>> {
     fn collect(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         for entry in fs::read_dir(dir).unwrap() {
             let entry = entry.unwrap();
-            if entry.file_name() == ".git" {
+            if entry.file_name() == ".git" || entry.path() == root.join("telos/.runtime") {
                 continue;
             }
             if entry.file_type().unwrap().is_dir() {

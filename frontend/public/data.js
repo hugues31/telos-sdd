@@ -694,6 +694,9 @@ window.__TELOS_DATA__ = {
     mode: 'live',
   },
   snapshot: {
+    plans: [],
+    history: [],
+    unplanned: [],
     dashboard,
     coverage,
     contexts,

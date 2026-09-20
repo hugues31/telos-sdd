@@ -39,7 +39,7 @@ are provided by the new native plan protocol.
 
 ## Release verification
 
-- Rust workspace: 1,247 tests passed, including public CLI reconstruction,
+- Rust workspace: 1,248 tests passed, including public CLI reconstruction,
   interrupted-process recovery, fresh-clone resume, branch integration and
   trusted-base history checks.
 - Clippy with warnings denied and rustfmt checks passed.
@@ -51,3 +51,10 @@ are provided by the new native plan protocol.
 
 The workspace version is 0.15.0. Publish the implementation commit to `main`,
 verify the CI matrix, then push the `v0.15.0` tag to build the release archives.
+
+A Windows CI failure exposed platform-dependent resolution of relative runner
+executables when the core API is called from outside the repository. Explicit
+relative paths now resolve against the repository before spawning, for both
+scenario proofs and plan validators. A real-script regression covers a path
+with spaces, and Windows CI runs that check and report tests before the full
+workspace suite.

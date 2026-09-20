@@ -1,7 +1,7 @@
 //! Restartable task execution and evidence tied to exact repository bytes.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::{Value, json};
 
@@ -269,14 +269,14 @@ pub fn verify(
     )?;
     let (passed, details) = match &validation {
         Validation::Command { argv, .. } => {
-            match Command::new(&argv[0])
-                .args(&argv[1..])
-                .current_dir(root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-            {
+            match crate::exec::direct_command(&argv[0], root).and_then(|mut command| {
+                command
+                    .args(&argv[1..])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::inherit())
+                    .status()
+            }) {
                 Ok(status) => (
                     status.success(),
                     json!({"exit_code":status.code(),"argv":argv}),

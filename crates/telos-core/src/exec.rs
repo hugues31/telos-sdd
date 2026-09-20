@@ -51,6 +51,21 @@ pub fn run_shell(cmd: &str, cwd: &Path) -> Result<RunResult, TelosError> {
     Ok(run_result(output))
 }
 
+/// Explicit relative runner paths are rooted in the repository on every OS.
+/// `Command::current_dir` alone leaves their resolution platform-dependent.
+/// Bare program names retain the normal PATH lookup; arguments stay separate.
+pub(crate) fn direct_command(program: &str, cwd: &Path) -> std::io::Result<Command> {
+    let path = Path::new(program);
+    let executable = if path.is_relative() && path.components().count() > 1 {
+        std::path::absolute(cwd.join(path))?
+    } else {
+        path.to_path_buf()
+    };
+    let mut command = Command::new(executable);
+    command.current_dir(cwd);
+    Ok(command)
+}
+
 fn validate_filter_data(filter: &str) -> Result<(), TelosError> {
     if filter.chars().any(char::is_control) {
         return Err(TelosError::new(
@@ -332,10 +347,8 @@ pub fn run_proof(test: &TestCfg, filter: &str, repo_root: &Path) -> Result<Proof
         remove_stale_report(repo_root, path)?;
     }
 
-    let output = Command::new(&argv[0])
-        .args(&argv[1..])
-        .current_dir(repo_root)
-        .output()
+    let output = direct_command(&argv[0], repo_root)
+        .and_then(|mut command| command.args(&argv[1..]).output())
         .map_err(|e| {
             TelosError::new(
                 ErrorCode::TelosInternal,

@@ -477,3 +477,51 @@ fn nested_cmd_and_call_templates_fail_before_real_injection() {
     }
     assert!(!tmp.path().join("injected").exists());
 }
+
+#[test]
+fn run_proof_executes_repository_relative_scripts_from_another_directory() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("repository with spaces");
+    fs::create_dir(&root).unwrap();
+    let report = "<testsuite><testcase name=\"scn_0001\"/></testsuite>";
+    fs::write(root.join("fixture.xml"), report).unwrap();
+    #[cfg(windows)]
+    let program = {
+        fs::write(
+            root.join("runner.bat"),
+            "@echo off\r\ncopy /Y fixture.xml \"%~1\" >nul\r\nexit /b %errorlevel%\r\n",
+        )
+        .unwrap();
+        "./runner.bat"
+    };
+    #[cfg(not(windows))]
+    let program = {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("runner");
+        fs::write(&script, "#!/bin/sh\ncp fixture.xml \"$1\"\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        "./runner"
+    };
+    let run = run_proof(
+        &TestCfg {
+            cmd: format!("{program} \"{{report}}\" {{filter}}"),
+            report: "proof output.xml".into(),
+        },
+        "",
+        &root,
+    )
+    .unwrap();
+    assert_eq!(
+        run.status, 0,
+        "stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("proof output.xml")).unwrap(),
+        report
+    );
+    assert_eq!(
+        run.verdict(ScenarioId(1)),
+        telos_core::exec::ProofVerdict::Green { executed: Some(1) }
+    );
+}

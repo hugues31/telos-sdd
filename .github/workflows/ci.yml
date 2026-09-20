@@ -72,6 +72,14 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+      - name: Verify repository-relative Windows runners
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo test -p telos-core --test globs_exec run_proof_executes_repository_relative_scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p telos --test test_report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove spec-only Billing reconstruction
         if: runner.os == 'Linux'
         run: cargo test -p telos --test rebuild_demo

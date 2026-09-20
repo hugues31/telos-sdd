@@ -22,7 +22,7 @@ Approved product decisions:
 | Agent skills and guards | Complete | Brainstorming and inherited plan approval across supported hosts |
 | Web view and static export | Complete | Plans, progress, resume information and entity history |
 | Fixtures, acceptance tests and docs | Complete | Full Rust/frontend checks and reconstruction demo |
-| Version, commit, push and release | Ready to publish | 0.15.0 committed, pushed, release verified |
+| Version, commit, push and release | Complete | 0.15.0 committed, pushed, release verified |
 
 ## Implementation notes
 
@@ -49,8 +49,17 @@ are provided by the new native plan protocol.
   and attributed history. Navigation collapses before the additional Plans
   entry can overflow the header.
 
-The workspace version is 0.15.0. Publish the implementation commit to `main`,
-verify the CI matrix, then push the `v0.15.0` tag to build the release archives.
+Version 0.15.0 was published on September 20, 2026. Implementation commit
+`dea4b62` and runner correction `00704d9` are pushed to `main`; tag `v0.15.0`
+points to `00704d9700fe9124f0149da94576ab297082ef2f`.
+
+- [Release CI](https://github.com/hugues31/telos-sdd/actions/runs/35507427748)
+  passed on Linux, macOS and Windows.
+- [Archive publication](https://github.com/hugues31/telos-sdd/actions/runs/35508099379)
+  built all six platform/architecture archives and published checksums.
+- [Telos 0.15.0](https://github.com/hugues31/telos-sdd/releases/tag/v0.15.0)
+  is public. The downloaded Linux x64 archive matched its published SHA-256;
+  its executable reported `telos 0.15.0` and exposed the native plan commands.
 
 A Windows CI failure exposed platform-dependent resolution of relative runner
 executables when the core API is called from outside the repository. Explicit
